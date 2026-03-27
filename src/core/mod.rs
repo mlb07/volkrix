@@ -6,14 +6,17 @@ pub mod movelist;
 pub mod perft;
 pub mod piece;
 pub mod position;
+pub(crate) mod repetition;
+pub(crate) mod see;
 pub mod square;
 pub mod types;
+pub(crate) mod zobrist;
 
 pub use chess_move::{Move, ParseUciMoveError, ParsedMove};
 pub use fen::{FenError, STARTPOS_FEN};
 pub use movelist::MoveList;
 pub use perft::{divide, perft};
 pub use piece::{Piece, PieceType};
-pub use position::{MoveError, Position, UndoState};
+pub use position::{MoveError, Position, PositionStatus, UndoState};
 pub use square::{Square, SquareParseError};
 pub use types::{CastlingRights, Color, Depth, Score, Value};

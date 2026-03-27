@@ -7,8 +7,11 @@ use super::{
     },
     movelist::MoveList,
     piece::{Piece, PieceType},
+    repetition::RepetitionHistory,
+    see,
     square::Square,
-    types::{CastlingRights, Color},
+    types::{CastlingRights, Color, Value},
+    zobrist,
 };
 
 const PIECE_LIST_CAPACITY: usize = 16;
@@ -73,6 +76,8 @@ pub struct Position {
     en_passant: Option<Square>,
     halfmove_clock: u16,
     fullmove_number: u16,
+    zobrist_key: u64,
+    repetition_history: RepetitionHistory,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -83,6 +88,7 @@ pub struct UndoState {
     pub previous_en_passant: Option<Square>,
     pub previous_halfmove_clock: u16,
     pub previous_fullmove_number: u16,
+    pub previous_zobrist_key: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,6 +106,22 @@ pub(crate) struct CheckInfo {
     pub block_mask: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PositionStatus {
+    Ongoing,
+    Checkmate,
+    Stalemate,
+    DrawByRepetition,
+    DrawByFiftyMove,
+    DrawByInsufficientMaterial,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HistoryMode {
+    Persistent,
+    Transient,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MoveError {
     InvalidUciMove(String),
@@ -110,6 +132,7 @@ pub enum MoveError {
     IllegalCastle,
     InvalidPromotion,
     LeavesKingInCheck,
+    HistoryOverflow,
     IllegalMove(String),
 }
 
@@ -126,6 +149,7 @@ impl fmt::Display for MoveError {
             Self::IllegalCastle => f.write_str("illegal castling move"),
             Self::InvalidPromotion => f.write_str("invalid promotion move"),
             Self::LeavesKingInCheck => f.write_str("move leaves king in check"),
+            Self::HistoryOverflow => f.write_str("repetition history capacity exceeded"),
             Self::IllegalMove(value) => write!(f, "illegal move: {value}"),
         }
     }
@@ -135,7 +159,7 @@ impl Error for MoveError {}
 
 impl Position {
     pub fn empty() -> Self {
-        Self {
+        let mut position = Self {
             board: [None; 64],
             piece_bitboards: [[0; 6]; 2],
             piece_lists: [[SquareList::new(); 6]; 2],
@@ -146,7 +170,11 @@ impl Position {
             en_passant: None,
             halfmove_clock: 0,
             fullmove_number: 1,
-        }
+            zobrist_key: 0,
+            repetition_history: RepetitionHistory::empty(),
+        };
+        position.refresh_derived_state_from_scratch();
+        position
     }
 
     pub fn side_to_move(&self) -> Color {
@@ -167,6 +195,79 @@ impl Position {
 
     pub fn fullmove_number(&self) -> u16 {
         self.fullmove_number
+    }
+
+    pub fn zobrist_key(&self) -> u64 {
+        self.zobrist_key
+    }
+
+    pub fn is_draw_by_repetition(&self) -> bool {
+        self.repetition_history
+            .is_threefold_repetition(self.halfmove_clock)
+    }
+
+    pub fn is_draw_by_fifty_move(&self) -> bool {
+        self.halfmove_clock >= 100
+    }
+
+    pub fn is_insufficient_material(&self) -> bool {
+        if self.pieces(Color::White, PieceType::Pawn) != 0
+            || self.pieces(Color::Black, PieceType::Pawn) != 0
+            || self.pieces(Color::White, PieceType::Rook) != 0
+            || self.pieces(Color::Black, PieceType::Rook) != 0
+            || self.pieces(Color::White, PieceType::Queen) != 0
+            || self.pieces(Color::Black, PieceType::Queen) != 0
+        {
+            return false;
+        }
+
+        let white_knights = self.pieces(Color::White, PieceType::Knight).count_ones();
+        let black_knights = self.pieces(Color::Black, PieceType::Knight).count_ones();
+        let white_bishops = self.pieces(Color::White, PieceType::Bishop).count_ones();
+        let black_bishops = self.pieces(Color::Black, PieceType::Bishop).count_ones();
+        let total_minors = white_knights + black_knights + white_bishops + black_bishops;
+
+        matches!(
+            (
+                white_knights,
+                black_knights,
+                white_bishops,
+                black_bishops,
+                total_minors
+            ),
+            (0, 0, 0, 0, 0)
+                | (1, 0, 0, 0, 1)
+                | (0, 1, 0, 0, 1)
+                | (0, 0, 1, 0, 1)
+                | (0, 0, 0, 1, 1)
+                | (0, 0, 1, 1, 2)
+        )
+    }
+
+    pub fn status(&mut self) -> PositionStatus {
+        let mut legal_moves = MoveList::new();
+        self.generate_legal_moves(&mut legal_moves);
+        if legal_moves.is_empty() {
+            return if self.is_in_check(self.side_to_move) {
+                PositionStatus::Checkmate
+            } else {
+                PositionStatus::Stalemate
+            };
+        }
+        if self.is_draw_by_repetition() {
+            return PositionStatus::DrawByRepetition;
+        }
+        if self.is_draw_by_fifty_move() {
+            return PositionStatus::DrawByFiftyMove;
+        }
+        if self.is_insufficient_material() {
+            return PositionStatus::DrawByInsufficientMaterial;
+        }
+        PositionStatus::Ongoing
+    }
+
+    pub fn see(&self, mv: Move) -> Value {
+        self.see_internal(mv)
     }
 
     pub fn piece_at(&self, square: Square) -> Option<Piece> {
@@ -191,6 +292,68 @@ impl Position {
 
     pub(crate) fn set_fullmove_number(&mut self, value: u16) {
         self.fullmove_number = value;
+    }
+
+    pub(crate) fn refresh_derived_state_from_scratch(&mut self) {
+        self.zobrist_key = self.recompute_zobrist();
+        self.repetition_history.clear_and_seed(self.zobrist_key);
+    }
+
+    fn recompute_zobrist(&self) -> u64 {
+        let mut key = 0u64;
+        for index in 0..64 {
+            let square = Square::from_index_unchecked(index as u8);
+            if let Some(piece) = self.board[index] {
+                key ^= zobrist::piece_square(piece, square);
+            }
+        }
+        key ^= zobrist::castling(self.castling_rights);
+        if let Some(file) = self.hashed_en_passant_file() {
+            key ^= zobrist::en_passant_file(file);
+        }
+        if self.side_to_move == Color::Black {
+            key ^= zobrist::side_to_move();
+        }
+        key
+    }
+
+    fn hashed_en_passant_file(&self) -> Option<u8> {
+        let en_passant = self.en_passant?;
+        let attackers = attacks::pawn_attackers_to(en_passant, self.side_to_move)
+            & self.pieces(self.side_to_move, PieceType::Pawn);
+        if attackers == 0 {
+            None
+        } else {
+            Some(en_passant.file())
+        }
+    }
+
+    fn xor_hashed_en_passant(&mut self) {
+        if let Some(file) = self.hashed_en_passant_file() {
+            self.zobrist_key ^= zobrist::en_passant_file(file);
+        }
+    }
+
+    fn set_en_passant_hashed(&mut self, value: Option<Square>) {
+        self.xor_hashed_en_passant();
+        self.en_passant = value;
+        self.xor_hashed_en_passant();
+    }
+
+    fn set_castling_rights_hashed(&mut self, value: CastlingRights) {
+        self.zobrist_key ^= zobrist::castling(self.castling_rights);
+        self.castling_rights = value;
+        self.zobrist_key ^= zobrist::castling(self.castling_rights);
+    }
+
+    fn set_side_to_move_hashed(&mut self, value: Color) {
+        if self.side_to_move == value {
+            return;
+        }
+        self.xor_hashed_en_passant();
+        self.side_to_move = value;
+        self.zobrist_key ^= zobrist::side_to_move();
+        self.xor_hashed_en_passant();
     }
 
     pub(crate) fn place_piece(&mut self, square: Square, piece: Piece) -> Result<(), String> {
@@ -302,6 +465,20 @@ impl Position {
             return Err("fullmove number must be at least one".to_owned());
         }
 
+        if self.zobrist_key != self.recompute_zobrist() {
+            return Err("incremental zobrist key does not match recomputed zobrist".to_owned());
+        }
+
+        if self.repetition_history.len() == 0 {
+            return Err("repetition history must contain the current position key".to_owned());
+        }
+
+        if self.repetition_history.current() != Some(self.zobrist_key) {
+            return Err(
+                "repetition history tail does not match the current zobrist key".to_owned(),
+            );
+        }
+
         Ok(())
     }
 
@@ -365,23 +542,36 @@ impl Position {
     }
 
     pub fn make_move(&mut self, mv: Move) -> Result<UndoState, MoveError> {
+        self.make_move_with_history(mv, HistoryMode::Persistent)
+    }
+
+    fn make_move_with_history(
+        &mut self,
+        mv: Move,
+        history_mode: HistoryMode,
+    ) -> Result<UndoState, MoveError> {
         let moving_color = self.side_to_move;
         let undo = self.make_move_unchecked(mv)?;
+        if history_mode == HistoryMode::Persistent
+            && self.repetition_history.push(self.zobrist_key).is_err()
+        {
+            self.unmake_move_internal(mv, undo, HistoryMode::Transient);
+            return Err(MoveError::HistoryOverflow);
+        }
         if self.is_in_check(moving_color) {
-            self.unmake_move(mv, undo);
+            self.unmake_move_internal(mv, undo, history_mode);
             return Err(MoveError::LeavesKingInCheck);
         }
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
         Ok(undo)
     }
 
     pub fn unmake_move(&mut self, mv: Move, undo: UndoState) {
-        self.side_to_move = self.side_to_move.opposite();
-        self.castling_rights = undo.previous_castling_rights;
-        self.en_passant = undo.previous_en_passant;
-        self.halfmove_clock = undo.previous_halfmove_clock;
-        self.fullmove_number = undo.previous_fullmove_number;
+        self.unmake_move_internal(mv, undo, HistoryMode::Persistent);
+    }
 
-        let moving_color = self.side_to_move;
+    fn unmake_move_internal(&mut self, mv: Move, undo: UndoState, history_mode: HistoryMode) {
+        let moving_color = self.side_to_move.opposite();
         let from = mv.from();
         let to = mv.to();
 
@@ -394,28 +584,41 @@ impl Position {
                 .remove_piece_unchecked(rook_to)
                 .expect("castled rook must exist on intermediate square");
             self.add_piece_unchecked(rook_from, rook);
-            return;
-        }
+        } else {
+            self.remove_piece_unchecked(to)
+                .expect("moved piece must exist on destination during unmake");
+            self.add_piece_unchecked(from, undo.moved_piece);
 
-        self.remove_piece_unchecked(to)
-            .expect("moved piece must exist on destination during unmake");
-        self.add_piece_unchecked(from, undo.moved_piece);
-
-        if let Some(captured_piece) = undo.captured_piece {
-            if mv.is_en_passant() {
-                let captured_square = match moving_color {
-                    Color::White => to
-                        .offset(0, -1)
-                        .expect("white en passant capture square must exist"),
-                    Color::Black => to
-                        .offset(0, 1)
-                        .expect("black en passant capture square must exist"),
-                };
-                self.add_piece_unchecked(captured_square, captured_piece);
-            } else {
-                self.add_piece_unchecked(to, captured_piece);
+            if let Some(captured_piece) = undo.captured_piece {
+                if mv.is_en_passant() {
+                    let captured_square = match moving_color {
+                        Color::White => to
+                            .offset(0, -1)
+                            .expect("white en passant capture square must exist"),
+                        Color::Black => to
+                            .offset(0, 1)
+                            .expect("black en passant capture square must exist"),
+                    };
+                    self.add_piece_unchecked(captured_square, captured_piece);
+                } else {
+                    self.add_piece_unchecked(to, captured_piece);
+                }
             }
         }
+
+        self.side_to_move = moving_color;
+        self.castling_rights = undo.previous_castling_rights;
+        self.en_passant = undo.previous_en_passant;
+        self.halfmove_clock = undo.previous_halfmove_clock;
+        self.fullmove_number = undo.previous_fullmove_number;
+        self.zobrist_key = undo.previous_zobrist_key;
+
+        if history_mode == HistoryMode::Persistent {
+            self.repetition_history.pop();
+        }
+
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
+        debug_assert_eq!(self.repetition_history.current(), Some(self.zobrist_key));
     }
 
     pub(crate) fn attackers_to(&self, square: Square, by_color: Color) -> u64 {
@@ -814,6 +1017,28 @@ impl Position {
             return Err(MoveError::WrongSideToMove);
         }
 
+        let promotion_piece = mv.promotion();
+        if let Some(piece_type) = promotion_piece {
+            let _ = piece_type;
+            if moving_piece.piece_type() != PieceType::Pawn || (to.rank() != 0 && to.rank() != 7) {
+                return Err(MoveError::InvalidPromotion);
+            }
+        }
+
+        let castle_rook = if mv.is_castle() {
+            if moving_piece.piece_type() != PieceType::King {
+                return Err(MoveError::IllegalCastle);
+            }
+            let (rook_from, rook_to) = castle_rook_squares(to);
+            let rook = self.piece_at(rook_from).ok_or(MoveError::IllegalCastle)?;
+            if rook != Piece::from_parts(moving_color, PieceType::Rook) {
+                return Err(MoveError::IllegalCastle);
+            }
+            Some((rook_from, rook_to, rook))
+        } else {
+            None
+        };
+
         if !mv.is_castle()
             && let Some(target_piece) = self.piece_at(to)
             && target_piece.color() == moving_color
@@ -828,9 +1053,10 @@ impl Position {
             previous_en_passant: self.en_passant,
             previous_halfmove_clock: self.halfmove_clock,
             previous_fullmove_number: self.fullmove_number,
+            previous_zobrist_key: self.zobrist_key,
         };
 
-        self.en_passant = None;
+        self.set_en_passant_hashed(None);
         self.halfmove_clock = self.halfmove_clock.saturating_add(1);
         if moving_color == Color::Black {
             self.fullmove_number = self.fullmove_number.saturating_add(1);
@@ -875,18 +1101,9 @@ impl Position {
         undo.captured_piece = captured_piece;
         self.update_castling_rights(from, to, moving_piece, captured_piece);
 
-        if mv.is_castle() {
-            if moving_piece.piece_type() != PieceType::King {
-                return Err(MoveError::IllegalCastle);
-            }
-            let (rook_from, rook_to) = castle_rook_squares(to);
-            let rook = self
-                .remove_piece_unchecked(rook_from)
-                .ok_or(MoveError::IllegalCastle)?;
-            if rook != Piece::from_parts(moving_color, PieceType::Rook) {
-                self.add_piece_unchecked(rook_from, rook);
-                return Err(MoveError::IllegalCastle);
-            }
+        if let Some((rook_from, rook_to, rook)) = castle_rook {
+            self.remove_piece_unchecked(rook_from)
+                .expect("castle rook must still exist on source square");
             self.remove_piece_unchecked(from)
                 .expect("moving king must exist on source square");
             self.add_piece_unchecked(to, moving_piece);
@@ -894,13 +1111,7 @@ impl Position {
         } else {
             self.remove_piece_unchecked(from)
                 .expect("moving piece must exist on source square");
-            let placed_piece = if let Some(promotion_piece) = mv.promotion() {
-                if moving_piece.piece_type() != PieceType::Pawn {
-                    return Err(MoveError::InvalidPromotion);
-                }
-                if to.rank() != 0 && to.rank() != 7 {
-                    return Err(MoveError::InvalidPromotion);
-                }
+            let placed_piece = if let Some(promotion_piece) = promotion_piece {
                 Piece::from_parts(moving_color, promotion_piece)
             } else {
                 moving_piece
@@ -915,11 +1126,12 @@ impl Position {
                         .offset(0, -1)
                         .expect("black en passant square must exist"),
                 };
-                self.en_passant = Some(en_passant_square);
+                self.set_en_passant_hashed(Some(en_passant_square));
             }
         }
 
-        self.side_to_move = moving_color.opposite();
+        self.set_side_to_move_hashed(moving_color.opposite());
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
         Ok(undo)
     }
 
@@ -930,29 +1142,22 @@ impl Position {
         moving_piece: Piece,
         captured_piece: Option<Piece>,
     ) {
+        let mut rights = self.castling_rights;
         if moving_piece.piece_type() == PieceType::King {
-            self.castling_rights.remove_color(moving_piece.color());
+            rights.remove_color(moving_piece.color());
         }
 
         if moving_piece.piece_type() == PieceType::Rook {
-            self.clear_castling_right_for_square(from);
+            clear_castling_right_for_square(&mut rights, from);
         }
 
         if let Some(captured_piece) = captured_piece
             && captured_piece.piece_type() == PieceType::Rook
         {
-            self.clear_castling_right_for_square(to);
+            clear_castling_right_for_square(&mut rights, to);
         }
-    }
 
-    fn clear_castling_right_for_square(&mut self, square: Square) {
-        match square {
-            Square::A1 => self.castling_rights.remove(CastlingRights::WHITE_QUEENSIDE),
-            Square::H1 => self.castling_rights.remove(CastlingRights::WHITE_KINGSIDE),
-            Square::A8 => self.castling_rights.remove(CastlingRights::BLACK_QUEENSIDE),
-            Square::H8 => self.castling_rights.remove(CastlingRights::BLACK_KINGSIDE),
-            _ => {}
-        }
+        self.set_castling_rights_hashed(rights);
     }
 
     fn add_piece_unchecked(&mut self, square: Square, piece: Piece) {
@@ -960,6 +1165,7 @@ impl Position {
         let piece_index = piece.piece_type().index();
 
         self.board[square.index()] = Some(piece);
+        self.zobrist_key ^= zobrist::piece_square(piece, square);
         self.piece_bitboards[color_index][piece_index] |= square.bit();
         self.occupancies[color_index] |= square.bit();
         self.occupancies[OCCUPANCY_ALL] |= square.bit();
@@ -976,6 +1182,7 @@ impl Position {
         let piece_index = piece.piece_type().index();
 
         self.board[square.index()] = None;
+        self.zobrist_key ^= zobrist::piece_square(piece, square);
         self.piece_bitboards[color_index][piece_index] &= !square.bit();
         self.occupancies[color_index] &= !square.bit();
         self.occupancies[OCCUPANCY_ALL] &= !square.bit();
@@ -1010,6 +1217,109 @@ impl Position {
             | (attacks::king_attacks(square) & enemy_king)
     }
 
+    fn see_internal(&self, mv: Move) -> Value {
+        let from = mv.from();
+        let to = mv.to();
+        let moving_piece = match self.piece_at(from) {
+            Some(piece) => piece,
+            None => return Value(0),
+        };
+
+        if !mv.is_capture() {
+            return mv.promotion().map(see::promotion_gain).unwrap_or_default();
+        }
+
+        let us = self.side_to_move;
+        let them = us.opposite();
+        let promotion_piece = mv.promotion();
+        let promotion_gain = promotion_piece.map_or(0, |piece| see::promotion_gain(piece).0);
+
+        let captured_piece = if mv.is_en_passant() {
+            Some(Piece::from_parts(them, PieceType::Pawn))
+        } else {
+            self.piece_at(to)
+        };
+        let Some(captured_piece) = captured_piece else {
+            return Value(0);
+        };
+
+        let mut piece_bitboards = self.piece_bitboards;
+        let mut occupancies = self.occupancies;
+        let mut gains = [0i16; 32];
+        gains[0] = see::piece_value(captured_piece.piece_type()).0 + promotion_gain;
+
+        remove_local_piece(&mut piece_bitboards, &mut occupancies, from, moving_piece);
+        if mv.is_en_passant() {
+            let captured_square = match us {
+                Color::White => to
+                    .offset(0, -1)
+                    .expect("white en passant capture square must exist"),
+                Color::Black => to
+                    .offset(0, 1)
+                    .expect("black en passant capture square must exist"),
+            };
+            remove_local_piece(
+                &mut piece_bitboards,
+                &mut occupancies,
+                captured_square,
+                captured_piece,
+            );
+        } else {
+            remove_local_piece(&mut piece_bitboards, &mut occupancies, to, captured_piece);
+        }
+
+        let mut occupying_piece_type = promotion_piece.unwrap_or(moving_piece.piece_type());
+        add_local_piece(
+            &mut piece_bitboards,
+            &mut occupancies,
+            to,
+            Piece::from_parts(us, occupying_piece_type),
+        );
+
+        let mut side = them;
+        let mut depth = 0usize;
+        while let Some((attacker_square, attacker_piece_type)) =
+            least_valuable_attacker(to, side, &piece_bitboards, occupancies[OCCUPANCY_ALL])
+        {
+            depth += 1;
+            gains[depth] = see::piece_value(occupying_piece_type).0 - gains[depth - 1];
+
+            let attacker_piece = Piece::from_parts(side, attacker_piece_type);
+            remove_local_piece(
+                &mut piece_bitboards,
+                &mut occupancies,
+                attacker_square,
+                attacker_piece,
+            );
+
+            occupying_piece_type = if attacker_piece_type == PieceType::Pawn
+                && to.rank()
+                    == match side {
+                        Color::White => 7,
+                        Color::Black => 0,
+                    } {
+                PieceType::Queen
+            } else {
+                attacker_piece_type
+            };
+
+            add_local_piece(
+                &mut piece_bitboards,
+                &mut occupancies,
+                to,
+                Piece::from_parts(side, occupying_piece_type),
+            );
+            side = side.opposite();
+        }
+
+        while depth > 0 {
+            gains[depth - 1] = -std::cmp::max(-gains[depth - 1], gains[depth]);
+            depth -= 1;
+        }
+
+        Value(gains[0])
+    }
+
     fn is_king_move_legal(&self, mv: Move) -> bool {
         let us = self.side_to_move;
         let them = us.opposite();
@@ -1031,14 +1341,85 @@ impl Position {
     }
 
     fn validate_with_make_unmake(&mut self, mv: Move) -> bool {
-        match self.make_move(mv) {
+        match self.make_move_with_history(mv, HistoryMode::Transient) {
             Ok(undo) => {
-                self.unmake_move(mv, undo);
+                self.unmake_move_internal(mv, undo, HistoryMode::Transient);
                 true
             }
             Err(_) => false,
         }
     }
+}
+
+fn remove_local_piece(
+    piece_bitboards: &mut [[u64; 6]; 2],
+    occupancies: &mut [u64; 3],
+    square: Square,
+    piece: Piece,
+) {
+    let color_index = piece.color().index();
+    let piece_index = piece.piece_type().index();
+    piece_bitboards[color_index][piece_index] &= !square.bit();
+    occupancies[color_index] &= !square.bit();
+    occupancies[OCCUPANCY_ALL] &= !square.bit();
+}
+
+fn add_local_piece(
+    piece_bitboards: &mut [[u64; 6]; 2],
+    occupancies: &mut [u64; 3],
+    square: Square,
+    piece: Piece,
+) {
+    let color_index = piece.color().index();
+    let piece_index = piece.piece_type().index();
+    piece_bitboards[color_index][piece_index] |= square.bit();
+    occupancies[color_index] |= square.bit();
+    occupancies[OCCUPANCY_ALL] |= square.bit();
+}
+
+fn least_valuable_attacker(
+    square: Square,
+    color: Color,
+    piece_bitboards: &[[u64; 6]; 2],
+    occupied: u64,
+) -> Option<(Square, PieceType)> {
+    let color_index = color.index();
+    let candidates = [
+        (
+            PieceType::Pawn,
+            attacks::pawn_attackers_to(square, color)
+                & piece_bitboards[color_index][PieceType::Pawn.index()],
+        ),
+        (
+            PieceType::Knight,
+            attacks::knight_attacks(square)
+                & piece_bitboards[color_index][PieceType::Knight.index()],
+        ),
+        (
+            PieceType::Bishop,
+            attacks::bishop_attacks(square, occupied)
+                & piece_bitboards[color_index][PieceType::Bishop.index()],
+        ),
+        (
+            PieceType::Rook,
+            attacks::rook_attacks(square, occupied)
+                & piece_bitboards[color_index][PieceType::Rook.index()],
+        ),
+        (
+            PieceType::Queen,
+            attacks::queen_attacks(square, occupied)
+                & piece_bitboards[color_index][PieceType::Queen.index()],
+        ),
+    ];
+
+    for (piece_type, attackers) in candidates {
+        if attackers != 0 {
+            let attacker_square = Square::from_index_unchecked(attackers.trailing_zeros() as u8);
+            return Some((attacker_square, piece_type));
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -1067,6 +1448,16 @@ fn pop_lsb(bitboard: &mut u64) -> Option<Square> {
     Some(square)
 }
 
+fn clear_castling_right_for_square(rights: &mut CastlingRights, square: Square) {
+    match square {
+        Square::A1 => rights.remove(CastlingRights::WHITE_QUEENSIDE),
+        Square::H1 => rights.remove(CastlingRights::WHITE_KINGSIDE),
+        Square::A8 => rights.remove(CastlingRights::BLACK_QUEENSIDE),
+        Square::H8 => rights.remove(CastlingRights::BLACK_KINGSIDE),
+        _ => {}
+    }
+}
+
 fn is_diagonal_alignment(from: Square, to: Square) -> bool {
     from.file().abs_diff(to.file()) == from.rank().abs_diff(to.rank())
 }
@@ -1087,7 +1478,65 @@ fn castle_rook_squares(king_destination: Square) -> (Square, Square) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MoveList, Position};
+    use super::{MoveList, Position, PositionStatus};
+    use crate::core::{MoveError, ParsedMove, STARTPOS_FEN, repetition::MAX_REPETITION_HISTORY};
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct PersistentSnapshot {
+        side_to_move: super::Color,
+        castling_rights: super::CastlingRights,
+        en_passant: Option<super::Square>,
+        halfmove_clock: u16,
+        fullmove_number: u16,
+        zobrist_key: u64,
+        repetition_history: Vec<u64>,
+        fen: String,
+    }
+
+    fn snapshot(position: &Position) -> PersistentSnapshot {
+        PersistentSnapshot {
+            side_to_move: position.side_to_move,
+            castling_rights: position.castling_rights,
+            en_passant: position.en_passant,
+            halfmove_clock: position.halfmove_clock,
+            fullmove_number: position.fullmove_number,
+            zobrist_key: position.zobrist_key,
+            repetition_history: position.repetition_history.as_slice().to_vec(),
+            fen: position.to_fen(),
+        }
+    }
+
+    fn legal_move(position: &mut Position, uci: &str) -> super::Move {
+        let parsed = ParsedMove::parse(uci).expect("UCI move parse must succeed");
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        legal_moves
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(parsed))
+            .unwrap_or_else(|| panic!("expected legal move {uci}"))
+    }
+
+    fn next_test_u64(seed: &mut u64) -> u64 {
+        *seed ^= *seed >> 12;
+        *seed ^= *seed << 25;
+        *seed ^= *seed >> 27;
+        *seed = (*seed).wrapping_mul(0x2545_f491_4f6c_dd1d);
+        *seed
+    }
+
+    fn fill_history_to_capacity(position: &mut Position) {
+        position
+            .repetition_history
+            .clear_and_seed(position.zobrist_key);
+        while position.repetition_history.len() < MAX_REPETITION_HISTORY {
+            position
+                .repetition_history
+                .push(position.zobrist_key)
+                .expect("test setup must be able to fill history to capacity");
+        }
+    }
 
     fn assert_fast_matches_slow(position: &mut Position, label: &str) {
         let mut fast = MoveList::new();
@@ -1176,5 +1625,129 @@ mod tests {
         .expect("FEN parse must succeed");
 
         assert_fast_matches_slow(&mut position, "position6 root");
+    }
+
+    #[test]
+    fn make_unmake_restores_persistent_state_across_move_classes() {
+        let cases = [
+            (STARTPOS_FEN, "e2e4"),
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"),
+            ("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"),
+            ("4k3/8/8/8/2p5/3B4/8/4K3 w - - 0 1", "d3c4"),
+            ("7k/P7/8/8/8/8/8/K7 w - - 0 1", "a7a8q"),
+            ("4k2r/6P1/8/8/8/8/8/4K3 w - - 0 1", "g7h8q"),
+        ];
+
+        for (fen, uci) in cases {
+            let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+            let before = snapshot(&position);
+            let mv = legal_move(&mut position, uci);
+            let undo = position.make_move(mv).expect("move must be legal");
+            position.unmake_move(mv, undo);
+            assert_eq!(snapshot(&position), before, "round-trip must restore {uci}");
+        }
+    }
+
+    #[test]
+    fn generate_legal_moves_leaves_persistent_state_unchanged() {
+        let mut position = Position::from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1")
+            .expect("FEN parse must succeed");
+        let before = snapshot(&position);
+
+        let mut moves = MoveList::new();
+        position.generate_legal_moves(&mut moves);
+
+        assert_eq!(snapshot(&position), before);
+    }
+
+    #[test]
+    fn randomized_make_unmake_sequences_restore_root_state() {
+        let mut position = Position::startpos();
+        let root = snapshot(&position);
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut played = Vec::new();
+
+        for _ in 0..256 {
+            let mut moves = MoveList::new();
+            position.generate_legal_moves(&mut moves);
+            if moves.is_empty() {
+                break;
+            }
+            let index = next_test_u64(&mut seed) as usize % moves.len();
+            let mv = moves.as_slice()[index];
+            let undo = position.make_move(mv).expect("selected move must be legal");
+            assert_eq!(position.zobrist_key, position.recompute_zobrist());
+            played.push((mv, undo));
+        }
+
+        while let Some((mv, undo)) = played.pop() {
+            position.unmake_move(mv, undo);
+        }
+
+        assert_eq!(snapshot(&position), root);
+    }
+
+    #[test]
+    fn repetition_and_status_helpers_work_on_actual_cycles() {
+        let mut position = Position::startpos();
+        for mv in [
+            "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8",
+        ] {
+            position
+                .apply_uci_move(mv)
+                .expect("cycle move must be legal");
+        }
+
+        assert!(position.is_draw_by_repetition());
+        assert_eq!(position.status(), PositionStatus::DrawByRepetition);
+    }
+
+    #[test]
+    fn make_unmake_keeps_zobrist_and_history_in_sync_with_validate() {
+        let mut position = Position::startpos();
+        let mut moves = MoveList::new();
+        position.generate_legal_moves(&mut moves);
+        for mv in moves.as_slice().iter().copied() {
+            let before = snapshot(&position);
+            let undo = position.make_move(mv).expect("move must be legal");
+            position.validate().expect("post-move state must validate");
+            position.unmake_move(mv, undo);
+            position
+                .validate()
+                .expect("post-unmake state must validate");
+            assert_eq!(snapshot(&position), before);
+        }
+    }
+
+    #[test]
+    fn persistent_move_application_returns_history_overflow_at_capacity() {
+        let mut position = Position::startpos();
+        fill_history_to_capacity(&mut position);
+        let before = snapshot(&position);
+
+        let mv = legal_move(&mut position, "e2e4");
+        let error = position
+            .make_move(mv)
+            .expect_err("persistent move must fail when history is full");
+
+        assert_eq!(error, MoveError::HistoryOverflow);
+        assert_eq!(snapshot(&position), before);
+    }
+
+    #[test]
+    fn temporary_legality_validation_does_not_consume_history_capacity() {
+        let mut position = Position::from_fen("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1")
+            .expect("FEN parse must succeed");
+        fill_history_to_capacity(&mut position);
+        let before = snapshot(&position);
+
+        let mut moves = MoveList::new();
+        position.generate_legal_moves(&mut moves);
+
+        assert!(
+            moves.as_slice().iter().any(|mv| mv.to_string() == "e5d6"),
+            "en passant legality validation should still succeed at capacity"
+        );
+        assert_eq!(snapshot(&position), before);
     }
 }

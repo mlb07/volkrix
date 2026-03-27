@@ -126,6 +126,7 @@ impl Position {
         }
         position.set_fullmove_number(fullmove_number);
 
+        position.refresh_derived_state_from_scratch();
         position.validate().map_err(FenError::InvalidPosition)?;
 
         Ok(position)
