@@ -6,27 +6,30 @@ use super::{
 };
 
 pub(crate) fn qsearch(
-    context: &mut SearchContext,
+    context: &mut SearchContext<'_>,
     position: &mut Position,
     ply: usize,
     mut alpha: i32,
     beta: i32,
-) -> i32 {
+) -> Option<i32> {
     context.nodes += 1;
+    if context.nodes & 1023 == 0 && context.hard_stop_requested() {
+        return None;
+    }
 
     if ply >= MAX_PLY - 1 {
-        return eval::evaluate(position).0;
+        return Some(eval::evaluate(position).0);
     }
 
     if is_draw(position) {
-        return 0;
+        return Some(0);
     }
 
     let in_check = position.is_in_check(position.side_to_move());
     if !in_check {
         let stand_pat = eval::evaluate(position).0;
         if stand_pat >= beta {
-            return beta;
+            return Some(beta);
         }
         if stand_pat > alpha {
             alpha = stand_pat;
@@ -38,7 +41,7 @@ pub(crate) fn qsearch(
     let mut legal_moves = MoveList::new();
     position.generate_legal_moves(&mut legal_moves);
     if legal_moves.is_empty() {
-        return terminal_score(position, ply);
+        return Some(terminal_score(position, ply));
     }
     let ordering_hints = MoveOrderHints {
         ply,
@@ -57,8 +60,12 @@ pub(crate) fn qsearch(
         let undo = position
             .make_move(mv)
             .expect("quiescence move must be legal");
-        let score = -qsearch(context, position, ply + 1, -beta, -alpha);
+        let Some(score) = qsearch(context, position, ply + 1, -beta, -alpha) else {
+            position.unmake_move(mv, undo);
+            return None;
+        };
         position.unmake_move(mv, undo);
+        let score = -score;
 
         if score > alpha {
             alpha = score;
@@ -69,5 +76,5 @@ pub(crate) fn qsearch(
         }
     }
 
-    alpha
+    Some(alpha)
 }

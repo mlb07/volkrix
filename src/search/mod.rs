@@ -6,6 +6,7 @@ pub mod internal;
 pub mod limits;
 mod qsearch;
 mod root;
+pub(crate) mod service;
 mod tt;
 
 pub use bench::{BenchConfig, BenchResult, run_bench};

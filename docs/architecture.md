@@ -45,14 +45,27 @@ Phase 2 extends this path with:
 
 ## UCI
 
-Supported commands in Phase 1:
+Supported commands after Phase 7:
 
 - `uci`
 - `isready`
 - `ucinewgame`
 - `position`
+- `setoption name Hash value <mb>`
+- `setoption name Clear Hash`
 - `go depth`
+- `go movetime <ms>`
+- `go wtime <ms> btime <ms> [winc <ms>] [binc <ms>] [movestogo <n>]`
+- `go infinite`
 - `stop`
 - `quit`
 
 Malformed input must never panic or corrupt engine state.
+
+The runtime model remains intentionally strict:
+
+- the search core itself stays single-threaded
+- one small stdin helper thread is used only in the stdio runtime
+- the main thread remains the sole owner of engine state, position state, TT ownership, and command application
+- while a search is active, only `stop` and `quit` take immediate effect from the helper path
+- `setoption`, `position`, and `ucinewgame` remain deferred main-thread operations only

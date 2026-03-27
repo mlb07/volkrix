@@ -9,10 +9,10 @@
 - Phase 4 deterministic single-thread search baseline with iterative deepening, alpha-beta, quiescence, PV tracking, and simple classical evaluation
 - Phase 5 transposition table and search infrastructure on top of the single-thread baseline
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic heuristic toggles, and documented Phase 5 baseline comparisons
+- Phase 7 time management and practical UCI usability on top of the correct TT-backed single-thread baseline
 
 ## Next
 
-- Phase 7 time management and practical UCI usability on top of the correct TT-backed single-thread baseline
 - Later phases: classical eval growth, SMP, tablebases, NNUE, training, and tuning
 
 ## Intentional Boundaries

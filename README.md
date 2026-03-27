@@ -13,6 +13,7 @@ The repository currently includes:
 - Phase 4 deterministic single-thread search with iterative deepening, alpha-beta, quiescence, PV tracking, and a simple classical evaluation
 - Phase 5 single-thread transposition table integration, deterministic TT-on/TT-off search paths, and a reproducible bench path tied to the real search core
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic internal heuristic toggles, and documented Phase 5 baseline comparisons
+- Phase 7 practical UCI usability with timed search, real `stop`, `Hash` / `Clear Hash`, and persistent TT reuse across UCI searches
 
 What is intentionally not here yet:
 
@@ -62,11 +63,16 @@ The engine currently supports:
 - `isready`
 - `ucinewgame`
 - `position`
+- `setoption name Hash value <mb>`
+- `setoption name Clear Hash`
 - `go depth`
+- `go movetime <ms>`
+- `go wtime <ms> btime <ms> [winc <ms>] [binc <ms>] [movestogo <n>]`
+- `go infinite`
 - `stop`
 - `quit`
 
-Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. `go depth` now runs a deterministic single-thread search baseline instead of placeholder move selection.
+Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. The UCI runtime keeps the search core single-threaded, reuses TT state across UCI searches, and still preserves the documented deterministic fixed-depth bench and regression path outside the UCI shell.
 
 ## Documentation
 

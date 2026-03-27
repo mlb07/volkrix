@@ -77,6 +77,13 @@ impl TranspositionTable {
         Self::with_cluster_count(cluster_count_for_mb(hash_mb))
     }
 
+    pub fn clear(&mut self) {
+        for cluster in &mut self.clusters {
+            *cluster = Cluster::default();
+        }
+        self.generation = 0;
+    }
+
     pub fn new_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
     }
@@ -131,6 +138,20 @@ impl TranspositionTable {
     #[cfg(test)]
     fn with_cluster_count_for_test(cluster_count: usize) -> Self {
         Self::with_cluster_count(cluster_count)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    pub fn debug_entry_count(&self) -> usize {
+        self.clusters
+            .iter()
+            .map(|cluster| {
+                cluster
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.occupied)
+                    .count()
+            })
+            .sum()
     }
 }
 

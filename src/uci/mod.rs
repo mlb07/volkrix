@@ -1,24 +1,66 @@
-use std::io::{self, BufRead, Write};
+use std::{
+    io::{self, BufRead, Write},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
+    thread,
+    time::{Duration, Instant},
+};
 
 use crate::{
     ENGINE_AUTHOR, ENGINE_NAME,
-    core::Position,
-    search::{SearchLimits, search},
+    core::{Color, Position},
+    search::{
+        SearchLimits,
+        service::{SearchRequest, UciSearchService},
+    },
 };
+
+const DEFAULT_GO_DEPTH: u8 = 1;
+const MAX_GO_DEPTH: u8 = 127;
+const MIN_HASH_MB: usize = 1;
+const MAX_HASH_MB: usize = 512;
 
 pub struct UciResponse {
     pub lines: Vec<String>,
     pub should_quit: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GoOptions {
+    depth: Option<u8>,
+    movetime_ms: Option<u64>,
+    wtime_ms: Option<u64>,
+    btime_ms: Option<u64>,
+    winc_ms: u64,
+    binc_ms: u64,
+    movestogo: Option<u32>,
+    infinite: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetOptionCommand {
+    Hash(usize),
+    ClearHash,
+}
+
+enum RuntimeInput {
+    Command(String),
+    QuitRequested,
+}
+
 pub struct UciEngine {
     position: Position,
+    search_service: UciSearchService,
 }
 
 impl UciEngine {
     pub fn new() -> Self {
         Self {
             position: Position::startpos(),
+            search_service: UciSearchService::new(),
         }
     }
 
@@ -26,7 +68,23 @@ impl UciEngine {
         &self.position
     }
 
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_hash_mb(&self) -> usize {
+        self.search_service.hash_mb()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_tt_entry_count(&self) -> usize {
+        self.search_service.debug_tt_entry_count()
+    }
+
     pub fn handle_line(&mut self, line: &str) -> UciResponse {
+        self.handle_line_with_stop(line, None)
+    }
+
+    fn handle_line_with_stop(&mut self, line: &str, stop_flag: Option<&AtomicBool>) -> UciResponse {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return UciResponse {
@@ -41,6 +99,13 @@ impl UciEngine {
                 lines: vec![
                     format!("id name {ENGINE_NAME}"),
                     format!("id author {ENGINE_AUTHOR}"),
+                    format!(
+                        "option name Hash type spin default {} min {} max {}",
+                        self.search_service.hash_mb(),
+                        MIN_HASH_MB,
+                        MAX_HASH_MB
+                    ),
+                    "option name Clear Hash type button".to_owned(),
                     "uciok".to_owned(),
                 ],
                 should_quit: false,
@@ -51,6 +116,7 @@ impl UciEngine {
             },
             "ucinewgame" => {
                 self.position = Position::startpos();
+                self.search_service.clear_hash();
                 UciResponse {
                     lines: Vec::new(),
                     should_quit: false,
@@ -60,18 +126,32 @@ impl UciEngine {
                 lines: self.handle_position(&tokens),
                 should_quit: false,
             },
+            "setoption" => UciResponse {
+                lines: self.handle_setoption(&tokens),
+                should_quit: false,
+            },
             "go" => UciResponse {
-                lines: self.handle_go(&tokens),
+                lines: self.handle_go(&tokens, stop_flag),
                 should_quit: false,
             },
-            "stop" => UciResponse {
-                lines: Vec::new(),
-                should_quit: false,
-            },
-            "quit" => UciResponse {
-                lines: Vec::new(),
-                should_quit: true,
-            },
+            "stop" => {
+                if let Some(stop_flag) = stop_flag {
+                    stop_flag.store(true, Ordering::Relaxed);
+                }
+                UciResponse {
+                    lines: Vec::new(),
+                    should_quit: false,
+                }
+            }
+            "quit" => {
+                if let Some(stop_flag) = stop_flag {
+                    stop_flag.store(true, Ordering::Relaxed);
+                }
+                UciResponse {
+                    lines: Vec::new(),
+                    should_quit: true,
+                }
+            }
             _ => UciResponse {
                 lines: vec![format!(
                     "info string error: unsupported command '{trimmed}'"
@@ -134,40 +214,118 @@ impl UciEngine {
         Vec::new()
     }
 
-    fn handle_go(&mut self, tokens: &[&str]) -> Vec<String> {
-        let mut errors = Vec::new();
-        let mut index = 1usize;
-        let mut depth = 1u8;
-        while index < tokens.len() {
-            if tokens[index] == "depth" {
-                if index + 1 >= tokens.len() {
-                    errors.push("info string error: go depth requires a value".to_owned());
-                    break;
-                }
-                match tokens[index + 1].parse::<u32>() {
-                    Ok(value) => {
-                        depth = value.clamp(1, 127) as u8;
-                    }
-                    Err(_) => {
-                        errors.push(format!(
-                            "info string error: invalid go depth value '{}'",
-                            tokens[index + 1]
-                        ));
-                    }
-                }
-                index += 2;
-                continue;
+    fn handle_setoption(&mut self, tokens: &[&str]) -> Vec<String> {
+        match parse_setoption(tokens) {
+            Ok(SetOptionCommand::Hash(hash_mb)) => {
+                self.search_service.resize_hash(hash_mb);
+                Vec::new()
             }
-            index += 1;
+            Ok(SetOptionCommand::ClearHash) => {
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            Err(error) => vec![format!("info string error: {error}")],
+        }
+    }
+
+    fn handle_go(&mut self, tokens: &[&str], stop_flag: Option<&AtomicBool>) -> Vec<String> {
+        let options = match parse_go(tokens) {
+            Ok(options) => options,
+            Err(error) => return vec![format!("info string error: {error}")],
+        };
+
+        if let Some(stop_flag) = stop_flag {
+            stop_flag.store(false, Ordering::Relaxed);
         }
 
-        let result = search(&mut self.position, SearchLimits::new(depth));
-        errors.extend(result.info_lines);
+        let request = match self.build_search_request(options, stop_flag) {
+            Ok(request) => request,
+            Err(error) => return vec![format!("info string error: {error}")],
+        };
+
+        let result = self.search_service.search(&mut self.position, request);
+        let mut lines = result.info_lines;
         let bestmove = result
             .best_move
             .map_or_else(|| "0000".to_owned(), |mv| mv.to_string());
-        errors.push(format!("bestmove {bestmove}"));
-        errors
+        lines.push(format!("bestmove {bestmove}"));
+        lines
+    }
+
+    fn build_search_request<'a>(
+        &self,
+        options: GoOptions,
+        stop_flag: Option<&'a AtomicBool>,
+    ) -> Result<SearchRequest<'a>, String> {
+        let now = Instant::now();
+        if options.infinite {
+            if stop_flag.is_none() {
+                return Err("go infinite requires the stdio runtime".to_owned());
+            }
+
+            return Ok(SearchRequest {
+                limits: SearchLimits::new(MAX_GO_DEPTH),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag,
+            });
+        }
+
+        if let Some(movetime_ms) = options.movetime_ms {
+            let deadline = now + Duration::from_millis(movetime_ms);
+            return Ok(SearchRequest {
+                limits: SearchLimits::new(MAX_GO_DEPTH),
+                soft_deadline: Some(deadline),
+                hard_deadline: Some(deadline),
+                stop_flag,
+            });
+        }
+
+        if options.wtime_ms.is_some() || options.btime_ms.is_some() {
+            let (soft_ms, hard_ms) = self.clock_budget_ms(options)?;
+            return Ok(SearchRequest {
+                limits: SearchLimits::new(MAX_GO_DEPTH),
+                soft_deadline: Some(now + Duration::from_millis(soft_ms)),
+                hard_deadline: Some(now + Duration::from_millis(hard_ms)),
+                stop_flag,
+            });
+        }
+
+        Ok(SearchRequest {
+            limits: SearchLimits::new(options.depth.unwrap_or(DEFAULT_GO_DEPTH)),
+            soft_deadline: None,
+            hard_deadline: None,
+            stop_flag,
+        })
+    }
+
+    fn clock_budget_ms(&self, options: GoOptions) -> Result<(u64, u64), String> {
+        let side = self.position.side_to_move();
+        let (remaining, increment) = match side {
+            Color::White => (
+                options
+                    .wtime_ms
+                    .ok_or_else(|| "go clock mode requires both wtime and btime".to_owned())?,
+                options.winc_ms,
+            ),
+            Color::Black => (
+                options
+                    .btime_ms
+                    .ok_or_else(|| "go clock mode requires both wtime and btime".to_owned())?,
+                options.binc_ms,
+            ),
+        };
+
+        if options.wtime_ms.is_none() || options.btime_ms.is_none() {
+            return Err("go clock mode requires both wtime and btime".to_owned());
+        }
+
+        let safety = 25u64.max(remaining / 50);
+        let available = remaining.saturating_sub(safety);
+        let moves_to_go = options.movestogo.unwrap_or(25).clamp(1, 40) as u64;
+        let soft = available.min(available / moves_to_go + (3 * increment / 4));
+        let hard = available.min(soft + 25u64.max(soft / 2));
+        Ok((soft, hard))
     }
 }
 
@@ -177,23 +335,799 @@ impl Default for UciEngine {
     }
 }
 
-pub fn run_stdio() -> io::Result<()> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut engine = UciEngine::new();
-    let mut output = io::BufWriter::new(stdout.lock());
-
-    for line_result in stdin.lock().lines() {
-        let line = line_result?;
-        let response = engine.handle_line(&line);
-        for output_line in response.lines {
-            writeln!(output, "{output_line}")?;
+fn parse_go(tokens: &[&str]) -> Result<GoOptions, String> {
+    let mut options = GoOptions::default();
+    let mut index = 1usize;
+    while index < tokens.len() {
+        match tokens[index] {
+            "depth" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go depth requires a value".to_owned());
+                };
+                options.depth = Some(parse_depth(value)?);
+                index += 2;
+            }
+            "movetime" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go movetime requires a value".to_owned());
+                };
+                options.movetime_ms = Some(parse_u64_arg(value, "go movetime")?);
+                index += 2;
+            }
+            "wtime" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go wtime requires a value".to_owned());
+                };
+                options.wtime_ms = Some(parse_u64_arg(value, "go wtime")?);
+                index += 2;
+            }
+            "btime" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go btime requires a value".to_owned());
+                };
+                options.btime_ms = Some(parse_u64_arg(value, "go btime")?);
+                index += 2;
+            }
+            "winc" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go winc requires a value".to_owned());
+                };
+                options.winc_ms = parse_u64_arg(value, "go winc")?;
+                index += 2;
+            }
+            "binc" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go binc requires a value".to_owned());
+                };
+                options.binc_ms = parse_u64_arg(value, "go binc")?;
+                index += 2;
+            }
+            "movestogo" => {
+                let Some(value) = tokens.get(index + 1) else {
+                    return Err("go movestogo requires a value".to_owned());
+                };
+                options.movestogo = Some(parse_u32_arg(value, "go movestogo")?);
+                index += 2;
+            }
+            "infinite" => {
+                options.infinite = true;
+                index += 1;
+            }
+            "ponder" | "ponderhit" | "searchmoves" | "nodes" | "mate" => {
+                return Err(format!("unsupported go argument '{}'", tokens[index]));
+            }
+            other => {
+                return Err(format!("unsupported go argument '{other}'"));
+            }
         }
-        output.flush()?;
-        if response.should_quit {
-            break;
+    }
+
+    let explicit_depth = options.depth.is_some();
+    let has_time_mode =
+        options.movetime_ms.is_some() || options.wtime_ms.is_some() || options.btime_ms.is_some();
+    if options.infinite && (explicit_depth || has_time_mode) {
+        return Err("go infinite cannot be combined with depth or time controls".to_owned());
+    }
+    if options.movetime_ms.is_some()
+        && (explicit_depth || options.wtime_ms.is_some() || options.btime_ms.is_some())
+    {
+        return Err("go movetime cannot be combined with depth or clock controls".to_owned());
+    }
+    if (options.wtime_ms.is_some() || options.btime_ms.is_some()) && explicit_depth {
+        return Err("go clock mode cannot be combined with depth".to_owned());
+    }
+
+    Ok(options)
+}
+
+fn parse_setoption(tokens: &[&str]) -> Result<SetOptionCommand, String> {
+    if tokens.len() < 3 || tokens[1] != "name" {
+        return Err("setoption requires 'name'".to_owned());
+    }
+
+    let value_index = tokens.iter().position(|token| *token == "value");
+    let name_tokens = match value_index {
+        Some(index) => &tokens[2..index],
+        None => &tokens[2..],
+    };
+    if name_tokens.is_empty() {
+        return Err("setoption requires an option name".to_owned());
+    }
+
+    let name = name_tokens.join(" ");
+    match name.as_str() {
+        "Hash" => {
+            let Some(value_index) = value_index else {
+                return Err("setoption name Hash requires 'value <mb>'".to_owned());
+            };
+            if value_index + 2 != tokens.len() {
+                return Err("setoption name Hash requires exactly one value".to_owned());
+            }
+            let hash_mb = parse_usize_arg(tokens[value_index + 1], "setoption name Hash value")?;
+            if !(MIN_HASH_MB..=MAX_HASH_MB).contains(&hash_mb) {
+                return Err(format!(
+                    "Hash value must be between {MIN_HASH_MB} and {MAX_HASH_MB}"
+                ));
+            }
+            Ok(SetOptionCommand::Hash(hash_mb))
+        }
+        "Clear Hash" => {
+            if value_index.is_some() {
+                return Err("setoption name Clear Hash does not take a value".to_owned());
+            }
+            Ok(SetOptionCommand::ClearHash)
+        }
+        _ => Err(format!("unsupported option '{name}'")),
+    }
+}
+
+fn parse_depth(value: &str) -> Result<u8, String> {
+    parse_u32_arg(value, "go depth").map(|depth| depth.clamp(1, MAX_GO_DEPTH as u32) as u8)
+}
+
+fn parse_u32_arg(value: &str, label: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .map_err(|_| format!("invalid {label} value '{value}'"))
+}
+
+fn parse_u64_arg(value: &str, label: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| format!("invalid {label} value '{value}'"))
+}
+
+fn parse_usize_arg(value: &str, label: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| format!("invalid {label} value '{value}'"))
+}
+
+fn run_runtime_session<W: Write>(
+    engine: &mut UciEngine,
+    receiver: &Receiver<RuntimeInput>,
+    output: &mut W,
+    stop_flag: &AtomicBool,
+    quit_flag: &AtomicBool,
+) -> io::Result<()> {
+    while let Ok(message) = receiver.recv() {
+        match message {
+            RuntimeInput::Command(line) => {
+                let response = engine.handle_line_with_stop(&line, Some(stop_flag));
+                let suppress_output =
+                    quit_flag.load(Ordering::Relaxed) && line.trim_start().starts_with("go");
+                if !suppress_output {
+                    for output_line in response.lines {
+                        writeln!(output, "{output_line}")?;
+                    }
+                    output.flush()?;
+                }
+
+                if response.should_quit || quit_flag.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            RuntimeInput::QuitRequested => break,
         }
     }
 
     Ok(())
+}
+
+fn handle_input_line(
+    line: String,
+    sender: &Sender<RuntimeInput>,
+    stop_flag: &AtomicBool,
+    quit_flag: &AtomicBool,
+) -> io::Result<bool> {
+    match line.trim() {
+        "stop" => {
+            stop_flag.store(true, Ordering::Relaxed);
+            Ok(true)
+        }
+        "quit" => {
+            stop_flag.store(true, Ordering::Relaxed);
+            quit_flag.store(true, Ordering::Relaxed);
+            sender.send(RuntimeInput::QuitRequested).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("uci runtime send failed: {error}"),
+                )
+            })?;
+            Ok(false)
+        }
+        _ => {
+            sender.send(RuntimeInput::Command(line)).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("uci runtime send failed: {error}"),
+                )
+            })?;
+            Ok(true)
+        }
+    }
+}
+
+pub fn run_stdio() -> io::Result<()> {
+    let (sender, receiver) = mpsc::channel();
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let quit_flag = Arc::new(AtomicBool::new(false));
+    let helper_sender = sender.clone();
+    let helper_stop = Arc::clone(&stop_flag);
+    let helper_quit = Arc::clone(&quit_flag);
+
+    let helper = thread::spawn(move || -> io::Result<()> {
+        let stdin = io::stdin();
+        for line_result in stdin.lock().lines() {
+            let line = line_result?;
+            if !handle_input_line(line, &helper_sender, &helper_stop, &helper_quit)? {
+                break;
+            }
+        }
+        Ok(())
+    });
+
+    drop(sender);
+
+    let stdout = io::stdout();
+    let mut output = io::BufWriter::new(stdout.lock());
+    let mut engine = UciEngine::new();
+    let runtime_result = run_runtime_session(
+        &mut engine,
+        &receiver,
+        &mut output,
+        stop_flag.as_ref(),
+        quit_flag.as_ref(),
+    );
+
+    let helper_result = helper
+        .join()
+        .map_err(|_| io::Error::other("uci input helper thread panicked"))?;
+
+    runtime_result?;
+    helper_result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    fn interrupted_position_fen() -> &'static str {
+        "r2q1rk1/ppp2ppp/2npbn2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8"
+    }
+
+    fn make_runtime_engine() -> UciEngine {
+        let mut engine = UciEngine::new();
+        let response = engine.handle_line(&format!("position fen {}", interrupted_position_fen()));
+        assert!(response.lines.is_empty());
+        engine
+    }
+
+    fn run_with_external_stop(engine: &mut UciEngine, command: &str, delay_ms: u64) -> UciResponse {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let stop_flag = Arc::clone(&stop_flag);
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(delay_ms));
+                stop_flag.store(true, Ordering::Relaxed);
+            })
+        };
+
+        let response = engine.handle_line_with_stop(command, Some(stop_flag.as_ref()));
+        stopper.join().expect("stop helper must join");
+        response
+    }
+
+    #[test]
+    fn go_infinite_requires_runtime_stop_path() {
+        let mut engine = UciEngine::new();
+        let response = engine.handle_line("go infinite");
+        assert!(
+            response
+                .lines
+                .iter()
+                .any(|line| line.contains("go infinite requires the stdio runtime"))
+        );
+    }
+
+    #[test]
+    fn hard_deadline_stop_leaves_root_position_unchanged() {
+        let mut engine = make_runtime_engine();
+        let before = engine.position().to_fen();
+        let before_search_key = engine.position().debug_search_key();
+        let before_history = engine.position().debug_repetition_history_snapshot();
+
+        let response = engine.handle_line("go movetime 0");
+        assert!(
+            response
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+
+        assert_eq!(engine.position().to_fen(), before);
+        assert_eq!(engine.position().debug_search_key(), before_search_key);
+        assert_eq!(
+            engine.position().debug_repetition_history_snapshot(),
+            before_history
+        );
+        engine
+            .position()
+            .validate()
+            .expect("position must remain valid");
+    }
+
+    #[test]
+    fn external_stop_leaves_root_position_unchanged() {
+        let mut engine = make_runtime_engine();
+        let before = engine.position().to_fen();
+        let before_search_key = engine.position().debug_search_key();
+        let before_history = engine.position().debug_repetition_history_snapshot();
+
+        let response = run_with_external_stop(&mut engine, "go infinite", 10);
+        assert!(
+            response
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+
+        assert_eq!(engine.position().to_fen(), before);
+        assert_eq!(engine.position().debug_search_key(), before_search_key);
+        assert_eq!(
+            engine.position().debug_repetition_history_snapshot(),
+            before_history
+        );
+        engine
+            .position()
+            .validate()
+            .expect("position must remain valid");
+    }
+
+    #[test]
+    fn interrupted_search_leaves_tt_service_valid_for_next_command() {
+        let mut engine = make_runtime_engine();
+        let interrupted = run_with_external_stop(&mut engine, "go infinite", 10);
+        assert!(
+            interrupted
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+
+        let follow_up = engine.handle_line("go depth 2");
+        assert!(
+            follow_up
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+        assert!(engine.debug_tt_entry_count() > 0);
+    }
+
+    #[test]
+    fn helper_stop_and_quit_are_immediate_commands() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = AtomicBool::new(false);
+        let quit_flag = AtomicBool::new(false);
+
+        assert!(
+            handle_input_line("stop".to_owned(), &sender, &stop_flag, &quit_flag)
+                .expect("stop handling must succeed")
+        );
+        assert!(stop_flag.load(Ordering::Relaxed));
+        assert!(receiver.try_recv().is_err());
+
+        assert!(
+            !handle_input_line("quit".to_owned(), &sender, &stop_flag, &quit_flag)
+                .expect("quit handling must succeed")
+        );
+        assert!(quit_flag.load(Ordering::Relaxed));
+        assert!(matches!(
+            receiver.try_recv().expect("quit wakeup must be queued"),
+            RuntimeInput::QuitRequested
+        ));
+    }
+
+    #[test]
+    fn position_received_during_search_does_not_mutate_live_search_state_mid_search() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "position startpos moves e2e4".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        let output_text = String::from_utf8(output).expect("runtime output must be utf8");
+        assert_eq!(output_text.matches("bestmove ").count(), 1);
+        assert_eq!(
+            engine.position().to_fen(),
+            "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1"
+        );
+    }
+
+    #[test]
+    fn setoption_hash_received_during_search_takes_effect_only_after_stop_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "setoption name Hash value 32".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        let original_hash = engine.debug_hash_mb();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert_eq!(original_hash, MIN_HASH_MB.max(16));
+        assert_eq!(engine.debug_hash_mb(), 32);
+        assert_eq!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .matches("bestmove ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn setoption_clear_hash_received_during_search_takes_effect_only_after_stop_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go depth 1".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "setoption name Clear Hash".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert_eq!(engine.debug_tt_entry_count(), 0);
+        assert_eq!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .matches("bestmove ")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn ucinewgame_received_during_search_is_deferred_until_after_search_termination() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "ucinewgame".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert_eq!(engine.position().to_fen(), Position::startpos().to_fen());
+        assert_eq!(engine.debug_tt_entry_count(), 0);
+        assert_eq!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .matches("bestmove ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn quit_during_search_exits_cleanly_without_bestmove_output() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "quit".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert!(
+            !String::from_utf8(output)
+                .expect("utf8")
+                .contains("bestmove ")
+        );
+        assert!(quit_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn movetime_uses_equal_soft_and_hard_deadlines() {
+        let engine = UciEngine::new();
+        let request = engine
+            .build_search_request(
+                GoOptions {
+                    movetime_ms: Some(25),
+                    ..GoOptions::default()
+                },
+                None,
+            )
+            .expect("movetime request must build");
+
+        assert_eq!(request.soft_deadline, request.hard_deadline);
+    }
+
+    #[test]
+    fn clock_budget_uses_sudden_death_defaults() {
+        let engine = UciEngine::new();
+        let (soft, hard) = engine
+            .clock_budget_ms(GoOptions {
+                wtime_ms: Some(1_000),
+                btime_ms: Some(1_000),
+                ..GoOptions::default()
+            })
+            .expect("clock budget must build");
+
+        assert_eq!(soft, 39);
+        assert_eq!(hard, 64);
+    }
+
+    #[test]
+    fn clock_budget_honors_movestogo_and_increment() {
+        let engine = UciEngine::new();
+        let (soft, hard) = engine
+            .clock_budget_ms(GoOptions {
+                wtime_ms: Some(5_000),
+                btime_ms: Some(5_000),
+                winc_ms: 1_000,
+                movestogo: Some(10),
+                ..GoOptions::default()
+            })
+            .expect("clock budget must build");
+
+        assert_eq!(soft, 1_240);
+        assert_eq!(hard, 1_860);
+    }
+
+    #[test]
+    fn clock_budget_keeps_low_time_safety_floor() {
+        let engine = UciEngine::new();
+        let (soft, hard) = engine
+            .clock_budget_ms(GoOptions {
+                wtime_ms: Some(20),
+                btime_ms: Some(20),
+                ..GoOptions::default()
+            })
+            .expect("clock budget must build");
+
+        assert_eq!(soft, 0);
+        assert_eq!(hard, 0);
+    }
 }

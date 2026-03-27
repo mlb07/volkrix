@@ -1,6 +1,6 @@
 # Search
 
-Phases 4 through 6 establish Volkrix's deterministic single-thread search baseline, its first transposition-table layer, and the first correctness-first strength pass on top of that baseline.
+Phases 4 through 7 establish Volkrix's deterministic single-thread search baseline, its first transposition-table layer, the first correctness-first strength pass on top of that baseline, and a practical time-controlled UCI runtime around the same single-thread core.
 
 ## Current Shape
 
@@ -14,7 +14,17 @@ Phases 4 through 6 establish Volkrix's deterministic single-thread search baseli
 - aspiration windows around iterative deepening
 - debug-only internal profile hooks for exact Phase 5 fallback and Phase 6 on/off regression work
 - reproducible bench path tied to the real search core
+- UCI-only persistent TT reuse with `Hash` / `Clear Hash`
+- cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
+
+## Phase 7 Runtime Notes
+
+- the search core remains single-threaded
+- the stdio runtime uses one helper thread only to observe `stop` and `quit` while search is active
+- the main thread remains the sole owner of TT resize/clear operations and all position mutation
+- `Hash`, `Clear Hash`, `position`, and `ucinewgame` never race with live TT probe/store activity because they are applied only after the active search fully unwinds
+- fixed-depth bench and regression helpers still run through the deterministic fresh-TT path, so the documented Phase 5 and Phase 6 signatures remain unchanged
 
 ## Phase 6 Retained Heuristics
 
@@ -55,7 +65,6 @@ Still deferred beyond Phase 6:
 - razoring
 - internal iterative reductions
 - singular extensions
-- time-management expansion beyond `go depth`
 - evaluation overhaul
 - SMP
 - NNUE and tablebases
@@ -65,6 +74,6 @@ Still deferred beyond Phase 6:
 - no SMP
 - no null move or LMR in the kept Phase 6 set
 - no public UCI-surface controls for internal heuristics
-- no time management expansion beyond `go depth`
+- no SMP or shared-search work in the Phase 7 runtime model
 
-The goal of these phases is correctness-first search infrastructure and measured, debuggable search-strength growth, not SMP or tuning sprawl.
+The goal of these phases is correctness-first search infrastructure, measured and debuggable search-strength growth, and a practical but still tightly constrained UCI shell.
