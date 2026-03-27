@@ -128,6 +128,75 @@ fn search_leaves_root_position_unchanged() {
 }
 
 #[test]
+fn search_leaves_root_position_unchanged_with_tt_disabled() {
+    let mut position =
+        Position::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3")
+            .expect("FEN parse must succeed");
+    let before = position.to_fen();
+    let before_key = position.zobrist_key();
+    let before_history = position.debug_repetition_history_snapshot();
+
+    let _ = search(&mut position, SearchLimits::new(3).without_tt());
+
+    let after_history = position.debug_repetition_history_snapshot();
+    assert_eq!(position.to_fen(), before);
+    assert_eq!(position.zobrist_key(), before_key);
+    assert_eq!(after_history, before_history);
+    position.validate().expect("position must still validate");
+}
+
+#[test]
+fn tt_enabled_and_disabled_search_agree_on_curated_positions() {
+    let cases = [
+        ("7k/5Q2/7K/8/8/8/8/8 b - - 0 1", 2),
+        ("4k3/8/8/8/8/8/8/3BK3 w - - 0 1", 2),
+        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2),
+        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 2),
+    ];
+
+    for (fen, depth) in cases {
+        let mut with_tt = Position::from_fen(fen).expect("FEN parse must succeed");
+        let mut without_tt = Position::from_fen(fen).expect("FEN parse must succeed");
+
+        let tt_result = search(&mut with_tt, SearchLimits::new(depth));
+        let no_tt_result = search(&mut without_tt, SearchLimits::new(depth).without_tt());
+
+        assert_eq!(tt_result.score, no_tt_result.score, "{fen}");
+        match (tt_result.best_move, no_tt_result.best_move) {
+            (Some(tt_move), Some(no_tt_move)) => {
+                with_tt
+                    .apply_uci_move(&tt_move.to_string())
+                    .expect("TT bestmove must be legal");
+                without_tt
+                    .apply_uci_move(&no_tt_move.to_string())
+                    .expect("non-TT bestmove must be legal");
+            }
+            (None, None) => {}
+            other => panic!("TT and non-TT move availability mismatch for {fen}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn exact_bestmove_regressions_use_unique_root_positions() {
+    let cases = [("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2, "b6b7")];
+
+    for (fen, depth, expected_move) in cases {
+        let mut with_tt = Position::from_fen(fen).expect("FEN parse must succeed");
+        let mut without_tt = Position::from_fen(fen).expect("FEN parse must succeed");
+
+        assert_eq!(bestmove(&mut with_tt, depth), expected_move);
+        assert_eq!(
+            search(&mut without_tt, SearchLimits::new(depth).without_tt())
+                .best_move
+                .map(|mv| mv.to_string())
+                .unwrap_or_else(|| "0000".to_owned()),
+            expected_move
+        );
+    }
+}
+
+#[test]
 fn quiescence_avoids_simple_horizon_blunders() {
     let mut position =
         Position::from_fen("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1").expect("FEN parse must succeed");

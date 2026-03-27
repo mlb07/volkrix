@@ -11,10 +11,10 @@ The repository currently includes:
 - Phase 2 attack generation, staged legal move generation, canonical perft support, and divide regression artifacts
 - Phase 3 exact make/unmake restoration, Zobrist, repetition, rules/status helpers, and SEE
 - Phase 4 deterministic single-thread search with iterative deepening, alpha-beta, quiescence, PV tracking, and a simple classical evaluation
+- Phase 5 single-thread transposition table integration, deterministic TT-on/TT-off search paths, and a reproducible bench path tied to the real search core
 
 What is intentionally not here yet:
 
-- transposition tables
 - SMP or other shared search infrastructure
 - advanced pruning and reduction heuristics
 - tablebases or NNUE
@@ -50,6 +50,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo build
 cargo test
+cargo run --release -- bench
 ```
 
 ## Current UCI Surface

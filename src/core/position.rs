@@ -201,6 +201,22 @@ impl Position {
         self.zobrist_key
     }
 
+    pub(crate) fn search_key(&self) -> u64 {
+        let history = self.repetition_history.as_slice();
+        let relevant_len = usize::min(history.len(), self.halfmove_clock as usize + 1);
+        let start = history.len().saturating_sub(relevant_len);
+
+        let mut hash = mix_u64(self.zobrist_key ^ ((self.halfmove_clock as u64) << 48));
+        hash ^= mix_u64(relevant_len as u64);
+        for (offset, key) in history[start..].iter().enumerate() {
+            let mixed =
+                mix_u64(key.wrapping_add((offset as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+            hash ^= mixed;
+            hash = hash.rotate_left(11);
+        }
+        hash
+    }
+
     #[cfg(any(test, debug_assertions))]
     pub fn debug_repetition_history_snapshot(&self) -> Vec<u64> {
         self.repetition_history.as_slice().to_vec()
@@ -1451,6 +1467,15 @@ fn pop_lsb(bitboard: &mut u64) -> Option<Square> {
     let square = Square::from_index_unchecked(bitboard.trailing_zeros() as u8);
     *bitboard &= *bitboard - 1;
     Some(square)
+}
+
+fn mix_u64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value
 }
 
 fn clear_castling_right_for_square(rights: &mut CastlingRights, square: Square) {

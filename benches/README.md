@@ -1,6 +1,11 @@
 # Bench Scaffolding
 
-Phase 0 establishes the benchmark directory and command surface.
+Phase 5 adds the first reproducible bench path tied to the real search core.
 
-Concrete engine benchmarks land in later phases once move generation, perft, and search have stable correctness targets.
+Use:
 
+```bash
+cargo run --release -- bench
+```
+
+The `benches/` directory remains available for later dedicated benchmark harnesses once the engine grows beyond the current single-thread TT/search baseline.

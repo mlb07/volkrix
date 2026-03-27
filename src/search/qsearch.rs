@@ -42,7 +42,7 @@ pub(crate) fn qsearch(
     }
 
     for index in 0..legal_moves.len() {
-        context.pick_next_move(position, &mut legal_moves, index, !in_check);
+        context.pick_next_move(position, &mut legal_moves, index, !in_check, None);
         let mv = legal_moves.get(index);
         if !in_check && !is_quiescence_move(mv, position) {
             continue;

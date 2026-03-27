@@ -32,7 +32,7 @@ def main() -> int:
     if args.command == "test":
         return run(["cargo", "test"])
     if args.command == "bench":
-        return run(["cargo", "bench"])
+        return run(["cargo", "run", "--release", "--", "bench"])
     if args.command == "release":
         command = ["cargo", "build", "--release"]
         if args.target:
@@ -45,4 +45,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
