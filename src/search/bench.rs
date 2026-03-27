@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::core::Position;
 
-use super::{SearchLimits, root::search};
+use super::{SearchLimits, limits::SearchHeuristics, root::search};
 
 const BENCH_FENS: [&str; 4] = [
     crate::core::STARTPOS_FEN,
@@ -16,6 +16,7 @@ pub struct BenchConfig {
     pub depth: u8,
     pub tt_enabled: bool,
     pub hash_mb: usize,
+    pub(crate) heuristics: SearchHeuristics,
 }
 
 impl BenchConfig {
@@ -24,6 +25,7 @@ impl BenchConfig {
             depth,
             tt_enabled: true,
             hash_mb: super::tt::DEFAULT_HASH_MB,
+            heuristics: SearchHeuristics::phase6_default(),
         }
     }
 
@@ -34,6 +36,11 @@ impl BenchConfig {
 
     pub const fn with_hash_mb(mut self, hash_mb: usize) -> Self {
         self.hash_mb = hash_mb;
+        self
+    }
+
+    pub(crate) const fn with_heuristics(mut self, heuristics: SearchHeuristics) -> Self {
+        self.heuristics = heuristics;
         self
     }
 }
@@ -90,7 +97,8 @@ pub fn run_bench(config: BenchConfig) -> BenchResult {
         let mut position = Position::from_fen(fen).expect("bench FEN must parse");
         let limits = SearchLimits::new(config.depth)
             .with_hash_mb(config.hash_mb)
-            .with_tt(config.tt_enabled);
+            .with_tt(config.tt_enabled)
+            .with_heuristics(config.heuristics);
         let result = search(&mut position, limits);
         total_nodes += result.nodes;
 

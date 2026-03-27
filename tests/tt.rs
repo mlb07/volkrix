@@ -1,5 +1,10 @@
+#![cfg(any(debug_assertions, feature = "internal-testing"))]
+
 use volkrix::core::Position;
-use volkrix::search::{BenchConfig, SearchLimits, run_bench, search};
+use volkrix::search::{
+    BenchConfig, SearchLimits, internal::HeuristicProfile, internal::run_profile_bench, run_bench,
+    search,
+};
 
 #[test]
 fn bench_is_reproducible_with_tt_enabled() {
@@ -39,4 +44,33 @@ fn tt_on_and_tt_off_return_same_unique_bestmove_on_curated_position() {
         no_tt.best_move.map(|mv| mv.to_string()),
         Some("b6b7".to_owned())
     );
+}
+
+#[test]
+#[ignore = "manual benchmark profile report for Phase 6 heuristics"]
+fn phase_six_heuristic_profile_report() {
+    let profiles = [
+        ("phase5_baseline", HeuristicProfile::Phase5Baseline),
+        ("pv_move_ordering", HeuristicProfile::PvMoveOrdering),
+        ("capture_buckets", HeuristicProfile::CaptureBuckets),
+        ("killer_moves", HeuristicProfile::KillerMoves),
+        ("quiet_history", HeuristicProfile::QuietHistory),
+        ("aspiration_windows", HeuristicProfile::AspirationWindows),
+        ("phase6_default", HeuristicProfile::Phase6Default),
+    ];
+
+    for (name, profile) in profiles {
+        let result = run_profile_bench(5, profile);
+        println!(
+            "profile {name}: nodes {} checksum {:016x}",
+            result.total_nodes, result.checksum
+        );
+    }
+}
+
+#[test]
+fn phase_five_baseline_matches_historical_phase_five_bench_signature() {
+    let result = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
+    assert_eq!(result.total_nodes, 443_712);
+    assert_eq!(result.checksum, 0xb1ac_3c8f_c22d_f05f);
 }

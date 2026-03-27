@@ -12,6 +12,7 @@ The repository currently includes:
 - Phase 3 exact make/unmake restoration, Zobrist, repetition, rules/status helpers, and SEE
 - Phase 4 deterministic single-thread search with iterative deepening, alpha-beta, quiescence, PV tracking, and a simple classical evaluation
 - Phase 5 single-thread transposition table integration, deterministic TT-on/TT-off search paths, and a reproducible bench path tied to the real search core
+- Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic internal heuristic toggles, and documented Phase 5 baseline comparisons
 
 What is intentionally not here yet:
 

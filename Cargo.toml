@@ -7,4 +7,7 @@ description = "Volkrix, a clean-room Rust UCI chess engine."
 repository = "https://github.com/example/volkrix"
 readme = "README.md"
 
+[features]
+internal-testing = []
+
 [dependencies]

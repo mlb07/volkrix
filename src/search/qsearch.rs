@@ -2,7 +2,7 @@ use crate::core::{MoveList, Position};
 
 use super::{
     eval,
-    root::{MAX_PLY, SearchContext, is_draw, is_quiescence_move, terminal_score},
+    root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, is_quiescence_move, terminal_score},
 };
 
 pub(crate) fn qsearch(
@@ -40,9 +40,15 @@ pub(crate) fn qsearch(
     if legal_moves.is_empty() {
         return terminal_score(position, ply);
     }
+    let ordering_hints = MoveOrderHints {
+        ply,
+        quiescence_only: !in_check,
+        pv_move: None,
+        tt_move: None,
+    };
 
     for index in 0..legal_moves.len() {
-        context.pick_next_move(position, &mut legal_moves, index, !in_check, None);
+        context.pick_next_move(position, &mut legal_moves, index, ordering_hints);
         let mv = legal_moves.get(index);
         if !in_check && !is_quiescence_move(mv, position) {
             continue;

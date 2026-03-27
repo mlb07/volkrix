@@ -1,5 +1,8 @@
 mod bench;
 pub mod eval;
+#[cfg(any(debug_assertions, feature = "internal-testing"))]
+#[doc(hidden)]
+pub mod internal;
 pub mod limits;
 mod qsearch;
 mod root;

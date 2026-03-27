@@ -222,6 +222,11 @@ impl Position {
         self.repetition_history.as_slice().to_vec()
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn debug_search_key(&self) -> u64 {
+        self.search_key()
+    }
+
     pub fn is_draw_by_repetition(&self) -> bool {
         self.repetition_history
             .is_threefold_repetition(self.halfmove_clock)
