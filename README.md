@@ -8,6 +8,7 @@ The repository currently includes:
 
 - Phase 0 repo scaffolding, CI, docs, licensing, and developer scripts
 - Phase 1 core chess types, position model, FEN parsing/serialization, legal move application for standard chess, and a minimal UCI shell
+- Phase 2 attack generation, staged legal move generation, canonical perft support, and divide regression artifacts
 
 What is intentionally not here yet:
 
@@ -66,4 +67,3 @@ Malformed FEN strings, invalid moves, and malformed UCI commands are handled wit
 
 - `docs/architecture.md`
 - `docs/roadmap.md`
-

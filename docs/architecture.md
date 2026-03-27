@@ -1,6 +1,6 @@
 # Volkrix Architecture
 
-## Phase 0 and Phase 1
+## Phase 0 through Phase 2
 
 Volkrix currently exposes a single public surface: a command-line UCI engine binary.
 
@@ -34,7 +34,14 @@ The move path is intentionally not a throwaway scaffold:
 - move application supports quiets, captures, promotions, double pawn pushes, en passant, and castling
 - legality is checked through the same make/unmake path used by move generation
 
-Phase 2 will extend this path with stronger move generation infrastructure, attack tables, and perft coverage rather than replacing it.
+Phase 2 extends this path with:
+
+- reusable attack queries
+- staged pseudo-legal generation
+- fast legality screening
+- canonical perft support
+
+`generate_legal_moves(&mut self, ...)` remains mutable in Phase 2 because en passant still needs temporary `make_move` / `unmake_move` validation to catch discovered x-ray attacks on the king after both pawns disappear from the original line.
 
 ## UCI
 
@@ -49,4 +56,3 @@ Supported commands in Phase 1:
 - `quit`
 
 Malformed input must never panic or corrupt engine state.
-

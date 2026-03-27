@@ -1,6 +1,7 @@
 use std::{error::Error, fmt};
 
 use super::{
+    attacks,
     chess_move::{
         FLAG_CAPTURE, FLAG_CASTLE, FLAG_DOUBLE_PAWN_PUSH, FLAG_EN_PASSANT, Move, ParsedMove,
     },
@@ -14,28 +15,7 @@ const PIECE_LIST_CAPACITY: usize = 16;
 const OCCUPANCY_WHITE: usize = 0;
 const OCCUPANCY_BLACK: usize = 1;
 const OCCUPANCY_ALL: usize = 2;
-const KNIGHT_OFFSETS: [(i8, i8); 8] = [
-    (-2, -1),
-    (-2, 1),
-    (-1, -2),
-    (-1, 2),
-    (1, -2),
-    (1, 2),
-    (2, -1),
-    (2, 1),
-];
-const KING_OFFSETS: [(i8, i8); 8] = [
-    (-1, -1),
-    (-1, 0),
-    (-1, 1),
-    (0, -1),
-    (0, 1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-];
-const BISHOP_DIRECTIONS: [(i8, i8); 4] = [(-1, -1), (-1, 1), (1, -1), (1, 1)];
-const ROOK_DIRECTIONS: [(i8, i8); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+const ALL_TARGETS: u64 = u64::MAX;
 
 #[derive(Clone, Copy, Debug)]
 struct SquareList {
@@ -59,7 +39,7 @@ impl SquareList {
     }
 
     fn remove(&mut self, square: Square) -> bool {
-        let mut index = 0;
+        let mut index = 0usize;
         while index < self.len as usize {
             if self.squares[index] == square {
                 let last_index = self.len as usize - 1;
@@ -103,6 +83,21 @@ pub struct UndoState {
     pub previous_en_passant: Option<Square>,
     pub previous_halfmove_clock: u16,
     pub previous_fullmove_number: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MoveGenStage {
+    All,
+    Captures,
+    Quiets,
+    Evasions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CheckInfo {
+    pub checkers: u64,
+    pub pinned: u64,
+    pub block_mask: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -311,69 +306,38 @@ impl Position {
     }
 
     pub fn is_square_attacked(&self, square: Square, by_color: Color) -> bool {
-        let pawn_attack_offsets = match by_color {
-            Color::White => [(-1, -1), (1, -1)],
-            Color::Black => [(-1, 1), (1, 1)],
-        };
-
-        for (file_delta, rank_delta) in pawn_attack_offsets {
-            if let Some(attacker_square) = square.offset(file_delta, rank_delta)
-                && self.piece_at(attacker_square)
-                    == Some(Piece::from_parts(by_color, PieceType::Pawn))
-            {
-                return true;
-            }
-        }
-
-        for (file_delta, rank_delta) in KNIGHT_OFFSETS {
-            if let Some(attacker_square) = square.offset(file_delta, rank_delta)
-                && self.piece_at(attacker_square)
-                    == Some(Piece::from_parts(by_color, PieceType::Knight))
-            {
-                return true;
-            }
-        }
-
-        for (file_delta, rank_delta) in KING_OFFSETS {
-            if let Some(attacker_square) = square.offset(file_delta, rank_delta)
-                && self.piece_at(attacker_square)
-                    == Some(Piece::from_parts(by_color, PieceType::King))
-            {
-                return true;
-            }
-        }
-
-        if self.sliding_attack(
-            square,
-            by_color,
-            &BISHOP_DIRECTIONS,
-            &[PieceType::Bishop, PieceType::Queen],
-        ) {
-            return true;
-        }
-
-        self.sliding_attack(
-            square,
-            by_color,
-            &ROOK_DIRECTIONS,
-            &[PieceType::Rook, PieceType::Queen],
-        )
+        self.attackers_to(square, by_color) != 0
     }
 
     pub fn is_in_check(&self, color: Color) -> bool {
-        self.is_square_attacked(self.king_squares[color.index()], color.opposite())
+        self.attackers_to(self.king_squares[color.index()], color.opposite()) != 0
     }
 
+    /// Generates legal moves into a fixed-capacity buffer.
+    ///
+    /// This requires mutable access even though legal generation is logically read-only because
+    /// en passant still needs temporary `make_move` / `unmake_move` validation. That edge case can
+    /// uncover a rook, bishop, or queen attack on the king after both pawns disappear from their
+    /// original file/rank relationship, and Phase 2 intentionally reuses the authoritative move
+    /// application path for that check instead of maintaining a second special-case legality path.
     pub fn generate_legal_moves(&mut self, moves: &mut MoveList) {
         moves.clear();
 
+        let info = self.check_info();
         let mut pseudo_legal = MoveList::new();
-        self.generate_pseudo_legal_moves(&mut pseudo_legal);
+
+        if info.checkers.count_ones() >= 2 {
+            self.generate_king_moves(MoveGenStage::Captures, ALL_TARGETS, &mut pseudo_legal);
+            self.generate_king_moves(MoveGenStage::Quiets, ALL_TARGETS, &mut pseudo_legal);
+        } else if info.checkers != 0 {
+            self.generate_evasions(&info, &mut pseudo_legal);
+        } else {
+            self.generate_pseudo_legal(MoveGenStage::All, &mut pseudo_legal);
+        }
 
         for mv in pseudo_legal.as_slice().iter().copied() {
-            if let Ok(undo) = self.make_move(mv) {
+            if self.is_legal_fast(mv, &info) {
                 moves.push(mv);
-                self.unmake_move(mv, undo);
             }
         }
     }
@@ -454,71 +418,264 @@ impl Position {
         }
     }
 
-    fn generate_pseudo_legal_moves(&self, moves: &mut MoveList) {
-        moves.clear();
-        let color = self.side_to_move;
-
-        for from in self.piece_lists[color.index()][PieceType::Pawn.index()].iter() {
-            self.generate_pawn_moves(from, color, moves);
-        }
-        for from in self.piece_lists[color.index()][PieceType::Knight.index()].iter() {
-            self.generate_jump_moves(from, color, PieceType::Knight, &KNIGHT_OFFSETS, moves);
-        }
-        for from in self.piece_lists[color.index()][PieceType::Bishop.index()].iter() {
-            self.generate_slider_moves(from, color, &BISHOP_DIRECTIONS, moves);
-        }
-        for from in self.piece_lists[color.index()][PieceType::Rook.index()].iter() {
-            self.generate_slider_moves(from, color, &ROOK_DIRECTIONS, moves);
-        }
-        for from in self.piece_lists[color.index()][PieceType::Queen.index()].iter() {
-            self.generate_slider_moves(from, color, &BISHOP_DIRECTIONS, moves);
-            self.generate_slider_moves(from, color, &ROOK_DIRECTIONS, moves);
-        }
-        for from in self.piece_lists[color.index()][PieceType::King.index()].iter() {
-            self.generate_jump_moves(from, color, PieceType::King, &KING_OFFSETS, moves);
-            self.generate_castling_moves(color, moves);
-        }
+    pub(crate) fn attackers_to(&self, square: Square, by_color: Color) -> u64 {
+        self.attackers_to_with_occupancy(square, by_color, self.occupancies[OCCUPANCY_ALL], 0)
     }
 
-    fn generate_pawn_moves(&self, from: Square, color: Color, moves: &mut MoveList) {
-        let forward_rank_delta = color.pawn_direction();
-        if let Some(one_step) = from.offset(0, forward_rank_delta)
-            && self.piece_at(one_step).is_none()
-        {
-            if from.rank() == color.promotion_from_rank() {
-                for promotion_piece in PieceType::promotion_pieces() {
-                    moves.push(Move::new(from, one_step).with_promotion(promotion_piece));
-                }
-            } else {
-                moves.push(Move::new(from, one_step));
-                if from.rank() == color.pawn_start_rank()
-                    && let Some(two_step) = from.offset(0, forward_rank_delta * 2)
-                    && self.piece_at(two_step).is_none()
-                {
-                    moves.push(Move::new(from, two_step).with_flags(FLAG_DOUBLE_PAWN_PUSH));
-                }
+    pub(crate) fn check_info(&self) -> CheckInfo {
+        let us = self.side_to_move;
+        let them = us.opposite();
+        let king_square = self.king_squares[us.index()];
+        let checkers = self.attackers_to(king_square, them);
+        let mut pinned = 0u64;
+
+        let diagonal_sliders =
+            self.pieces(them, PieceType::Bishop) | self.pieces(them, PieceType::Queen);
+        let mut diagonal = diagonal_sliders;
+        while let Some(slider_square) = pop_lsb(&mut diagonal) {
+            if !is_diagonal_alignment(king_square, slider_square) {
+                continue;
+            }
+            let between = attacks::between(king_square, slider_square);
+            let blockers = between & self.occupancies[OCCUPANCY_ALL];
+            if blockers.count_ones() == 1 && blockers & self.occupancies[us.index()] != 0 {
+                pinned |= blockers;
             }
         }
 
-        for file_delta in [-1, 1] {
-            if let Some(target) = from.offset(file_delta, forward_rank_delta) {
-                if let Some(target_piece) = self.piece_at(target) {
-                    if target_piece.color() != color {
-                        if from.rank() == color.promotion_from_rank() {
+        let orthogonal_sliders =
+            self.pieces(them, PieceType::Rook) | self.pieces(them, PieceType::Queen);
+        let mut orthogonal = orthogonal_sliders;
+        while let Some(slider_square) = pop_lsb(&mut orthogonal) {
+            if !is_orthogonal_alignment(king_square, slider_square) {
+                continue;
+            }
+            let between = attacks::between(king_square, slider_square);
+            let blockers = between & self.occupancies[OCCUPANCY_ALL];
+            if blockers.count_ones() == 1 && blockers & self.occupancies[us.index()] != 0 {
+                pinned |= blockers;
+            }
+        }
+
+        let block_mask = if checkers.count_ones() == 1 {
+            let checker_square = Square::from_index_unchecked(checkers.trailing_zeros() as u8);
+            let checker_piece = self
+                .piece_at(checker_square)
+                .expect("attacker bitboard must point to an occupied square");
+            match checker_piece.piece_type() {
+                PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
+                    attacks::between(king_square, checker_square) | checker_square.bit()
+                }
+                PieceType::Pawn | PieceType::Knight | PieceType::King => checker_square.bit(),
+            }
+        } else if checkers == 0 {
+            ALL_TARGETS
+        } else {
+            0
+        };
+
+        CheckInfo {
+            checkers,
+            pinned,
+            block_mask,
+        }
+    }
+
+    pub(crate) fn generate_pseudo_legal(&self, stage: MoveGenStage, moves: &mut MoveList) {
+        moves.clear();
+        match stage {
+            MoveGenStage::All => {
+                self.generate_non_king_moves(MoveGenStage::Captures, ALL_TARGETS, moves);
+                self.generate_king_moves(MoveGenStage::Captures, ALL_TARGETS, moves);
+                self.generate_non_king_moves(MoveGenStage::Quiets, ALL_TARGETS, moves);
+                self.generate_king_moves(MoveGenStage::Quiets, ALL_TARGETS, moves);
+            }
+            MoveGenStage::Captures | MoveGenStage::Quiets => {
+                self.generate_non_king_moves(stage, ALL_TARGETS, moves);
+                self.generate_king_moves(stage, ALL_TARGETS, moves);
+            }
+            MoveGenStage::Evasions => {}
+        }
+    }
+
+    pub(crate) fn generate_evasions(&self, info: &CheckInfo, moves: &mut MoveList) {
+        let _stage = MoveGenStage::Evasions;
+        moves.clear();
+        self.generate_king_moves(MoveGenStage::Captures, ALL_TARGETS, moves);
+        self.generate_king_moves(MoveGenStage::Quiets, ALL_TARGETS, moves);
+
+        if info.checkers.count_ones() >= 2 {
+            return;
+        }
+
+        self.generate_non_king_moves(MoveGenStage::Captures, info.block_mask, moves);
+        self.generate_non_king_moves(MoveGenStage::Quiets, info.block_mask, moves);
+    }
+
+    pub(crate) fn is_legal_fast(&mut self, mv: Move, info: &CheckInfo) -> bool {
+        let moving_piece = match self.piece_at(mv.from()) {
+            Some(piece) => piece,
+            None => return false,
+        };
+
+        if mv.is_en_passant() {
+            return self.validate_with_make_unmake(mv);
+        }
+
+        if moving_piece.piece_type() == PieceType::King {
+            if mv.is_castle() {
+                return true;
+            }
+            return self.is_king_move_legal(mv);
+        }
+
+        if info.checkers != 0 && mv.to().bit() & info.block_mask == 0 {
+            return false;
+        }
+
+        if info.pinned & mv.from().bit() != 0 {
+            let king_square = self.king_squares[self.side_to_move.index()];
+            if attacks::line(king_square, mv.from()) & mv.to().bit() == 0 {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn generate_non_king_moves(&self, stage: MoveGenStage, target_mask: u64, moves: &mut MoveList) {
+        let color = self.side_to_move;
+
+        let mut pawns = self.pieces(color, PieceType::Pawn);
+        while let Some(from) = pop_lsb(&mut pawns) {
+            self.generate_pawn_moves(from, color, stage, target_mask, moves);
+        }
+
+        let mut knights = self.pieces(color, PieceType::Knight);
+        while let Some(from) = pop_lsb(&mut knights) {
+            self.generate_jump_moves(from, color, PieceType::Knight, stage, target_mask, moves);
+        }
+
+        let mut bishops = self.pieces(color, PieceType::Bishop);
+        while let Some(from) = pop_lsb(&mut bishops) {
+            self.generate_slider_moves(from, color, PieceType::Bishop, stage, target_mask, moves);
+        }
+
+        let mut rooks = self.pieces(color, PieceType::Rook);
+        while let Some(from) = pop_lsb(&mut rooks) {
+            self.generate_slider_moves(from, color, PieceType::Rook, stage, target_mask, moves);
+        }
+
+        let mut queens = self.pieces(color, PieceType::Queen);
+        while let Some(from) = pop_lsb(&mut queens) {
+            self.generate_slider_moves(from, color, PieceType::Queen, stage, target_mask, moves);
+        }
+    }
+
+    fn generate_king_moves(&self, stage: MoveGenStage, target_mask: u64, moves: &mut MoveList) {
+        let color = self.side_to_move;
+        let from = self.king_squares[color.index()];
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let friendly = self.occupancies[color.index()];
+        let enemy = self.occupancies[color.opposite().index()];
+        let attacks = attacks::king_attacks(from);
+
+        match stage {
+            MoveGenStage::Captures => {
+                let mut targets = attacks & enemy & target_mask;
+                while let Some(to) = pop_lsb(&mut targets) {
+                    moves.push(Move::new(from, to).with_flags(FLAG_CAPTURE));
+                }
+            }
+            MoveGenStage::Quiets => {
+                let mut targets = attacks & !occupied & target_mask;
+                while let Some(to) = pop_lsb(&mut targets) {
+                    moves.push(Move::new(from, to));
+                }
+                self.generate_castling_moves(color, moves);
+            }
+            MoveGenStage::All | MoveGenStage::Evasions => {
+                debug_assert!(
+                    false,
+                    "king move generation expects captures or quiets stage"
+                );
+            }
+        }
+
+        let _ = friendly;
+    }
+
+    fn generate_pawn_moves(
+        &self,
+        from: Square,
+        color: Color,
+        stage: MoveGenStage,
+        target_mask: u64,
+        moves: &mut MoveList,
+    ) {
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let enemy = self.occupancies[color.opposite().index()];
+        let promotion_rank = match color {
+            Color::White => 7,
+            Color::Black => 0,
+        };
+
+        match stage {
+            MoveGenStage::Captures => {
+                let mut captures = attacks::pawn_attacks(color, from) & enemy & target_mask;
+                while let Some(to) = pop_lsb(&mut captures) {
+                    if to.rank() == promotion_rank {
+                        for promotion_piece in PieceType::promotion_pieces() {
+                            moves.push(
+                                Move::new(from, to)
+                                    .with_flags(FLAG_CAPTURE)
+                                    .with_promotion(promotion_piece),
+                            );
+                        }
+                    } else {
+                        moves.push(Move::new(from, to).with_flags(FLAG_CAPTURE));
+                    }
+                }
+
+                if let Some(en_passant) = self.en_passant
+                    && attacks::pawn_attacks(color, from) & en_passant.bit() != 0
+                {
+                    moves.push(
+                        Move::new(from, en_passant).with_flags(FLAG_CAPTURE | FLAG_EN_PASSANT),
+                    );
+                }
+            }
+            MoveGenStage::Quiets => {
+                if let Some(one_step) = from.offset(0, color.pawn_direction())
+                    && occupied & one_step.bit() == 0
+                {
+                    if target_mask & one_step.bit() != 0 {
+                        if one_step.rank() == promotion_rank {
                             for promotion_piece in PieceType::promotion_pieces() {
                                 moves.push(
-                                    Move::new(from, target)
-                                        .with_flags(FLAG_CAPTURE)
-                                        .with_promotion(promotion_piece),
+                                    Move::new(from, one_step).with_promotion(promotion_piece),
                                 );
                             }
                         } else {
-                            moves.push(Move::new(from, target).with_flags(FLAG_CAPTURE));
+                            moves.push(Move::new(from, one_step));
                         }
                     }
-                } else if Some(target) == self.en_passant {
-                    moves.push(Move::new(from, target).with_flags(FLAG_CAPTURE | FLAG_EN_PASSANT));
+
+                    if one_step.rank() != promotion_rank
+                        && from.rank() == color.pawn_start_rank()
+                        && let Some(two_step) = from.offset(0, color.pawn_direction() * 2)
+                        && occupied & two_step.bit() == 0
+                        && target_mask & two_step.bit() != 0
+                    {
+                        moves.push(Move::new(from, two_step).with_flags(FLAG_DOUBLE_PAWN_PUSH));
+                    }
                 }
+            }
+            MoveGenStage::All | MoveGenStage::Evasions => {
+                debug_assert!(
+                    false,
+                    "pawn move generation expects captures or quiets stage"
+                );
             }
         }
     }
@@ -528,19 +685,37 @@ impl Position {
         from: Square,
         color: Color,
         piece_type: PieceType,
-        offsets: &[(i8, i8)],
+        stage: MoveGenStage,
+        target_mask: u64,
         moves: &mut MoveList,
     ) {
-        debug_assert!(matches!(piece_type, PieceType::Knight | PieceType::King));
+        let attack_mask = match piece_type {
+            PieceType::Knight => attacks::knight_attacks(from),
+            PieceType::King => attacks::king_attacks(from),
+            _ => unreachable!("jump move generation only supports knights and kings"),
+        };
 
-        for &(file_delta, rank_delta) in offsets {
-            if let Some(target) = from.offset(file_delta, rank_delta) {
-                match self.piece_at(target) {
-                    Some(target_piece) if target_piece.color() == color => {}
-                    Some(_) => moves.push(Move::new(from, target).with_flags(FLAG_CAPTURE)),
-                    None => moves.push(Move::new(from, target)),
-                }
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let enemy = self.occupancies[color.opposite().index()];
+        let targets = match stage {
+            MoveGenStage::Captures => attack_mask & enemy & target_mask,
+            MoveGenStage::Quiets => attack_mask & !occupied & target_mask,
+            MoveGenStage::All | MoveGenStage::Evasions => {
+                debug_assert!(
+                    false,
+                    "jump move generation expects captures or quiets stage"
+                );
+                0
             }
+        };
+
+        let mut targets = targets;
+        while let Some(to) = pop_lsb(&mut targets) {
+            let mut mv = Move::new(from, to);
+            if stage == MoveGenStage::Captures {
+                mv = mv.with_flags(FLAG_CAPTURE);
+            }
+            moves.push(mv);
         }
     }
 
@@ -548,22 +723,39 @@ impl Position {
         &self,
         from: Square,
         color: Color,
-        directions: &[(i8, i8)],
+        piece_type: PieceType,
+        stage: MoveGenStage,
+        target_mask: u64,
         moves: &mut MoveList,
     ) {
-        for &(file_delta, rank_delta) in directions {
-            let mut current = from;
-            while let Some(target) = current.offset(file_delta, rank_delta) {
-                match self.piece_at(target) {
-                    Some(target_piece) if target_piece.color() == color => break,
-                    Some(_) => {
-                        moves.push(Move::new(from, target).with_flags(FLAG_CAPTURE));
-                        break;
-                    }
-                    None => moves.push(Move::new(from, target)),
-                }
-                current = target;
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let enemy = self.occupancies[color.opposite().index()];
+        let attack_mask = match piece_type {
+            PieceType::Bishop => attacks::bishop_attacks(from, occupied),
+            PieceType::Rook => attacks::rook_attacks(from, occupied),
+            PieceType::Queen => attacks::queen_attacks(from, occupied),
+            _ => unreachable!("slider move generation only supports bishops, rooks, and queens"),
+        };
+
+        let targets = match stage {
+            MoveGenStage::Captures => attack_mask & enemy & target_mask,
+            MoveGenStage::Quiets => attack_mask & !occupied & target_mask,
+            MoveGenStage::All | MoveGenStage::Evasions => {
+                debug_assert!(
+                    false,
+                    "slider move generation expects captures or quiets stage"
+                );
+                0
             }
+        };
+
+        let mut targets = targets;
+        while let Some(to) = pop_lsb(&mut targets) {
+            let mut mv = Move::new(from, to);
+            if stage == MoveGenStage::Captures {
+                mv = mv.with_flags(FLAG_CAPTURE);
+            }
+            moves.push(mv);
         }
     }
 
@@ -793,27 +985,94 @@ impl Position {
         Some(piece)
     }
 
-    fn sliding_attack(
+    fn pieces(&self, color: Color, piece_type: PieceType) -> u64 {
+        self.piece_bitboards[color.index()][piece_type.index()]
+    }
+
+    fn attackers_to_with_occupancy(
         &self,
         square: Square,
         by_color: Color,
-        directions: &[(i8, i8)],
-        attackers: &[PieceType],
-    ) -> bool {
-        for &(file_delta, rank_delta) in directions {
-            let mut current = square;
-            while let Some(next) = current.offset(file_delta, rank_delta) {
-                if let Some(piece) = self.piece_at(next) {
-                    if piece.color() == by_color && attackers.contains(&piece.piece_type()) {
-                        return true;
-                    }
-                    break;
-                }
-                current = next;
+        occupied: u64,
+        ignored_squares: u64,
+    ) -> u64 {
+        let enemy_pawns = self.pieces(by_color, PieceType::Pawn) & !ignored_squares;
+        let enemy_knights = self.pieces(by_color, PieceType::Knight) & !ignored_squares;
+        let enemy_bishops = self.pieces(by_color, PieceType::Bishop) & !ignored_squares;
+        let enemy_rooks = self.pieces(by_color, PieceType::Rook) & !ignored_squares;
+        let enemy_queens = self.pieces(by_color, PieceType::Queen) & !ignored_squares;
+        let enemy_king = self.pieces(by_color, PieceType::King) & !ignored_squares;
+
+        (attacks::pawn_attackers_to(square, by_color) & enemy_pawns)
+            | (attacks::knight_attacks(square) & enemy_knights)
+            | (attacks::bishop_attacks(square, occupied) & (enemy_bishops | enemy_queens))
+            | (attacks::rook_attacks(square, occupied) & (enemy_rooks | enemy_queens))
+            | (attacks::king_attacks(square) & enemy_king)
+    }
+
+    fn is_king_move_legal(&self, mv: Move) -> bool {
+        let us = self.side_to_move;
+        let them = us.opposite();
+        let from = mv.from();
+        let to = mv.to();
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let ignored_squares = if let Some(captured_piece) = self.piece_at(to) {
+            if captured_piece.color() == them {
+                to.bit()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+        let occupied_after = (occupied & !from.bit() & !ignored_squares) | to.bit();
+
+        self.attackers_to_with_occupancy(to, them, occupied_after, ignored_squares) == 0
+    }
+
+    fn validate_with_make_unmake(&mut self, mv: Move) -> bool {
+        match self.make_move(mv) {
+            Ok(undo) => {
+                self.unmake_move(mv, undo);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Position {
+    fn generate_legal_moves_slow(&mut self, moves: &mut MoveList) {
+        moves.clear();
+        let mut pseudo_legal = MoveList::new();
+        self.generate_pseudo_legal(MoveGenStage::All, &mut pseudo_legal);
+
+        for mv in pseudo_legal.as_slice().iter().copied() {
+            if let Ok(undo) = self.make_move(mv) {
+                moves.push(mv);
+                self.unmake_move(mv, undo);
             }
         }
-        false
     }
+}
+
+fn pop_lsb(bitboard: &mut u64) -> Option<Square> {
+    if *bitboard == 0 {
+        return None;
+    }
+
+    let square = Square::from_index_unchecked(bitboard.trailing_zeros() as u8);
+    *bitboard &= *bitboard - 1;
+    Some(square)
+}
+
+fn is_diagonal_alignment(from: Square, to: Square) -> bool {
+    from.file().abs_diff(to.file()) == from.rank().abs_diff(to.rank())
+}
+
+fn is_orthogonal_alignment(from: Square, to: Square) -> bool {
+    from.file() == to.file() || from.rank() == to.rank()
 }
 
 fn castle_rook_squares(king_destination: Square) -> (Square, Square) {
@@ -823,5 +1082,99 @@ fn castle_rook_squares(king_destination: Square) -> (Square, Square) {
         Square::G8 => (Square::H8, Square::F8),
         Square::C8 => (Square::A8, Square::D8),
         _ => panic!("invalid castling destination"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MoveList, Position};
+
+    fn assert_fast_matches_slow(position: &mut Position, label: &str) {
+        let mut fast = MoveList::new();
+        let mut slow = MoveList::new();
+        position.generate_legal_moves(&mut fast);
+        position.generate_legal_moves_slow(&mut slow);
+
+        let fast_moves: Vec<String> = fast.as_slice().iter().map(|mv| mv.to_string()).collect();
+        let slow_moves: Vec<String> = slow.as_slice().iter().map(|mv| mv.to_string()).collect();
+        assert_eq!(fast_moves, slow_moves, "{label}");
+    }
+
+    fn assert_fast_matches_slow_recursive(
+        position: &mut Position,
+        remaining_depth: u8,
+        path: &mut Vec<String>,
+    ) {
+        let label = if path.is_empty() {
+            "root".to_owned()
+        } else {
+            path.join(" ")
+        };
+        assert_fast_matches_slow(position, &label);
+        if remaining_depth == 0 {
+            return;
+        }
+
+        let mut moves = MoveList::new();
+        position.generate_legal_moves(&mut moves);
+        for mv in moves.as_slice().iter().copied() {
+            let undo = position
+                .make_move(mv)
+                .expect("recursive move must be legal");
+            path.push(mv.to_string());
+            assert_fast_matches_slow_recursive(position, remaining_depth - 1, path);
+            path.pop();
+            position.unmake_move(mv, undo);
+        }
+    }
+
+    #[test]
+    fn fast_and_slow_legal_generation_match_startpos_two_plies() {
+        let mut root = Position::startpos();
+        assert_fast_matches_slow(&mut root, "startpos root");
+
+        let mut root_moves = MoveList::new();
+        root.generate_legal_moves(&mut root_moves);
+        for mv in root_moves.as_slice().iter().copied() {
+            let undo = root.make_move(mv).expect("root move must be legal");
+            assert_fast_matches_slow(&mut root, &format!("startpos after {mv}"));
+            root.unmake_move(mv, undo);
+        }
+    }
+
+    #[test]
+    fn fast_and_slow_legal_generation_match_kiwipete_after_e1c1() {
+        let mut position = Position::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        )
+        .expect("FEN parse must succeed");
+        position.apply_uci_move("e1c1").expect("move must be legal");
+
+        assert_fast_matches_slow(&mut position, "kiwipete after e1c1");
+
+        let mut black_moves = MoveList::new();
+        position.generate_legal_moves(&mut black_moves);
+        for mv in black_moves.as_slice().iter().copied() {
+            let undo = position.make_move(mv).expect("reply must be legal");
+            assert_fast_matches_slow(&mut position, &format!("kiwipete after e1c1 {mv}"));
+            position.unmake_move(mv, undo);
+        }
+    }
+
+    #[test]
+    fn fast_and_slow_legal_generation_match_startpos_three_plies_deep() {
+        let mut position = Position::startpos();
+        let mut path = Vec::new();
+        assert_fast_matches_slow_recursive(&mut position, 3, &mut path);
+    }
+
+    #[test]
+    fn fast_and_slow_legal_generation_match_position6_root() {
+        let mut position = Position::from_fen(
+            "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+        )
+        .expect("FEN parse must succeed");
+
+        assert_fast_matches_slow(&mut position, "position6 root");
     }
 }
