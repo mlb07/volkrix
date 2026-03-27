@@ -38,6 +38,14 @@ impl MoveList {
         &self.moves[..self.len]
     }
 
+    pub fn get(&self, index: usize) -> Move {
+        self.as_slice()[index]
+    }
+
+    pub fn swap(&mut self, a: usize, b: usize) {
+        self.moves.swap(a, b);
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Move> {
         self.as_slice().iter()
     }

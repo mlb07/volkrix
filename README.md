@@ -9,12 +9,15 @@ The repository currently includes:
 - Phase 0 repo scaffolding, CI, docs, licensing, and developer scripts
 - Phase 1 core chess types, position model, FEN parsing/serialization, legal move application for standard chess, and a minimal UCI shell
 - Phase 2 attack generation, staged legal move generation, canonical perft support, and divide regression artifacts
+- Phase 3 exact make/unmake restoration, Zobrist, repetition, rules/status helpers, and SEE
+- Phase 4 deterministic single-thread search with iterative deepening, alpha-beta, quiescence, PV tracking, and a simple classical evaluation
 
 What is intentionally not here yet:
 
-- optimized attack tables or staged move ordering
-- search heuristics beyond placeholder legal move selection
-- transposition tables, SMP, tablebases, or NNUE
+- transposition tables
+- SMP or other shared search infrastructure
+- advanced pruning and reduction heuristics
+- tablebases or NNUE
 
 ## Clean-Room Provenance
 
@@ -61,9 +64,10 @@ The engine currently supports:
 - `stop`
 - `quit`
 
-Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state.
+Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. `go depth` now runs a deterministic single-thread search baseline instead of placeholder move selection.
 
 ## Documentation
 
 - `docs/architecture.md`
 - `docs/roadmap.md`
+- `docs/search.md`

@@ -1,6 +1,10 @@
 use std::io::{self, BufRead, Write};
 
-use crate::{ENGINE_AUTHOR, ENGINE_NAME, core::Position};
+use crate::{
+    ENGINE_AUTHOR, ENGINE_NAME,
+    core::Position,
+    search::{SearchLimits, search},
+};
 
 pub struct UciResponse {
     pub lines: Vec<String>,
@@ -133,17 +137,23 @@ impl UciEngine {
     fn handle_go(&mut self, tokens: &[&str]) -> Vec<String> {
         let mut errors = Vec::new();
         let mut index = 1usize;
+        let mut depth = 1u8;
         while index < tokens.len() {
             if tokens[index] == "depth" {
                 if index + 1 >= tokens.len() {
                     errors.push("info string error: go depth requires a value".to_owned());
                     break;
                 }
-                if tokens[index + 1].parse::<u32>().is_err() {
-                    errors.push(format!(
-                        "info string error: invalid go depth value '{}'",
-                        tokens[index + 1]
-                    ));
+                match tokens[index + 1].parse::<u32>() {
+                    Ok(value) => {
+                        depth = value.clamp(1, 127) as u8;
+                    }
+                    Err(_) => {
+                        errors.push(format!(
+                            "info string error: invalid go depth value '{}'",
+                            tokens[index + 1]
+                        ));
+                    }
                 }
                 index += 2;
                 continue;
@@ -151,9 +161,10 @@ impl UciEngine {
             index += 1;
         }
 
-        let bestmove = self
-            .position
-            .select_placeholder_bestmove()
+        let result = search(&mut self.position, SearchLimits::new(depth));
+        errors.extend(result.info_lines);
+        let bestmove = result
+            .best_move
             .map_or_else(|| "0000".to_owned(), |mv| mv.to_string());
         errors.push(format!("bestmove {bestmove}"));
         errors

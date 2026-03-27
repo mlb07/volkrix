@@ -26,7 +26,6 @@ impl RepetitionHistory {
         self.len
     }
 
-    #[cfg(test)]
     pub(crate) fn as_slice(&self) -> &[u64] {
         &self.keys[..self.len]
     }

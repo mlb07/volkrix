@@ -201,6 +201,11 @@ impl Position {
         self.zobrist_key
     }
 
+    #[cfg(any(test, debug_assertions))]
+    pub fn debug_repetition_history_snapshot(&self) -> Vec<u64> {
+        self.repetition_history.as_slice().to_vec()
+    }
+
     pub fn is_draw_by_repetition(&self) -> bool {
         self.repetition_history
             .is_threefold_repetition(self.halfmove_clock)
