@@ -651,6 +651,18 @@ impl Position {
         self.attackers_to_with_occupancy(square, by_color, self.occupancies[OCCUPANCY_ALL], 0)
     }
 
+    pub(crate) fn king_square(&self, color: Color) -> Square {
+        self.king_squares[color.index()]
+    }
+
+    pub(crate) fn occupancy(&self) -> u64 {
+        self.occupancies[OCCUPANCY_ALL]
+    }
+
+    pub(crate) fn occupancy_by(&self, color: Color) -> u64 {
+        self.occupancies[color.index()]
+    }
+
     pub(crate) fn check_info(&self) -> CheckInfo {
         let us = self.side_to_move;
         let them = us.opposite();
@@ -1218,7 +1230,7 @@ impl Position {
         Some(piece)
     }
 
-    fn pieces(&self, color: Color, piece_type: PieceType) -> u64 {
+    pub(crate) fn pieces(&self, color: Color, piece_type: PieceType) -> u64 {
         self.piece_bitboards[color.index()][piece_type.index()]
     }
 

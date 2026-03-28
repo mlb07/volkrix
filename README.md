@@ -14,6 +14,7 @@ The repository currently includes:
 - Phase 5 single-thread transposition table integration, deterministic TT-on/TT-off search paths, and a reproducible bench path tied to the real search core
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic internal heuristic toggles, and documented Phase 5 baseline comparisons
 - Phase 7 practical UCI usability with timed search, real `stop`, `Hash` / `Clear Hash`, and persistent TT reuse across UCI searches
+- Phase 8 classical eval bridge with tapered middlegame/endgame scoring, mobility, king safety, pawn structure, passed pawns, bishop pair, rook file terms, and compact static threats
 
 What is intentionally not here yet:
 

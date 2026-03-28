@@ -69,3 +69,18 @@ The runtime model remains intentionally strict:
 - the main thread remains the sole owner of engine state, position state, TT ownership, and command application
 - while a search is active, only `stop` and `quit` take immediate effect from the helper path
 - `setoption`, `position`, and `ucinewgame` remain deferred main-thread operations only
+
+## Evaluation
+
+After Phase 8, the search still uses a classical hand-written eval, but it no longer relies on a flat material-plus-square-bonus score. The current eval is a tapered middlegame/endgame model with a deliberately limited term set:
+
+- tapered material and piece-square scoring
+- pseudo-legal mobility for knights, bishops, rooks, and queens
+- simple static king-safety terms
+- pawn-structure penalties for isolated and doubled pawns
+- passed-pawn bonuses
+- bishop-pair bonus
+- rook open-file and semi-open-file bonuses
+- a compact set of static threat terms
+
+This remains intentionally conservative. Phase 8 does not add legal-move mobility, eval caches, pawn hash tables, or any search-coupled eval terms.

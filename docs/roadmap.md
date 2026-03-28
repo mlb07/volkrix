@@ -10,10 +10,11 @@
 - Phase 5 transposition table and search infrastructure on top of the single-thread baseline
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic heuristic toggles, and documented Phase 5 baseline comparisons
 - Phase 7 time management and practical UCI usability on top of the correct TT-backed single-thread baseline
+- Phase 8 classical eval bridge with tapered evaluation and a disciplined first expansion of the static eval terms
 
 ## Next
 
-- Later phases: classical eval growth, SMP, tablebases, NNUE, training, and tuning
+- Later phases: deeper classical eval work, SMP, tablebases, NNUE, training, and tuning
 
 ## Intentional Boundaries
 

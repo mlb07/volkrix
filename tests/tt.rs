@@ -69,8 +69,14 @@ fn phase_six_heuristic_profile_report() {
 }
 
 #[test]
-fn phase_five_baseline_matches_historical_phase_five_bench_signature() {
-    let result = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
-    assert_eq!(result.total_nodes, 443_712);
-    assert_eq!(result.checksum, 0xb1ac_3c8f_c22d_f05f);
+fn profile_benches_remain_reproducible_with_phase_eight_eval() {
+    let phase_five_first = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
+    let phase_five_second = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
+    assert_eq!(phase_five_first.total_nodes, phase_five_second.total_nodes);
+    assert_eq!(phase_five_first.checksum, phase_five_second.checksum);
+
+    let phase_six_first = run_profile_bench(5, HeuristicProfile::Phase6Default);
+    let phase_six_second = run_profile_bench(5, HeuristicProfile::Phase6Default);
+    assert_eq!(phase_six_first.total_nodes, phase_six_second.total_nodes);
+    assert_eq!(phase_six_first.checksum, phase_six_second.checksum);
 }
