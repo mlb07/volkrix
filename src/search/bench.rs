@@ -25,7 +25,7 @@ impl BenchConfig {
             depth,
             tt_enabled: true,
             hash_mb: super::tt::DEFAULT_HASH_MB,
-            heuristics: SearchHeuristics::phase6_default(),
+            heuristics: SearchHeuristics::phase9_default(),
         }
     }
 

@@ -47,36 +47,51 @@ fn tt_on_and_tt_off_return_same_unique_bestmove_on_curated_position() {
 }
 
 #[test]
-#[ignore = "manual benchmark profile report for Phase 6 heuristics"]
-fn phase_six_heuristic_profile_report() {
+#[ignore = "manual benchmark profile report for Phase 9 heuristics"]
+fn phase_nine_heuristic_profile_report() {
     let profiles = [
-        ("phase5_baseline", HeuristicProfile::Phase5Baseline),
-        ("pv_move_ordering", HeuristicProfile::PvMoveOrdering),
-        ("capture_buckets", HeuristicProfile::CaptureBuckets),
-        ("killer_moves", HeuristicProfile::KillerMoves),
-        ("quiet_history", HeuristicProfile::QuietHistory),
-        ("aspiration_windows", HeuristicProfile::AspirationWindows),
-        ("phase6_default", HeuristicProfile::Phase6Default),
+        ("phase8_baseline", HeuristicProfile::Phase8Baseline),
+        ("lmr_only", HeuristicProfile::LmrOnly),
+        ("phase9_default", HeuristicProfile::Phase9Default),
     ];
 
     for (name, profile) in profiles {
         let result = run_profile_bench(5, profile);
         println!(
-            "profile {name}: nodes {} checksum {:016x}",
-            result.total_nodes, result.checksum
+            "profile {name}: nodes {} checksum {:016x} time_ms {}",
+            result.total_nodes, result.checksum, result.elapsed_ms
         );
     }
 }
 
 #[test]
-fn profile_benches_remain_reproducible_with_phase_eight_eval() {
-    let phase_five_first = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
-    let phase_five_second = run_profile_bench(5, HeuristicProfile::Phase5Baseline);
-    assert_eq!(phase_five_first.total_nodes, phase_five_second.total_nodes);
-    assert_eq!(phase_five_first.checksum, phase_five_second.checksum);
+fn phase8_baseline_matches_documented_phase8_bench_signature() {
+    let result = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
+    assert_eq!(result.total_nodes, 541_650);
+    assert_eq!(result.checksum, 0x244a_715d_e801_bc83);
+}
 
-    let phase_six_first = run_profile_bench(5, HeuristicProfile::Phase6Default);
-    let phase_six_second = run_profile_bench(5, HeuristicProfile::Phase6Default);
-    assert_eq!(phase_six_first.total_nodes, phase_six_second.total_nodes);
-    assert_eq!(phase_six_first.checksum, phase_six_second.checksum);
+#[test]
+fn phase9_profile_benches_remain_reproducible() {
+    let phase_eight_first = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
+    let phase_eight_second = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
+    assert_eq!(
+        phase_eight_first.total_nodes,
+        phase_eight_second.total_nodes
+    );
+    assert_eq!(phase_eight_first.checksum, phase_eight_second.checksum);
+
+    let phase_nine_first = run_profile_bench(5, HeuristicProfile::Phase9Default);
+    let phase_nine_second = run_profile_bench(5, HeuristicProfile::Phase9Default);
+    assert_eq!(phase_nine_first.total_nodes, phase_nine_second.total_nodes);
+    assert_eq!(phase_nine_first.checksum, phase_nine_second.checksum);
+}
+
+#[test]
+fn phase9_default_now_matches_lmr_only_profile() {
+    let lmr_only = run_profile_bench(5, HeuristicProfile::LmrOnly);
+    let phase_nine = run_profile_bench(5, HeuristicProfile::Phase9Default);
+
+    assert_eq!(lmr_only.total_nodes, phase_nine.total_nodes);
+    assert_eq!(lmr_only.checksum, phase_nine.checksum);
 }

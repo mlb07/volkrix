@@ -4,7 +4,7 @@ use volkrix::{
     core::{Position, PositionStatus},
     search::{
         SearchLimits, evaluate,
-        internal::{no_aspiration_limits, phase5_baseline_limits},
+        internal::{lmr_only_limits, no_aspiration_limits, phase8_baseline_limits},
         search,
     },
 };
@@ -156,7 +156,7 @@ fn search_leaves_root_position_unchanged_with_tt_disabled() {
 }
 
 #[test]
-fn search_leaves_root_position_unchanged_with_phase_five_baseline_heuristics() {
+fn search_leaves_root_position_unchanged_with_phase_eight_baseline_heuristics() {
     let mut position =
         Position::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3")
             .expect("FEN parse must succeed");
@@ -165,7 +165,27 @@ fn search_leaves_root_position_unchanged_with_phase_five_baseline_heuristics() {
     let before_search_key = position.debug_search_key();
     let before_history = position.debug_repetition_history_snapshot();
 
-    let _ = search(&mut position, phase5_baseline_limits(3));
+    let _ = search(&mut position, phase8_baseline_limits(3));
+
+    let after_history = position.debug_repetition_history_snapshot();
+    assert_eq!(position.to_fen(), before);
+    assert_eq!(position.zobrist_key(), before_key);
+    assert_eq!(position.debug_search_key(), before_search_key);
+    assert_eq!(after_history, before_history);
+    position.validate().expect("position must still validate");
+}
+
+#[test]
+fn search_leaves_root_position_unchanged_with_lmr_only_heuristics() {
+    let mut position =
+        Position::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3")
+            .expect("FEN parse must succeed");
+    let before = position.to_fen();
+    let before_key = position.zobrist_key();
+    let before_search_key = position.debug_search_key();
+    let before_history = position.debug_repetition_history_snapshot();
+
+    let _ = search(&mut position, lmr_only_limits(3));
 
     let after_history = position.debug_repetition_history_snapshot();
     assert_eq!(position.to_fen(), before);
@@ -208,42 +228,6 @@ fn tt_enabled_and_disabled_search_agree_on_curated_positions() {
 }
 
 #[test]
-fn phase_six_default_and_phase_five_baseline_agree_on_curated_positions() {
-    let cases = [
-        ("7k/5Q2/7K/8/8/8/8/8 b - - 0 1", 2),
-        ("4k3/8/8/8/8/8/8/3BK3 w - - 0 1", 2),
-        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2),
-        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 2),
-    ];
-
-    for (fen, depth) in cases {
-        let mut phase_six = Position::from_fen(fen).expect("FEN parse must succeed");
-        let mut phase_five = Position::from_fen(fen).expect("FEN parse must succeed");
-
-        let phase_six_result = search(&mut phase_six, SearchLimits::new(depth));
-        let phase_five_result = search(&mut phase_five, phase5_baseline_limits(depth));
-
-        assert_eq!(phase_six_result.score, phase_five_result.score, "{fen}");
-        match (phase_six_result.best_move, phase_five_result.best_move) {
-            (Some(phase_six_move), Some(phase_five_move)) => {
-                phase_six
-                    .apply_uci_move(&phase_six_move.to_string())
-                    .expect("Phase 6 bestmove must be legal");
-                phase_five
-                    .apply_uci_move(&phase_five_move.to_string())
-                    .expect("Phase 5 baseline bestmove must be legal");
-            }
-            (None, None) => {}
-            other => {
-                panic!(
-                    "Phase 6 and Phase 5 baseline move availability mismatch for {fen}: {other:?}"
-                )
-            }
-        }
-    }
-}
-
-#[test]
 fn exact_bestmove_regressions_use_unique_root_positions() {
     let cases = [("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2, "b6b7")];
 
@@ -263,44 +247,84 @@ fn exact_bestmove_regressions_use_unique_root_positions() {
 }
 
 #[test]
-fn phase_five_baseline_path_is_still_deterministic() {
+fn lmr_only_and_phase8_baseline_agree_on_curated_positions() {
+    let cases = [
+        ("7k/5Q2/7K/8/8/8/8/8 b - - 0 1", 2),
+        ("4k3/8/8/8/8/8/8/3BK3 w - - 0 1", 2),
+        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2),
+        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 2),
+    ];
+
+    for (fen, depth) in cases {
+        let mut lmr_only = Position::from_fen(fen).expect("FEN parse must succeed");
+        let mut phase_eight = Position::from_fen(fen).expect("FEN parse must succeed");
+
+        let lmr_only_result = search(&mut lmr_only, lmr_only_limits(depth));
+        let phase_eight_result = search(&mut phase_eight, phase8_baseline_limits(depth));
+
+        assert_eq!(lmr_only_result.score, phase_eight_result.score, "{fen}");
+        match (lmr_only_result.best_move, phase_eight_result.best_move) {
+            (Some(lmr_only_move), Some(phase_eight_move)) => {
+                lmr_only
+                    .apply_uci_move(&lmr_only_move.to_string())
+                    .expect("LMR-only bestmove must be legal");
+                phase_eight
+                    .apply_uci_move(&phase_eight_move.to_string())
+                    .expect("Phase 8 baseline bestmove must be legal");
+            }
+            (None, None) => {}
+            other => panic!("LMR-only and Phase 8 baseline mismatch for {fen}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn phase9_default_and_phase8_baseline_agree_on_curated_positions() {
+    let cases = [
+        ("7k/5Q2/7K/8/8/8/8/8 b - - 0 1", 2),
+        ("4k3/8/8/8/8/8/8/3BK3 w - - 0 1", 2),
+        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2),
+        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 2),
+    ];
+
+    for (fen, depth) in cases {
+        let mut phase_nine = Position::from_fen(fen).expect("FEN parse must succeed");
+        let mut phase_eight = Position::from_fen(fen).expect("FEN parse must succeed");
+
+        let phase_nine_result = search(&mut phase_nine, SearchLimits::new(depth));
+        let phase_eight_result = search(&mut phase_eight, phase8_baseline_limits(depth));
+
+        assert_eq!(phase_nine_result.score, phase_eight_result.score, "{fen}");
+        match (phase_nine_result.best_move, phase_eight_result.best_move) {
+            (Some(phase_nine_move), Some(phase_eight_move)) => {
+                phase_nine
+                    .apply_uci_move(&phase_nine_move.to_string())
+                    .expect("Phase 9 bestmove must be legal");
+                phase_eight
+                    .apply_uci_move(&phase_eight_move.to_string())
+                    .expect("Phase 8 baseline bestmove must be legal");
+            }
+            (None, None) => {}
+            other => panic!("Phase 9 and Phase 8 baseline mismatch for {fen}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn phase8_baseline_path_is_still_deterministic() {
     let mut first = Position::startpos();
     let mut second = Position::startpos();
 
-    let first_move = search(&mut first, phase5_baseline_limits(3))
+    let first_move = search(&mut first, phase8_baseline_limits(3))
         .best_move
         .map(|mv| mv.to_string())
         .unwrap_or_else(|| "0000".to_owned());
-    let second_move = search(&mut second, phase5_baseline_limits(3))
+    let second_move = search(&mut second, phase8_baseline_limits(3))
         .best_move
         .map(|mv| mv.to_string())
         .unwrap_or_else(|| "0000".to_owned());
 
     assert_eq!(first_move, second_move);
-}
-
-#[test]
-fn zugzwang_sensitive_position_matches_phase_five_baseline() {
-    let fen = "8/8/8/8/8/2k5/2p5/1K6 w - - 0 1";
-    let mut phase_six = Position::from_fen(fen).expect("FEN parse must succeed");
-    let mut phase_five = Position::from_fen(fen).expect("FEN parse must succeed");
-
-    let phase_six_result = search(&mut phase_six, SearchLimits::new(5));
-    let phase_five_result = search(&mut phase_five, phase5_baseline_limits(5));
-
-    assert_eq!(phase_six_result.score, phase_five_result.score);
-    match (phase_six_result.best_move, phase_five_result.best_move) {
-        (Some(phase_six_move), Some(phase_five_move)) => {
-            phase_six
-                .apply_uci_move(&phase_six_move.to_string())
-                .expect("Phase 6 bestmove must be legal");
-            phase_five
-                .apply_uci_move(&phase_five_move.to_string())
-                .expect("Phase 5 baseline bestmove must be legal");
-        }
-        (None, None) => {}
-        other => panic!("zugzwang regression mismatch: {other:?}"),
-    }
 }
 
 #[test]

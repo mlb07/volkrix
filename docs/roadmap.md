@@ -14,7 +14,8 @@
 
 ## Next
 
-- Later phases: deeper classical eval work, SMP, tablebases, NNUE, training, and tuning
+- Phase 9 search depth and selectivity layer II pending signoff: exact Phase 8 baseline preservation, basic quiet-only LMR as the retained path, and documented guarded null-move evaluation evidence
+- Later phases, not yet locked in order: deeper classical eval work, SMP, tablebases, NNUE, training, and tuning
 
 ## Intentional Boundaries
 

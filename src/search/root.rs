@@ -87,6 +87,29 @@ pub(crate) struct SearchContext<'a> {
     heuristics: SearchHeuristics,
     control: SearchControl<'a>,
     tt: TtAccess<'a>,
+    debug_counters: SearchDebugCounters,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct SearchDebugCounters {
+    lmr_reductions: u32,
+    lmr_researches: u32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SearchNodeState {
+    pub(crate) is_pv: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LmrCandidate {
+    depth: usize,
+    is_pv: bool,
+    in_check: bool,
+    mv: Move,
+    gives_check: bool,
+    is_hash_move: bool,
+    quiets_searched: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -156,6 +179,7 @@ impl<'a> SearchContext<'a> {
             } else {
                 TtAccess::None
             },
+            debug_counters: SearchDebugCounters::default(),
         }
     }
 
@@ -302,8 +326,15 @@ impl<'a> SearchContext<'a> {
             let undo = position
                 .make_move(mv)
                 .expect("root move must be legal during search");
-            let Some(score) = self.alpha_beta(position, depth.saturating_sub(1), 1, -beta, -alpha)
-            else {
+            let child_is_pv = best_move.is_none();
+            let Some(score) = self.alpha_beta(
+                position,
+                depth.saturating_sub(1),
+                1,
+                -beta,
+                -alpha,
+                SearchNodeState { is_pv: child_is_pv },
+            ) else {
                 position.unmake_move(mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
             };
@@ -327,6 +358,7 @@ impl<'a> SearchContext<'a> {
         ply: usize,
         mut alpha: i32,
         beta: i32,
+        node_state: SearchNodeState,
     ) -> Option<i32> {
         self.nodes += 1;
         if self.nodes & 1023 == 0 && self.hard_stop_requested() {
@@ -356,6 +388,7 @@ impl<'a> SearchContext<'a> {
             return qsearch::qsearch(self, position, ply, alpha, beta);
         }
 
+        let in_check = position.is_in_check(position.side_to_move());
         self.pv_length[ply] = 0;
         let pv_move_hint = self.previous_pv_move(ply);
         let tt_move_hint =
@@ -368,6 +401,7 @@ impl<'a> SearchContext<'a> {
         }
         let pv_move_hint = validated_move_hint(&legal_moves, pv_move_hint);
         let tt_move_hint = validated_tt_move_hint(&legal_moves, tt_move_hint);
+
         let ordering_hints = MoveOrderHints {
             ply,
             quiescence_only: false,
@@ -375,17 +409,77 @@ impl<'a> SearchContext<'a> {
             tt_move: tt_move_hint,
         };
         let mut best_move = Move::NONE;
+        let mut quiets_searched = 0usize;
 
         for index in 0..legal_moves.len() {
             self.pick_next_move(position, &mut legal_moves, index, ordering_hints);
             let mv = legal_moves.get(index);
+            let is_quiet = !mv.is_capture() && !mv.is_promotion();
+            if is_quiet {
+                quiets_searched += 1;
+            }
+
             let undo = position.make_move(mv).expect("searched move must be legal");
-            let Some(score) = self.alpha_beta(position, depth - 1, ply + 1, -beta, -alpha) else {
+            let gives_check = position.is_in_check(position.side_to_move());
+            let child_is_pv = node_state.is_pv && best_move.is_none();
+            let is_hash_move = tt_move_hint == Some(mv);
+
+            let score_result = if lmr_is_eligible(
+                self.heuristics,
+                LmrCandidate {
+                    depth,
+                    is_pv: child_is_pv,
+                    in_check,
+                    mv,
+                    gives_check,
+                    is_hash_move,
+                    quiets_searched,
+                },
+            ) {
+                self.debug_counters.lmr_reductions += 1;
+                let Some(reduced_score) = self.alpha_beta(
+                    position,
+                    depth - 2,
+                    ply + 1,
+                    -beta,
+                    -alpha,
+                    SearchNodeState { is_pv: false },
+                ) else {
+                    position.unmake_move(mv, undo);
+                    return None;
+                };
+                let reduced_score = -reduced_score;
+                if lmr_requires_full_research(reduced_score, alpha) {
+                    self.debug_counters.lmr_researches += 1;
+                    self.alpha_beta(
+                        position,
+                        depth - 1,
+                        ply + 1,
+                        -beta,
+                        -alpha,
+                        SearchNodeState { is_pv: false },
+                    )
+                    .map(|score| -score)
+                } else {
+                    Some(reduced_score)
+                }
+            } else {
+                self.alpha_beta(
+                    position,
+                    depth - 1,
+                    ply + 1,
+                    -beta,
+                    -alpha,
+                    SearchNodeState { is_pv: child_is_pv },
+                )
+                .map(|score| -score)
+            };
+
+            let Some(score) = score_result else {
                 position.unmake_move(mv, undo);
                 return None;
             };
             position.unmake_move(mv, undo);
-            let score = -score;
 
             if score > alpha {
                 alpha = score;
@@ -600,6 +694,27 @@ impl<'a> SearchContext<'a> {
             .soft_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
+
+    #[cfg(test)]
+    fn debug_counters(&self) -> SearchDebugCounters {
+        self.debug_counters
+    }
+}
+
+fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> bool {
+    heuristics.late_move_reductions
+        && !candidate.is_pv
+        && !candidate.in_check
+        && candidate.depth >= 4
+        && !candidate.mv.is_capture()
+        && !candidate.mv.is_promotion()
+        && !candidate.gives_check
+        && !candidate.is_hash_move
+        && candidate.quiets_searched > 3
+}
+
+fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
+    reduced_score > alpha
 }
 
 pub(crate) fn is_draw(position: &Position) -> bool {
@@ -721,8 +836,9 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Bound, Move, MoveList, MoveOrderHints, Position, SearchContext, SearchLimits,
-        tt_cutoff_score, validated_tt_move_hint,
+        Bound, LmrCandidate, Move, MoveList, MoveOrderHints, Position, SearchContext,
+        SearchHeuristics, SearchLimits, SearchNodeState, lmr_is_eligible,
+        lmr_requires_full_research, tt_cutoff_score, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tt::{TtHit, normalize_score_for_store};
@@ -889,5 +1005,150 @@ mod tests {
             context.capture_order_score(&position, winning)
                 > context.capture_order_score(&position, losing)
         );
+    }
+
+    #[test]
+    fn lmr_eligibility_respects_locked_guards() {
+        let quiet = Move::new(square("a2"), square("a3"));
+        let capture = quiet.with_flags(FLAG_CAPTURE);
+        let promotion =
+            Move::new(square("a7"), square("a8")).with_promotion(crate::core::PieceType::Queen);
+
+        assert!(lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 3,
+                is_pv: false,
+                in_check: false,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: true,
+                in_check: false,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: true,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: capture,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: promotion,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: quiet,
+                gives_check: true,
+                is_hash_move: false,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: true,
+                quiets_searched: 4,
+            },
+        ));
+        assert!(!lmr_is_eligible(
+            SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
+            LmrCandidate {
+                depth: 4,
+                is_pv: false,
+                in_check: false,
+                mv: quiet,
+                gives_check: false,
+                is_hash_move: false,
+                quiets_searched: 3,
+            },
+        ));
+    }
+
+    #[test]
+    fn lmr_reduces_late_quiets_and_researches_on_alpha_improvement() {
+        let mut position = Position::startpos();
+        let limits = SearchLimits::new(5)
+            .with_heuristics(SearchHeuristics::phase8_baseline().with_late_move_reductions(true));
+        let mut context = SearchContext::new(limits);
+
+        let _ = context
+            .alpha_beta(
+                &mut position,
+                4,
+                1,
+                -20,
+                20,
+                SearchNodeState { is_pv: false },
+            )
+            .expect("search must complete");
+
+        assert!(context.debug_counters().lmr_reductions > 0);
+        assert!(context.debug_counters().lmr_researches > 0);
+    }
+
+    #[test]
+    fn lmr_alpha_raise_requires_full_research() {
+        assert!(!lmr_requires_full_research(20, 20));
+        assert!(lmr_requires_full_research(21, 20));
     }
 }

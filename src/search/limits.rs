@@ -5,58 +5,46 @@ pub(crate) struct SearchHeuristics {
     pub(crate) killer_moves: bool,
     pub(crate) quiet_history: bool,
     pub(crate) aspiration_windows: bool,
+    pub(crate) late_move_reductions: bool,
 }
 
 impl SearchHeuristics {
-    pub(crate) const fn phase5_baseline() -> Self {
-        Self {
-            pv_move_ordering: false,
-            capture_buckets: false,
-            killer_moves: false,
-            quiet_history: false,
-            aspiration_windows: false,
-        }
-    }
-
-    pub(crate) const fn phase6_default() -> Self {
+    pub(crate) const fn phase8_baseline() -> Self {
         Self {
             pv_move_ordering: true,
             capture_buckets: true,
             killer_moves: true,
             quiet_history: true,
             aspiration_windows: true,
+            late_move_reductions: false,
         }
     }
 
-    pub(crate) const fn with_pv_move_ordering(mut self, enabled: bool) -> Self {
-        self.pv_move_ordering = enabled;
-        self
-    }
-
-    pub(crate) const fn with_capture_buckets(mut self, enabled: bool) -> Self {
-        self.capture_buckets = enabled;
-        self
-    }
-
-    pub(crate) const fn with_killer_moves(mut self, enabled: bool) -> Self {
-        self.killer_moves = enabled;
-        self
-    }
-
-    pub(crate) const fn with_quiet_history(mut self, enabled: bool) -> Self {
-        self.quiet_history = enabled;
-        self
+    pub(crate) const fn phase9_default() -> Self {
+        Self {
+            pv_move_ordering: true,
+            capture_buckets: true,
+            killer_moves: true,
+            quiet_history: true,
+            aspiration_windows: true,
+            late_move_reductions: true,
+        }
     }
 
     pub(crate) const fn with_aspiration_windows(mut self, enabled: bool) -> Self {
         self.aspiration_windows = enabled;
         self
     }
+
+    pub(crate) const fn with_late_move_reductions(mut self, enabled: bool) -> Self {
+        self.late_move_reductions = enabled;
+        self
+    }
 }
 
 impl Default for SearchHeuristics {
     fn default() -> Self {
-        Self::phase6_default()
+        Self::phase9_default()
     }
 }
 
@@ -74,7 +62,7 @@ impl SearchLimits {
             depth,
             tt_enabled: true,
             hash_mb: super::tt::DEFAULT_HASH_MB,
-            heuristics: SearchHeuristics::phase6_default(),
+            heuristics: SearchHeuristics::phase9_default(),
         }
     }
 
@@ -98,8 +86,8 @@ impl SearchLimits {
         self
     }
 
-    pub(crate) const fn with_phase5_baseline(mut self) -> Self {
-        self.heuristics = SearchHeuristics::phase5_baseline();
+    pub(crate) const fn with_phase8_baseline(mut self) -> Self {
+        self.heuristics = SearchHeuristics::phase8_baseline();
         self
     }
 }

@@ -3,39 +3,42 @@ use super::{BenchConfig, BenchResult, SearchLimits, limits::SearchHeuristics, ru
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HeuristicProfile {
-    Phase5Baseline,
-    PvMoveOrdering,
-    CaptureBuckets,
-    KillerMoves,
-    QuietHistory,
-    AspirationWindows,
-    Phase6Default,
+    Phase8Baseline,
+    LmrOnly,
+    Phase9Default,
 }
 
 impl HeuristicProfile {
     const fn heuristics(self) -> SearchHeuristics {
-        let baseline = SearchHeuristics::phase5_baseline();
+        let baseline = SearchHeuristics::phase8_baseline();
         match self {
-            Self::Phase5Baseline => baseline,
-            Self::PvMoveOrdering => baseline.with_pv_move_ordering(true),
-            Self::CaptureBuckets => baseline.with_capture_buckets(true),
-            Self::KillerMoves => baseline.with_killer_moves(true),
-            Self::QuietHistory => baseline.with_quiet_history(true),
-            Self::AspirationWindows => baseline.with_aspiration_windows(true),
-            Self::Phase6Default => SearchHeuristics::phase6_default(),
+            Self::Phase8Baseline => baseline,
+            Self::LmrOnly => baseline.with_late_move_reductions(true),
+            Self::Phase9Default => SearchHeuristics::phase9_default(),
         }
     }
 }
 
 #[doc(hidden)]
-pub fn phase5_baseline_limits(depth: u8) -> SearchLimits {
-    SearchLimits::new(depth).with_phase5_baseline()
+pub fn phase8_baseline_limits(depth: u8) -> SearchLimits {
+    SearchLimits::new(depth).with_phase8_baseline()
+}
+
+#[doc(hidden)]
+pub fn lmr_only_limits(depth: u8) -> SearchLimits {
+    SearchLimits::new(depth)
+        .with_heuristics(SearchHeuristics::phase8_baseline().with_late_move_reductions(true))
+}
+
+#[doc(hidden)]
+pub fn phase9_default_limits(depth: u8) -> SearchLimits {
+    SearchLimits::new(depth).with_heuristics(SearchHeuristics::phase9_default())
 }
 
 #[doc(hidden)]
 pub fn no_aspiration_limits(depth: u8) -> SearchLimits {
     SearchLimits::new(depth)
-        .with_heuristics(SearchHeuristics::phase6_default().with_aspiration_windows(false))
+        .with_heuristics(SearchHeuristics::phase9_default().with_aspiration_windows(false))
 }
 
 #[doc(hidden)]
