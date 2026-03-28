@@ -2,8 +2,12 @@
 
 use volkrix::core::Position;
 use volkrix::search::{
-    BenchConfig, SearchLimits, internal::HeuristicProfile, internal::run_profile_bench, run_bench,
-    search,
+    BenchConfig, SearchLimits,
+    internal::{
+        HeuristicProfile, run_profile_bench, run_threaded_profile_bench,
+        run_threaded_timed_profile_bench,
+    },
+    run_bench, search,
 };
 
 #[test]
@@ -65,6 +69,41 @@ fn phase_nine_heuristic_profile_report() {
 }
 
 #[test]
+#[ignore = "manual benchmark profile report for Phase 10 SMP threads"]
+fn phase_ten_smp_profile_report() {
+    let fixed_depth = [
+        ("phase9_baseline_threads1", 1usize),
+        ("phase10_default_threads1", 1usize),
+        ("phase10_default_threads2", 2usize),
+        ("phase10_default_threads4", 4usize),
+    ];
+    for (name, threads) in fixed_depth {
+        let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, threads);
+        println!(
+            "fixed_depth {name}: threads {threads} nodes {} checksum {:016x} time_ms {} nps {}",
+            result.total_nodes,
+            result.checksum,
+            result.elapsed_ms,
+            result.nps()
+        );
+    }
+
+    let fixed_time = [
+        ("phase9_baseline_threads1", 1usize),
+        ("phase10_default_threads1", 1usize),
+        ("phase10_default_threads2", 2usize),
+        ("phase10_default_threads4", 4usize),
+    ];
+    for (name, threads) in fixed_time {
+        let result = run_threaded_timed_profile_bench(50, HeuristicProfile::Phase9Default, threads);
+        println!(
+            "fixed_time {name}: threads {threads} depth_sum {} nodes {} checksum {:016x} time_ms {}",
+            result.total_completed_depth, result.total_nodes, result.checksum, result.elapsed_ms
+        );
+    }
+}
+
+#[test]
 fn phase8_baseline_matches_documented_phase8_bench_signature() {
     let result = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
     assert_eq!(result.total_nodes, 541_650);
@@ -94,4 +133,20 @@ fn phase9_default_now_matches_lmr_only_profile() {
 
     assert_eq!(lmr_only.total_nodes, phase_nine.total_nodes);
     assert_eq!(lmr_only.checksum, phase_nine.checksum);
+}
+
+#[test]
+fn phase10_threads_one_matches_retained_phase9_signature() {
+    let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    assert_eq!(result.total_nodes, 505_147);
+    assert_eq!(result.checksum, 0x244a_71a6_5613_ec7f);
+}
+
+#[test]
+fn phase10_threads_one_remains_reproducible() {
+    let first = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    let second = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+
+    assert_eq!(first.total_nodes, second.total_nodes);
+    assert_eq!(first.checksum, second.checksum);
 }

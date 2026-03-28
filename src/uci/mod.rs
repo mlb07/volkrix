@@ -14,7 +14,7 @@ use crate::{
     core::{Color, Position},
     search::{
         SearchLimits,
-        service::{SearchRequest, UciSearchService},
+        service::{DEFAULT_THREADS, SearchRequest, UciSearchService},
     },
 };
 
@@ -22,6 +22,8 @@ const DEFAULT_GO_DEPTH: u8 = 1;
 const MAX_GO_DEPTH: u8 = 127;
 const MIN_HASH_MB: usize = 1;
 const MAX_HASH_MB: usize = 512;
+const MIN_THREADS: usize = 1;
+const MAX_THREADS: usize = 64;
 
 pub struct UciResponse {
     pub lines: Vec<String>,
@@ -44,6 +46,7 @@ struct GoOptions {
 enum SetOptionCommand {
     Hash(usize),
     ClearHash,
+    Threads(usize),
 }
 
 enum RuntimeInput {
@@ -76,15 +79,37 @@ impl UciEngine {
 
     #[cfg(any(test, debug_assertions))]
     #[doc(hidden)]
+    pub fn debug_threads(&self) -> usize {
+        self.search_service.threads()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
     pub fn debug_tt_entry_count(&self) -> usize {
         self.search_service.debug_tt_entry_count()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_worker_count(&self) -> usize {
+        self.search_service.debug_worker_count()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_active_helper_count(&self) -> usize {
+        self.search_service.debug_active_helper_count()
     }
 
     pub fn handle_line(&mut self, line: &str) -> UciResponse {
         self.handle_line_with_stop(line, None)
     }
 
-    fn handle_line_with_stop(&mut self, line: &str, stop_flag: Option<&AtomicBool>) -> UciResponse {
+    fn handle_line_with_stop(
+        &mut self,
+        line: &str,
+        stop_flag: Option<Arc<AtomicBool>>,
+    ) -> UciResponse {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return UciResponse {
@@ -104,6 +129,10 @@ impl UciEngine {
                         self.search_service.hash_mb(),
                         MIN_HASH_MB,
                         MAX_HASH_MB
+                    ),
+                    format!(
+                        "option name Threads type spin default {} min {} max {}",
+                        DEFAULT_THREADS, MIN_THREADS, MAX_THREADS
                     ),
                     "option name Clear Hash type button".to_owned(),
                     "uciok".to_owned(),
@@ -135,7 +164,7 @@ impl UciEngine {
                 should_quit: false,
             },
             "stop" => {
-                if let Some(stop_flag) = stop_flag {
+                if let Some(stop_flag) = stop_flag.as_ref() {
                     stop_flag.store(true, Ordering::Relaxed);
                 }
                 UciResponse {
@@ -144,7 +173,7 @@ impl UciEngine {
                 }
             }
             "quit" => {
-                if let Some(stop_flag) = stop_flag {
+                if let Some(stop_flag) = stop_flag.as_ref() {
                     stop_flag.store(true, Ordering::Relaxed);
                 }
                 UciResponse {
@@ -224,17 +253,21 @@ impl UciEngine {
                 self.search_service.clear_hash();
                 Vec::new()
             }
+            Ok(SetOptionCommand::Threads(threads)) => {
+                self.search_service.set_threads(threads);
+                Vec::new()
+            }
             Err(error) => vec![format!("info string error: {error}")],
         }
     }
 
-    fn handle_go(&mut self, tokens: &[&str], stop_flag: Option<&AtomicBool>) -> Vec<String> {
+    fn handle_go(&mut self, tokens: &[&str], stop_flag: Option<Arc<AtomicBool>>) -> Vec<String> {
         let options = match parse_go(tokens) {
             Ok(options) => options,
             Err(error) => return vec![format!("info string error: {error}")],
         };
 
-        if let Some(stop_flag) = stop_flag {
+        if let Some(stop_flag) = stop_flag.as_ref() {
             stop_flag.store(false, Ordering::Relaxed);
         }
 
@@ -252,11 +285,11 @@ impl UciEngine {
         lines
     }
 
-    fn build_search_request<'a>(
+    fn build_search_request(
         &self,
         options: GoOptions,
-        stop_flag: Option<&'a AtomicBool>,
-    ) -> Result<SearchRequest<'a>, String> {
+        stop_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<SearchRequest, String> {
         let now = Instant::now();
         if options.infinite {
             if stop_flag.is_none() {
@@ -457,6 +490,21 @@ fn parse_setoption(tokens: &[&str]) -> Result<SetOptionCommand, String> {
             }
             Ok(SetOptionCommand::ClearHash)
         }
+        "Threads" => {
+            let Some(value_index) = value_index else {
+                return Err("setoption name Threads requires 'value <n>'".to_owned());
+            };
+            if value_index + 2 != tokens.len() {
+                return Err("setoption name Threads requires exactly one value".to_owned());
+            }
+            let threads = parse_usize_arg(tokens[value_index + 1], "setoption name Threads value")?;
+            if !(MIN_THREADS..=MAX_THREADS).contains(&threads) {
+                return Err(format!(
+                    "Threads value must be between {MIN_THREADS} and {MAX_THREADS}"
+                ));
+            }
+            Ok(SetOptionCommand::Threads(threads))
+        }
         _ => Err(format!("unsupported option '{name}'")),
     }
 }
@@ -487,13 +535,13 @@ fn run_runtime_session<W: Write>(
     engine: &mut UciEngine,
     receiver: &Receiver<RuntimeInput>,
     output: &mut W,
-    stop_flag: &AtomicBool,
+    stop_flag: &Arc<AtomicBool>,
     quit_flag: &AtomicBool,
 ) -> io::Result<()> {
     while let Ok(message) = receiver.recv() {
         match message {
             RuntimeInput::Command(line) => {
-                let response = engine.handle_line_with_stop(&line, Some(stop_flag));
+                let response = engine.handle_line_with_stop(&line, Some(Arc::clone(stop_flag)));
                 let suppress_output =
                     quit_flag.load(Ordering::Relaxed) && line.trim_start().starts_with("go");
                 if !suppress_output {
@@ -576,7 +624,7 @@ pub fn run_stdio() -> io::Result<()> {
         &mut engine,
         &receiver,
         &mut output,
-        stop_flag.as_ref(),
+        &stop_flag,
         quit_flag.as_ref(),
     );
 
@@ -604,6 +652,13 @@ mod tests {
         engine
     }
 
+    fn make_runtime_engine_with_threads(threads: usize) -> UciEngine {
+        let mut engine = make_runtime_engine();
+        let response = engine.handle_line(&format!("setoption name Threads value {threads}"));
+        assert!(response.lines.is_empty());
+        engine
+    }
+
     fn run_with_external_stop(engine: &mut UciEngine, command: &str, delay_ms: u64) -> UciResponse {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stopper = {
@@ -614,7 +669,7 @@ mod tests {
             })
         };
 
-        let response = engine.handle_line_with_stop(command, Some(stop_flag.as_ref()));
+        let response = engine.handle_line_with_stop(command, Some(Arc::clone(&stop_flag)));
         stopper.join().expect("stop helper must join");
         response
     }
@@ -683,6 +738,34 @@ mod tests {
             .position()
             .validate()
             .expect("position must remain valid");
+    }
+
+    #[test]
+    fn threaded_external_stop_leaves_root_position_unchanged() {
+        let mut engine = make_runtime_engine_with_threads(2);
+        let before = engine.position().to_fen();
+        let before_search_key = engine.position().debug_search_key();
+        let before_history = engine.position().debug_repetition_history_snapshot();
+
+        let response = run_with_external_stop(&mut engine, "go infinite", 10);
+        assert!(
+            response
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+
+        assert_eq!(engine.position().to_fen(), before);
+        assert_eq!(engine.position().debug_search_key(), before_search_key);
+        assert_eq!(
+            engine.position().debug_repetition_history_snapshot(),
+            before_history
+        );
+        assert_eq!(engine.debug_active_helper_count(), 0);
+        engine
+            .position()
+            .validate()
+            .expect("threaded position must remain valid");
     }
 
     #[test]
@@ -779,7 +862,7 @@ mod tests {
             &mut engine,
             &receiver,
             &mut output,
-            stop_flag.as_ref(),
+            &stop_flag,
             quit_flag.as_ref(),
         )
         .expect("runtime must complete");
@@ -846,7 +929,7 @@ mod tests {
             &mut engine,
             &receiver,
             &mut output,
-            stop_flag.as_ref(),
+            &stop_flag,
             quit_flag.as_ref(),
         )
         .expect("runtime must complete");
@@ -857,6 +940,75 @@ mod tests {
 
         assert_eq!(original_hash, MIN_HASH_MB.max(16));
         assert_eq!(engine.debug_hash_mb(), 32);
+        assert_eq!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .matches("bestmove ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn setoption_threads_received_during_search_takes_effect_only_after_stop_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "setoption name Threads value 2".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        assert_eq!(engine.debug_threads(), 1);
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert_eq!(engine.debug_threads(), 2);
         assert_eq!(
             String::from_utf8(output)
                 .expect("utf8")
@@ -921,7 +1073,7 @@ mod tests {
             &mut engine,
             &receiver,
             &mut output,
-            stop_flag.as_ref(),
+            &stop_flag,
             quit_flag.as_ref(),
         )
         .expect("runtime must complete");
@@ -989,7 +1141,7 @@ mod tests {
             &mut engine,
             &receiver,
             &mut output,
-            stop_flag.as_ref(),
+            &stop_flag,
             quit_flag.as_ref(),
         )
         .expect("runtime must complete");
@@ -1051,7 +1203,7 @@ mod tests {
             &mut engine,
             &receiver,
             &mut output,
-            stop_flag.as_ref(),
+            &stop_flag,
             quit_flag.as_ref(),
         )
         .expect("runtime must complete");
@@ -1065,6 +1217,72 @@ mod tests {
                 .expect("utf8")
                 .contains("bestmove ")
         );
+        assert!(quit_flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn threaded_quit_during_search_exits_cleanly_without_bestmove_output() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "setoption name Threads value 2".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "quit".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert!(
+            !String::from_utf8(output)
+                .expect("utf8")
+                .contains("bestmove ")
+        );
+        assert_eq!(engine.debug_active_helper_count(), 0);
         assert!(quit_flag.load(Ordering::Relaxed));
     }
 

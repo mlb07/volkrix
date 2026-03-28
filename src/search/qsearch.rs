@@ -6,7 +6,7 @@ use super::{
 };
 
 pub(crate) fn qsearch(
-    context: &mut SearchContext<'_>,
+    context: &mut SearchContext,
     position: &mut Position,
     ply: usize,
     mut alpha: i32,

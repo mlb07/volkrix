@@ -1,4 +1,7 @@
-use super::{BenchConfig, BenchResult, SearchLimits, limits::SearchHeuristics, run_bench};
+use super::{
+    BenchConfig, BenchResult, SearchLimits, bench::TimedBenchResult, limits::SearchHeuristics,
+    run_bench,
+};
 
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,4 +47,31 @@ pub fn no_aspiration_limits(depth: u8) -> SearchLimits {
 #[doc(hidden)]
 pub fn run_profile_bench(depth: u8, profile: HeuristicProfile) -> BenchResult {
     run_bench(BenchConfig::new(depth).with_heuristics(profile.heuristics()))
+}
+
+#[doc(hidden)]
+pub fn run_threaded_profile_bench(
+    depth: u8,
+    profile: HeuristicProfile,
+    threads: usize,
+) -> BenchResult {
+    run_bench(
+        BenchConfig::new(depth)
+            .with_heuristics(profile.heuristics())
+            .with_threads(threads),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_threaded_timed_profile_bench(
+    movetime_ms: u64,
+    profile: HeuristicProfile,
+    threads: usize,
+) -> TimedBenchResult {
+    super::bench::run_timed_bench(
+        BenchConfig::new(127)
+            .with_heuristics(profile.heuristics())
+            .with_threads(threads),
+        movetime_ms,
+    )
 }

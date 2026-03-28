@@ -1,4 +1,10 @@
-use std::mem::size_of;
+use std::{
+    mem::size_of,
+    sync::{
+        RwLock,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use crate::core::Move;
 
@@ -66,10 +72,9 @@ struct Cluster {
     entries: [TtEntry; ENTRIES_PER_CLUSTER],
 }
 
-#[derive(Clone, Debug)]
 pub struct TranspositionTable {
-    clusters: Vec<Cluster>,
-    generation: u8,
+    clusters: Vec<RwLock<Cluster>>,
+    generation: AtomicU8,
 }
 
 impl TranspositionTable {
@@ -77,19 +82,21 @@ impl TranspositionTable {
         Self::with_cluster_count(cluster_count_for_mb(hash_mb))
     }
 
-    pub fn clear(&mut self) {
-        for cluster in &mut self.clusters {
-            *cluster = Cluster::default();
+    pub fn clear(&self) {
+        for cluster in &self.clusters {
+            *cluster.write().expect("TT cluster lock poisoned") = Cluster::default();
         }
-        self.generation = 0;
+        self.generation.store(0, Ordering::Relaxed);
     }
 
-    pub fn new_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
+    pub fn new_generation(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn probe(&self, key: u64) -> Option<TtHit> {
-        let cluster = &self.clusters[self.cluster_index(key)];
+        let cluster = self.clusters[self.cluster_index(key)]
+            .read()
+            .expect("TT cluster lock poisoned");
         for entry in cluster.entries {
             if entry.occupied && entry.key_tag == key {
                 return Some(TtHit {
@@ -106,10 +113,12 @@ impl TranspositionTable {
         None
     }
 
-    pub fn store(&mut self, key: u64, store: TtStore) {
-        let generation = self.generation;
+    pub fn store(&self, key: u64, store: TtStore) {
+        let generation = self.generation.load(Ordering::Relaxed);
         let cluster_index = self.cluster_index(key);
-        let cluster = &mut self.clusters[cluster_index];
+        let mut cluster = self.clusters[cluster_index]
+            .write()
+            .expect("TT cluster lock poisoned");
         let replacement_index = select_replacement_slot(&cluster.entries, key, generation);
 
         cluster.entries[replacement_index] = TtEntry {
@@ -130,8 +139,10 @@ impl TranspositionTable {
 
     fn with_cluster_count(cluster_count: usize) -> Self {
         Self {
-            clusters: vec![Cluster::default(); cluster_count.max(1)],
-            generation: 0,
+            clusters: (0..cluster_count.max(1))
+                .map(|_| RwLock::new(Cluster::default()))
+                .collect(),
+            generation: AtomicU8::new(0),
         }
     }
 
@@ -146,6 +157,8 @@ impl TranspositionTable {
             .iter()
             .map(|cluster| {
                 cluster
+                    .read()
+                    .expect("TT cluster lock poisoned")
                     .entries
                     .iter()
                     .filter(|entry| entry.occupied)
@@ -239,7 +252,7 @@ mod tests {
 
     #[test]
     fn store_and_probe_round_trip_fields() {
-        let mut table = TranspositionTable::with_cluster_count_for_test(1);
+        let table = TranspositionTable::with_cluster_count_for_test(1);
         table.new_generation();
         table.store(
             0xabc,
@@ -263,7 +276,7 @@ mod tests {
 
     #[test]
     fn same_key_overwrites_before_replacement() {
-        let mut table = TranspositionTable::with_cluster_count_for_test(1);
+        let table = TranspositionTable::with_cluster_count_for_test(1);
         table.store(
             0xabc,
             TtStore {
@@ -294,7 +307,7 @@ mod tests {
 
     #[test]
     fn replacement_prefers_oldest_lowest_depth_entry() {
-        let mut table = TranspositionTable::with_cluster_count_for_test(1);
+        let table = TranspositionTable::with_cluster_count_for_test(1);
         for index in 0..ENTRIES_PER_CLUSTER {
             table.store(
                 index as u64 + 1,
@@ -329,7 +342,7 @@ mod tests {
 
     #[test]
     fn collision_does_not_return_wrong_key() {
-        let mut table = TranspositionTable::with_cluster_count_for_test(1);
+        let table = TranspositionTable::with_cluster_count_for_test(1);
         table.store(
             0x111,
             TtStore {

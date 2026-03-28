@@ -1,5 +1,8 @@
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -37,44 +40,45 @@ pub struct SearchResult {
     pub tt_hits: u64,
 }
 
-#[derive(Clone, Copy, Default)]
-pub(crate) struct SearchControl<'a> {
-    pub(crate) stop_flag: Option<&'a AtomicBool>,
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum SearchThreadRole {
+    #[default]
+    Main,
+    Helper(usize),
+}
+
+impl SearchThreadRole {
+    fn is_main(self) -> bool {
+        matches!(self, Self::Main)
+    }
+
+    fn helper_index(self) -> Option<usize> {
+        match self {
+            Self::Main => None,
+            Self::Helper(index) => Some(index),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct SearchControl {
+    pub(crate) stop_flag: Option<Arc<AtomicBool>>,
+    pub(crate) helper_stop_flag: Option<Arc<AtomicBool>>,
     pub(crate) soft_deadline: Option<Instant>,
     pub(crate) hard_deadline: Option<Instant>,
+    pub(crate) role: SearchThreadRole,
 }
 
-impl SearchControl<'_> {
-    fn can_interrupt(self) -> bool {
-        self.stop_flag.is_some() || self.soft_deadline.is_some() || self.hard_deadline.is_some()
+impl SearchControl {
+    fn can_interrupt(&self) -> bool {
+        self.stop_flag.is_some()
+            || self.helper_stop_flag.is_some()
+            || self.soft_deadline.is_some()
+            || self.hard_deadline.is_some()
     }
 }
 
-enum TtAccess<'a> {
-    None,
-    Owned(tt::TranspositionTable),
-    Borrowed(&'a mut tt::TranspositionTable),
-}
-
-impl TtAccess<'_> {
-    fn as_ref(&self) -> Option<&tt::TranspositionTable> {
-        match self {
-            Self::None => None,
-            Self::Owned(table) => Some(table),
-            Self::Borrowed(table) => Some(table),
-        }
-    }
-
-    fn as_mut(&mut self) -> Option<&mut tt::TranspositionTable> {
-        match self {
-            Self::None => None,
-            Self::Owned(table) => Some(table),
-            Self::Borrowed(table) => Some(table),
-        }
-    }
-}
-
-pub(crate) struct SearchContext<'a> {
+pub(crate) struct SearchContext {
     started: Instant,
     pub(crate) nodes: u64,
     tt_hits: u64,
@@ -85,8 +89,8 @@ pub(crate) struct SearchContext<'a> {
     killer_moves: [[Move; 2]; MAX_PLY],
     quiet_history: [[[i16; 64]; 64]; 2],
     heuristics: SearchHeuristics,
-    control: SearchControl<'a>,
-    tt: TtAccess<'a>,
+    control: SearchControl,
+    tt: Option<Arc<tt::TranspositionTable>>,
     debug_counters: SearchDebugCounters,
 }
 
@@ -138,8 +142,8 @@ pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
 pub(crate) fn search_with_control(
     position: &mut Position,
     limits: SearchLimits,
-    tt: Option<&mut tt::TranspositionTable>,
-    control: SearchControl<'_>,
+    tt: Option<Arc<tt::TranspositionTable>>,
+    control: SearchControl,
 ) -> SearchResult {
     SearchContext::with_tt(limits, tt, control).run(position, limits)
 }
@@ -149,7 +153,7 @@ enum RootSearchOutcome {
     Aborted(Option<Move>),
 }
 
-impl<'a> SearchContext<'a> {
+impl SearchContext {
     #[cfg(test)]
     pub(crate) fn new(limits: SearchLimits) -> Self {
         Self::with_tt(limits, None, SearchControl::default())
@@ -157,8 +161,8 @@ impl<'a> SearchContext<'a> {
 
     fn with_tt(
         limits: SearchLimits,
-        tt: Option<&'a mut tt::TranspositionTable>,
-        control: SearchControl<'a>,
+        tt: Option<Arc<tt::TranspositionTable>>,
+        control: SearchControl,
     ) -> Self {
         Self {
             started: Instant::now(),
@@ -172,13 +176,11 @@ impl<'a> SearchContext<'a> {
             quiet_history: [[[0; 64]; 64]; 2],
             heuristics: limits.heuristics,
             control,
-            tt: if let Some(tt) = tt {
-                TtAccess::Borrowed(tt)
-            } else if limits.tt_enabled {
-                TtAccess::Owned(tt::TranspositionTable::new_mb(limits.hash_mb))
-            } else {
-                TtAccess::None
-            },
+            tt: tt.or_else(|| {
+                limits
+                    .tt_enabled
+                    .then(|| Arc::new(tt::TranspositionTable::new_mb(limits.hash_mb)))
+            }),
             debug_counters: SearchDebugCounters::default(),
         }
     }
@@ -200,7 +202,9 @@ impl<'a> SearchContext<'a> {
             if self.hard_stop_requested() || (completed_depth > 0 && self.soft_stop_requested()) {
                 break;
             }
-            if let Some(tt) = self.tt.as_mut() {
+            if self.control.role.is_main()
+                && let Some(tt) = self.tt.as_ref()
+            {
                 tt.new_generation();
             }
             let depth_result = if self.heuristics.aspiration_windows
@@ -229,14 +233,16 @@ impl<'a> SearchContext<'a> {
             let pv = self.collect_pv(0);
             best_pv = pv.clone();
             self.capture_completed_pv(&pv);
-            info_lines.push(format_info_line(
-                depth,
-                depth_score,
-                self.nodes,
-                self.started.elapsed().as_millis(),
-                self.tt_hits,
-                &pv,
-            ));
+            if self.control.role.is_main() {
+                info_lines.push(format_info_line(
+                    depth,
+                    depth_score,
+                    self.nodes,
+                    self.started.elapsed().as_millis(),
+                    self.tt_hits,
+                    &pv,
+                ));
+            }
         }
 
         if completed_depth == 0 && best_move.is_none() {
@@ -315,6 +321,12 @@ impl<'a> SearchContext<'a> {
             tt_move: tt_move_hint,
         };
 
+        if let Some(helper_index) = self.control.role.helper_index() {
+            let ordered_moves =
+                self.helper_root_order(position, &legal_moves, ordering_hints, helper_index);
+            return self.search_root_for_helper(position, depth, alpha, beta, &ordered_moves);
+        }
+
         let mut best_move = None;
 
         for index in 0..legal_moves.len() {
@@ -326,6 +338,48 @@ impl<'a> SearchContext<'a> {
             let undo = position
                 .make_move(mv)
                 .expect("root move must be legal during search");
+            let child_is_pv = best_move.is_none();
+            let Some(score) = self.alpha_beta(
+                position,
+                depth.saturating_sub(1),
+                1,
+                -beta,
+                -alpha,
+                SearchNodeState { is_pv: child_is_pv },
+            ) else {
+                position.unmake_move(mv, undo);
+                return RootSearchOutcome::Aborted(best_move);
+            };
+            position.unmake_move(mv, undo);
+            let score = -score;
+
+            if score > alpha || best_move.is_none() {
+                alpha = score;
+                best_move = Some(mv);
+                self.update_pv(0, mv);
+            }
+        }
+
+        RootSearchOutcome::Complete(best_move, alpha)
+    }
+
+    fn search_root_for_helper(
+        &mut self,
+        position: &mut Position,
+        depth: usize,
+        mut alpha: i32,
+        beta: i32,
+        ordered_moves: &[Move],
+    ) -> RootSearchOutcome {
+        let mut best_move = None;
+
+        for &mv in ordered_moves {
+            if self.hard_stop_requested() {
+                return RootSearchOutcome::Aborted(best_move);
+            }
+            let undo = position
+                .make_move(mv)
+                .expect("helper root move must be legal during search");
             let child_is_pv = best_move.is_none();
             let Some(score) = self.alpha_beta(
                 position,
@@ -663,7 +717,7 @@ impl<'a> SearchContext<'a> {
     }
 
     fn store_tt(&mut self, input: TtStoreInput) {
-        let Some(tt) = self.tt.as_mut() else {
+        let Some(tt) = self.tt.as_ref() else {
             return;
         };
 
@@ -682,7 +736,13 @@ impl<'a> SearchContext<'a> {
     pub(crate) fn hard_stop_requested(&self) -> bool {
         self.control
             .stop_flag
+            .as_ref()
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
+            || self
+                .control
+                .helper_stop_flag
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Relaxed))
             || self
                 .control
                 .hard_deadline
@@ -715,6 +775,30 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
 
 fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
     reduced_score > alpha
+}
+
+impl SearchContext {
+    fn helper_root_order(
+        &self,
+        position: &Position,
+        legal_moves: &MoveList,
+        hints: MoveOrderHints,
+        helper_index: usize,
+    ) -> Vec<Move> {
+        let mut ordered = legal_moves.as_slice().to_vec();
+        ordered.sort_by_key(|mv| std::cmp::Reverse(self.score_move(position, *mv, hints)));
+
+        let hinted_prefix = ordered
+            .iter()
+            .take_while(|mv| hints.pv_move == Some(**mv) || hints.tt_move == Some(**mv))
+            .count();
+
+        let tail = &mut ordered[hinted_prefix..];
+        if !tail.is_empty() {
+            tail.rotate_left(helper_index % tail.len());
+        }
+        ordered
+    }
 }
 
 pub(crate) fn is_draw(position: &Position) -> bool {

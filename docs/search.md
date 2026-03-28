@@ -1,6 +1,6 @@
 # Search
 
-Phases 4 through 9 establish Volkrix's deterministic single-thread search baseline, its first transposition-table layer, the first correctness-first strength pass on top of that baseline, a practical time-controlled UCI runtime around the same single-thread core, a disciplined classical-eval bridge, and the next narrow depth/selectivity layer on top of that Phase 8 baseline.
+Phases 4 through 10 establish Volkrix's deterministic single-thread search baseline, its first transposition-table layer, the first correctness-first strength passes on top of that baseline, a practical time-controlled UCI runtime, a disciplined classical-eval bridge, and the first conservative SMP / Lazy SMP layer on top of the retained Phase 9 engine.
 
 ## Current Shape
 
@@ -9,126 +9,99 @@ Phases 4 through 9 establish Volkrix's deterministic single-thread search baseli
 - quiescence search for tactical stabilization
 - principal variation tracking through the existing root/PV bookkeeping
 - tapered classical evaluation with middlegame/endgame blending
-- transposition table integration with deterministic TT-on and TT-off paths
+- transposition table integration with deterministic TT-on and TT-off paths at `Threads=1`
 - stronger move ordering through root PV hints, SEE-informed capture buckets, killer moves, and quiet history
 - aspiration windows around iterative deepening
 - basic quiet-only late move reductions at eligible later quiet moves only
-- debug-only internal profile hooks for exact Phase 8 baseline, LMR-only, and full retained Phase 9 comparisons
-- documented null-move evaluation evidence, but no retained null-move pruning in the current tree
-- reproducible bench path tied to the real search core
-- UCI-only persistent TT reuse with `Hash` / `Clear Hash`
+- a conservative Lazy SMP Layer I when `Threads > 1`
+- debug-only internal profile hooks for exact Phase 8 baseline, retained Phase 9 default, and Phase 10 thread-count comparisons
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
-## Phase 9 Retained Heuristics
+## Phase 10 Retained SMP Model
 
-The retained Phase 9 set is:
+The retained Phase 10 design is deliberately narrow:
 
-- basic quiet-only LMR
+- `Threads` is the only new public control surface
+- `Threads=1` remains the authoritative retained Phase 9 debug baseline
+- one main search thread remains authoritative for orchestration, final `bestmove`, and user-visible PV/info output
+- helper workers search cloned root position/state plus thread-local search state
+- helper workers must not share mutable `Position` or state-history objects across workers
+- helper workers must not emit user-visible info lines
+- helper workers must not own or publish final `bestmove` or user-visible PV state
+- TT is the only shared mutable search structure
+- the worker-pool model is persistent and runtime-owned rather than recreated for every search
 
-### Basic quiet-only LMR
+Helper diversification remains conservative:
 
-LMR is allowed only when all of the following are true:
+- helpers use the same retained Phase 9 search code and heuristics
+- helpers rotate the non-hinted portion of the root move order to avoid exact duplication
+- no split points
+- no YBWC
+- no work stealing
+- no MultiPV or separate user-visible analyses
 
-- node is not root
-- node is not on the preserved PV path
-- side to move is not in check
-- remaining depth is at least 4 plies
-- move is quiet
-- move is not a promotion
-- move does not give check
-- move is not the hash move
-- move is not among the first 3 ordered quiet moves searched at the node
+## Shared State and Determinism
 
-Phase 9 keeps LMR conservative:
+Phase 10 keeps shared mutable state intentionally small:
 
-- only a 1-ply reduction
-- reduced search first
-- mandatory full-depth re-search if the reduced result improves alpha or fails high
-- no multi-level reductions
-- no reduction tables
-- no reductions on captures, promotions, checking moves, PV moves, or root moves
+- TT is the only intended shared mutable search structure
+- TT synchronization is localized to TT internals with per-cluster locking
+- all other search state remains thread-local in workers
 
-## Phase 9 Null-Move Evaluation
+Determinism rules:
 
-Guarded null-move pruning was evaluated during Phase 9 and rejected from the retained engine.
+- `Threads=1` benchmark/profile paths remain the authoritative reproducible baseline
+- `Threads>1` results are not required to preserve deterministic move order or checksum
+- `Threads>1` results must still remain correct and measurably beneficial
 
-The evaluated null-move variant used the intended conservative guardrails:
+## Phase 10 Benchmark Evidence
 
-- node was not root
-- node was not on the preserved PV path
-- side to move was not in check
-- remaining depth was at least 3 plies
-- direct draw/mate/stalemate handling ran before null-move eligibility
-- no repeated consecutive null moves
-- no null move when the side to move had no non-pawn material
-- null-window search only
-- reduction `R = 2` at depths 3 through 5
-- reduction `R = 3` at depths 6 and above
-- no verification search
-- no adaptive null-move formulas
+Observed fixed-depth depth-5 comparison on the built-in four-position suite:
 
-It was not retained because the evidence did not clear a stricter future/Elo-oriented bar:
+| Profile | Threads | Nodes | Checksum | Time (ms) | NPS |
+| --- | ---: | ---: | --- | ---: | ---: |
+| Retained Phase 9 baseline | 1 | 505147 | `244a71a65613ec7f` | 16336 | 30922 |
+| Phase 10 default | 1 | 505147 | `244a71a65613ec7f` | 11903 | 42438 |
+| Phase 10 default | 2 | 442898 | `244a723163d23d4b` | 12934 | 34242 |
+| Phase 10 default | 4 | 370831 | `244a735ef6371ec5` | 14317 | 25901 |
 
-- as a standalone profile it reduced nodes only modestly versus the exact Phase 8 baseline but ran slower
-- when added on top of LMR, the combined path still ran slower than LMR-only on the same deterministic bench
-- that was not strong enough to justify keeping the extra complexity in the retained single-thread search
+Observed fixed-time comparison at 50 ms per position:
 
-## Phase 9 Evidence Bench
+| Profile | Threads | Depth Sum | Nodes | Checksum | Time (ms) |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Retained Phase 9 baseline | 1 | 10 | 7781 | `a78c4124670c793e` | 205 |
+| Phase 10 default | 1 | 10 | 8604 | `a78c413e1f0c793e` | 216 |
+| Phase 10 default | 2 | 11 | 11646 | `a78c41611d1f8b3e` | 335 |
+| Phase 10 default | 4 | 12 | 10617 | `a78c41411d1e713e` | 358 |
 
-Observed deterministic depth-5 profile comparison on the built-in four-position suite:
+Interpretation:
 
-| Profile | Nodes | Checksum | Time (ms) |
-| --- | ---: | --- | ---: |
-| Phase 8 baseline | 541650 | `244a715de801bc83` | 6934 |
-| Null move only, evaluated and rejected | 536751 | `244a716f0e89aa83` | 7405 |
-| LMR only | 505147 | `244a71a65613ec7f` | 6111 |
-| LMR plus null move, evaluated but not retained | 496914 | `244a71b8d70abc7f` | 6509 |
+- `Threads=1` preserves the retained Phase 9 default bench signature exactly
+- on this validation machine, the retained SMP Layer I design does not improve fixed-depth elapsed time over the retained `Threads=1` default row
+- `Threads=2` and `Threads=4` do improve fixed-time completed depth, reaching depth sums `11` and `12` versus `10` at `Threads=1`
+- the retained Layer I SMP design is accepted because `Threads>1` stays correct and shows practical time-to-depth benefit without weakening the authoritative `Threads=1` baseline
 
-The current retained `phase9_default` path matches the LMR-only profile at `505147` nodes and checksum `244a71a65613ec7f`.
+## Runtime Notes
 
-Retention reasoning:
+- the stdio runtime still uses one input helper thread only to observe `stop` and `quit`
+- the main thread remains the sole owner of command application boundaries
+- `Hash`, `Clear Hash`, `Threads`, `position`, and `ucinewgame` still apply only after the active search fully unwinds
+- worker threads are owned by the persistent search service and shut down explicitly with the runtime
 
-- LMR was retained because the conservative quiet-only form stayed correctness-safe, remained locally explainable, and improved node and time behavior clearly versus the exact Phase 8 baseline
-- guarded null move was rejected because it did not demonstrate a clear enough benefit beyond LMR-only to justify its added complexity in this engine
-- the current retained `phase9_default` path therefore matches the LMR-only profile
+## Deferred Beyond Phase 10
 
-## Phase 7 Runtime Notes
+Still deferred beyond this Layer I SMP pass:
 
-- the search core remains single-threaded
-- the stdio runtime uses one helper thread only to observe `stop` and `quit` while search is active
-- the main thread remains the sole owner of TT resize/clear operations and all position mutation
-- `Hash`, `Clear Hash`, `position`, and `ucinewgame` never race with live TT probe/store activity because they are applied only after the active search fully unwinds
-- fixed-depth bench and regression helpers still run through deterministic internal profile paths
+- split-point search
+- YBWC-style parallel search
+- work stealing
+- distributed search
+- pondering
+- MultiPV expansion
+- tablebases
+- NNUE
+- further eval expansion
+- further selectivity expansion unrelated to SMP
 
-## Deferred Or Rejected
-
-Still deferred beyond Phase 9:
-
-- move-count pruning
-- futility pruning
-- razoring
-- probcut / multi-cut
-- singular extensions
-- countermove history
-- internal iterative deepening as a new feature
-- SMP
-- NNUE and tablebases
-
-Rejected or not added in Phase 9:
-
-- guarded null-move pruning
-- null-move verification search
-- adaptive null-move formulas
-- multi-level or table-driven LMR
-- public UCI-surface controls for null move or LMR
-
-## Intentional Limits
-
-- no SMP or shared-search work in the retained Phase 9 set
-- no public UCI-surface heuristic controls
-- no protocol expansion beyond the Phase 7 UCI surface
-- no classical eval expansion in Phase 9
-- no attempt to turn Phase 9 into a kitchen-sink heuristic dump
-
-The goal of Phase 9 is a stronger but still disciplined single-thread search: a narrow depth/selectivity layer with exact Phase 8 baseline preservation, explicit debug isolation, and evidence-backed retention of only the heuristics that clearly earn their keep.
+The Phase 10 goal is a stronger but still disciplined engine: a trusted `Threads=1` baseline plus a conservative helper-worker SMP mode that remains easy to reason about, easy to disable, and safe under the existing runtime/control model.
