@@ -16,3 +16,12 @@ The weights are synthetic and primarily encode simple material-count signals so 
 - accumulator full-build and incremental-update correctness
 - score orientation
 - runtime `EvalFile` activation
+
+`phase13-fixture.fens` is the retained Phase 13 tiny deterministic fixture corpus.
+
+It is:
+
+- a small in-repo FEN-lines corpus
+- intended for export/training/packing smoke validation only
+- not intended to be a strength corpus
+- kept separate from any real locally trained candidate-net artifacts

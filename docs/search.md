@@ -1,6 +1,8 @@
 # Search
 
-Phases 4 through 12 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, the first optional tablebase / probe integration, and now the first optional NNUE evaluator path on top of that retained engine.
+Phases 4 through 13 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, the first optional tablebase / probe integration, the first optional NNUE evaluator path, and now the first offline NNUE training / packing layer on top of that retained engine.
+
+Phase 13 does not widen the engine runtime surface. The retained runtime shape documented below remains authoritative. The offline export / training / packing workflow is documented separately in `docs/nnue-training.md`.
 
 ## Current Shape
 

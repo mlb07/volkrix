@@ -677,7 +677,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual real-net smoke for Phase 12 Threads=1"]
+    #[ignore = "manual real-net smoke for Phase 13 Threads=1"]
     fn real_net_smoke_threads_one() {
         let eval_file = std::env::var("VOLKRIX_EVALFILE")
             .expect("VOLKRIX_EVALFILE must point to a real NNUE file");
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual real-net smoke for Phase 12 Threads=2"]
+    #[ignore = "manual real-net smoke for Phase 13 Threads=2"]
     fn real_net_smoke_threads_two() {
         let eval_file = std::env::var("VOLKRIX_EVALFILE")
             .expect("VOLKRIX_EVALFILE must point to a real NNUE file");
@@ -722,6 +722,75 @@ mod tests {
         assert!(result.best_move.is_some());
         assert!(result.score.0.abs() < super::root::INF);
         assert_eq!(service.debug_active_helper_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "manual Phase 13 candidate-vs-fallback sanity comparison"]
+    fn phase_thirteen_candidate_vs_fallback_sanity_report() {
+        let eval_file = std::env::var("VOLKRIX_EVALFILE")
+            .expect("VOLKRIX_EVALFILE must point to a real NNUE file");
+        let positions = [
+            crate::core::STARTPOS_FEN,
+            "r2q1rk1/ppp2ppp/2npbn2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ];
+
+        let mut fallback = UciSearchService::new();
+        fallback.resize_hash(64);
+        fallback.set_threads(1);
+
+        let mut candidate = UciSearchService::new();
+        candidate.resize_hash(64);
+        candidate.set_threads(1);
+        candidate
+            .set_eval_file(&eval_file)
+            .expect("real NNUE file must load");
+
+        for fen in positions {
+            let mut fallback_position = Position::from_fen(fen).expect("FEN parse must succeed");
+            let mut candidate_position = Position::from_fen(fen).expect("FEN parse must succeed");
+
+            let fallback_result = fallback.search(
+                &mut fallback_position,
+                SearchRequest {
+                    limits: SearchLimits::new(5),
+                    soft_deadline: None,
+                    hard_deadline: None,
+                    stop_flag: None,
+                },
+            );
+            let candidate_result = candidate.search(
+                &mut candidate_position,
+                SearchRequest {
+                    limits: SearchLimits::new(5),
+                    soft_deadline: None,
+                    hard_deadline: None,
+                    stop_flag: None,
+                },
+            );
+
+            println!(
+                "candidate_vs_fallback fen \"{fen}\" fallback bestmove {} score {} nodes {} | candidate bestmove {} score {} nodes {}",
+                fallback_result
+                    .best_move
+                    .map(|mv| mv.to_string())
+                    .unwrap_or_else(|| "0000".to_owned()),
+                fallback_result.score.0,
+                fallback_result.nodes,
+                candidate_result
+                    .best_move
+                    .map(|mv| mv.to_string())
+                    .unwrap_or_else(|| "0000".to_owned()),
+                candidate_result.score.0,
+                candidate_result.nodes,
+            );
+
+            assert!(fallback_result.best_move.is_some());
+            assert!(candidate_result.best_move.is_some());
+            assert!(fallback_result.score.0.abs() < super::root::INF);
+            assert!(candidate_result.score.0.abs() < super::root::INF);
+        }
     }
 
     #[test]

@@ -38,6 +38,13 @@ struct PieceFeature {
     square: Square,
 }
 
+#[cfg(feature = "offline-tools")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SparseFeaturePair {
+    pub(crate) active: Vec<u16>,
+    pub(crate) passive: Vec<u16>,
+}
+
 const EXPECTED_HEADER_BYTES: usize = 8 + 4 + 4 + 4 + 4 + 4 + 4;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -184,6 +191,88 @@ impl NnueService {
     pub(crate) fn evaluate(&self, position: &Position, accumulators: &AccumulatorPair) -> Score {
         self.network.evaluate(position, accumulators)
     }
+}
+
+#[cfg(feature = "offline-tools")]
+pub(crate) fn sparse_features_for_side_to_move(position: &Position) -> SparseFeaturePair {
+    let active = sparse_features_for_perspective(position, position.side_to_move());
+    let passive = sparse_features_for_perspective(position, position.side_to_move().opposite());
+    SparseFeaturePair { active, passive }
+}
+
+#[cfg(feature = "offline-tools")]
+fn sparse_features_for_perspective(position: &Position, perspective: Color) -> Vec<u16> {
+    let mut features = Vec::new();
+    let king_square = position.king_square(perspective);
+    for piece_color in Color::ALL {
+        for piece_type in [
+            PieceType::Pawn,
+            PieceType::Knight,
+            PieceType::Bishop,
+            PieceType::Rook,
+            PieceType::Queen,
+        ] {
+            let mut pieces = position.pieces(piece_color, piece_type);
+            while let Some(square) = pop_lsb(&mut pieces) {
+                let Some(bucket) = feature_bucket(perspective, piece_color, piece_type) else {
+                    continue;
+                };
+                let feature = feature_index(perspective, king_square, bucket, square);
+                features.push(feature as u16);
+            }
+        }
+    }
+    features.sort_unstable();
+    features
+}
+
+#[cfg(feature = "offline-tools")]
+pub(crate) fn encode_volknnue(
+    hidden_biases: &[i16; NNUE_HIDDEN_SIZE],
+    input_weights: &[i16],
+    output_bias: i32,
+    output_weights: &[i16; NNUE_OUTPUT_INPUTS],
+    output_scale: i32,
+) -> Result<Vec<u8>, String> {
+    let input_weight_count = NNUE_FEATURE_COUNT * NNUE_HIDDEN_SIZE;
+    if input_weights.len() != input_weight_count {
+        return Err(format!(
+            "input weight count {} did not match retained count {}",
+            input_weights.len(),
+            input_weight_count
+        ));
+    }
+    if output_scale <= 0 {
+        return Err("VOLKNNUE output scale must be positive".to_owned());
+    }
+
+    let mut bytes = Vec::with_capacity(
+        EXPECTED_HEADER_BYTES
+            + hidden_biases.len() * std::mem::size_of::<i16>()
+            + std::mem::size_of_val(input_weights)
+            + std::mem::size_of::<i32>()
+            + output_weights.len() * std::mem::size_of::<i16>(),
+    );
+    bytes.extend_from_slice(NNUE_MAGIC);
+    bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&NNUE_TOPOLOGY_HALFKP_128X2.to_le_bytes());
+    bytes.extend_from_slice(&(NNUE_FEATURE_COUNT as u32).to_le_bytes());
+    bytes.extend_from_slice(&(NNUE_HIDDEN_SIZE as u32).to_le_bytes());
+    bytes.extend_from_slice(&(NNUE_OUTPUT_INPUTS as u32).to_le_bytes());
+    bytes.extend_from_slice(&output_scale.to_le_bytes());
+    for bias in hidden_biases {
+        bytes.extend_from_slice(&bias.to_le_bytes());
+    }
+    for weight in input_weights {
+        bytes.extend_from_slice(&weight.to_le_bytes());
+    }
+    bytes.extend_from_slice(&output_bias.to_le_bytes());
+    for weight in output_weights {
+        bytes.extend_from_slice(&weight.to_le_bytes());
+    }
+
+    NnueNetwork::parse(&bytes)?;
+    Ok(bytes)
 }
 
 struct NnueNetwork {

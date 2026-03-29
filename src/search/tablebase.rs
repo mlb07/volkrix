@@ -172,7 +172,7 @@ impl TablebaseService {
     }
 
     fn is_within_retained_scope(&self, position: &Position) -> bool {
-        position.castling_rights().is_empty() && position.occupancy().count_ones() <= 6
+        position_is_within_retained_scope(position)
     }
 
     fn fathom_identity(&self) -> Option<FathomIdentity> {
@@ -185,6 +185,10 @@ impl TablebaseService {
             BackendKind::Mock(_) => None,
         }
     }
+}
+
+pub(crate) fn position_is_within_retained_scope(position: &Position) -> bool {
+    position.castling_rights().is_empty() && position.occupancy().count_ones() <= 6
 }
 
 impl Drop for TablebaseService {

@@ -14,11 +14,12 @@
 - Phase 9 search depth and selectivity layer II with exact Phase 8 baseline preservation, conservative quiet-only LMR, and evidence-driven rejection of guarded null-move pruning
 - Phase 10 SMP / Lazy SMP Layer I with minimal `Threads` control, persistent helper-worker pool, shared-TT-only SMP, and authoritative `Threads=1` baseline preservation
 - Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath`, approved vendored `jdart1/Fathom` probing behind the internal tablebase boundary, and exact disabled-path baseline preservation
+- Phase 12 NNUE Engine Integration Layer I with minimal `EvalFile` control, clean evaluator boundary, retained clean-room Volkrix NNUE format, thread-local accumulator/update architecture, and exact disabled-path preservation when no network is configured
 
 ## Next
 
-- Phase 12 NNUE Engine Integration Layer I pending signoff: minimal `EvalFile` control, clean evaluator boundary, retained clean-room Volkrix NNUE format, thread-local accumulator/update architecture, and exact disabled-path preservation when no network is configured
-- Later phases, not yet locked in order: training pipeline / net iteration and tuning / release polish
+- Phase 13 Training Pipeline and Net Iteration Layer I pending signoff: isolated offline export/pack/validate tooling, deterministic fixed-depth 5 label generation, hybrid Rust/Python training flow, and first real candidate-net validation through `EvalFile`
+- Later phases, not yet locked in order: broader net iteration / tuning / release polish
 
 ## Intentional Boundaries
 
@@ -26,5 +27,5 @@ The current implementation still stops before:
 
 - split-point or work-stealing SMP
 - broader tablebase features beyond the approved probe-only Fathom Layer I design
-- broader NNUE work beyond the retained single-network integration layer
+- broader NNUE work beyond the retained single-network integration and first offline training layer
 - advanced pruning and reduction heuristics

@@ -15,12 +15,18 @@ The repository currently includes:
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic internal heuristic toggles, and documented Phase 5 baseline comparisons
 - Phase 7 practical UCI usability with timed search, real `stop`, `Hash` / `Clear Hash`, and persistent TT reuse across UCI searches
 - Phase 8 classical eval bridge with tapered middlegame/endgame scoring, mobility, king safety, pawn structure, passed pawns, bishop pair, rook file terms, and compact static threats
+- Phase 9 search depth and selectivity layer II with conservative quiet-only LMR and exact retained baseline preservation
+- Phase 10 SMP / Lazy SMP Layer I with `Threads` and shared-TT-only helpers
+- Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath` and retained Fathom-backed probing
+- Phase 12 NNUE Engine Integration Layer I with optional `EvalFile`, retained VOLKNNUE format, and exact disabled-path preservation
+- Phase 13 Training Pipeline and Net Iteration Layer I with isolated offline export / training / packing tooling and first real candidate-net validation workflow
 
 What is intentionally not here yet:
 
-- SMP or other shared search infrastructure
-- advanced pruning and reduction heuristics
-- tablebases or NNUE
+- split-point or work-stealing SMP
+- broad tablebase redesign or broader tablebase features
+- external `.nnue` compatibility
+- broader NNUE tuning / search / architecture work beyond the retained first offline pipeline
 
 ## Clean-Room Provenance
 
@@ -66,6 +72,9 @@ The engine currently supports:
 - `position`
 - `setoption name Hash value <mb>`
 - `setoption name Clear Hash`
+- `setoption name Threads value <n>`
+- `setoption name SyzygyPath value <path>`
+- `setoption name EvalFile value <path>`
 - `go depth`
 - `go movetime <ms>`
 - `go wtime <ms> btime <ms> [winc <ms>] [binc <ms>] [movestogo <n>]`
@@ -73,10 +82,11 @@ The engine currently supports:
 - `stop`
 - `quit`
 
-Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. The UCI runtime keeps the search core single-threaded, reuses TT state across UCI searches, and still preserves the documented deterministic fixed-depth bench and regression path outside the UCI shell.
+Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. The UCI runtime preserves the documented deterministic `Threads=1` / `EvalFile=""` / `SyzygyPath=""` fixed-depth baseline, reuses TT state across UCI searches, and now supports the retained Phase 10/11/12 `Threads`, `SyzygyPath`, and `EvalFile` controls without widening the runtime surface further in Phase 13.
 
 ## Documentation
 
 - `docs/architecture.md`
 - `docs/roadmap.md`
 - `docs/search.md`
+- `docs/nnue-training.md`
