@@ -5,7 +5,7 @@ use volkrix::search::{
     BenchConfig, SearchLimits,
     internal::{
         HeuristicProfile, run_profile_bench, run_threaded_profile_bench,
-        run_threaded_timed_profile_bench,
+        run_threaded_timed_profile_bench, run_threaded_tiny_nnue_bench,
     },
     run_bench, search,
 };
@@ -182,6 +182,62 @@ fn phase11_syzygy_empty_threads_one_matches_retained_phase10_signature() {
 
 #[test]
 fn phase11_syzygy_empty_threads_one_remains_reproducible() {
+    let first = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    let second = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+
+    assert_eq!(first.total_nodes, second.total_nodes);
+    assert_eq!(first.checksum, second.checksum);
+}
+
+#[test]
+#[ignore = "manual benchmark profile report for Phase 12 NNUE integration"]
+fn phase_twelve_nnue_profile_report() {
+    let baseline = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    println!(
+        "phase11_baseline_evalfile_empty_threads1: nodes {} checksum {:016x} time_ms {} nps {}",
+        baseline.total_nodes,
+        baseline.checksum,
+        baseline.elapsed_ms,
+        baseline.nps()
+    );
+
+    let current = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    println!(
+        "phase12_default_evalfile_empty_threads1: nodes {} checksum {:016x} time_ms {} nps {}",
+        current.total_nodes,
+        current.checksum,
+        current.elapsed_ms,
+        current.nps()
+    );
+
+    let tiny_threads_one = run_threaded_tiny_nnue_bench(5, 1);
+    println!(
+        "phase12_tiny_nnue_threads1: nodes {} checksum {:016x} time_ms {} nps {}",
+        tiny_threads_one.total_nodes,
+        tiny_threads_one.checksum,
+        tiny_threads_one.elapsed_ms,
+        tiny_threads_one.nps()
+    );
+
+    let tiny_threads_two = run_threaded_tiny_nnue_bench(5, 2);
+    println!(
+        "phase12_tiny_nnue_threads2: nodes {} checksum {:016x} time_ms {} nps {}",
+        tiny_threads_two.total_nodes,
+        tiny_threads_two.checksum,
+        tiny_threads_two.elapsed_ms,
+        tiny_threads_two.nps()
+    );
+}
+
+#[test]
+fn phase12_evalfile_empty_threads_one_matches_retained_phase11_signature() {
+    let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    assert_eq!(result.total_nodes, 505_147);
+    assert_eq!(result.checksum, 0x244a_71a6_5613_ec7f);
+}
+
+#[test]
+fn phase12_evalfile_empty_threads_one_remains_reproducible() {
     let first = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
     let second = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
 

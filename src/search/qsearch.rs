@@ -1,11 +1,10 @@
 use crate::core::{MoveList, Position};
 
-use super::{
-    eval,
-    root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, is_quiescence_move, terminal_score},
+use super::root::{
+    MAX_PLY, MoveOrderHints, SearchContext, is_draw, is_quiescence_move, terminal_score,
 };
 
-pub(crate) fn qsearch(
+pub(crate) fn qsearch<const USE_NNUE: bool>(
     context: &mut SearchContext,
     position: &mut Position,
     ply: usize,
@@ -18,7 +17,7 @@ pub(crate) fn qsearch(
     }
 
     if ply >= MAX_PLY - 1 {
-        return Some(eval::evaluate(position).0);
+        return Some(context.evaluate_position::<USE_NNUE>(position));
     }
 
     if is_draw(position) {
@@ -27,7 +26,7 @@ pub(crate) fn qsearch(
 
     let in_check = position.is_in_check(position.side_to_move());
     if !in_check {
-        let stand_pat = eval::evaluate(position).0;
+        let stand_pat = context.evaluate_position::<USE_NNUE>(position);
         if stand_pat >= beta {
             return Some(beta);
         }
@@ -57,14 +56,14 @@ pub(crate) fn qsearch(
             continue;
         }
 
-        let undo = position
-            .make_move(mv)
+        let undo = context
+            .make_search_move::<USE_NNUE>(position, mv)
             .expect("quiescence move must be legal");
-        let Some(score) = qsearch(context, position, ply + 1, -beta, -alpha) else {
-            position.unmake_move(mv, undo);
+        let Some(score) = qsearch::<USE_NNUE>(context, position, ply + 1, -beta, -alpha) else {
+            context.unmake_search_move::<USE_NNUE>(position, mv, undo);
             return None;
         };
-        position.unmake_move(mv, undo);
+        context.unmake_search_move::<USE_NNUE>(position, mv, undo);
         let score = -score;
 
         if score > alpha {

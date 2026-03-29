@@ -1,6 +1,6 @@
 # Search
 
-Phases 4 through 11 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, and the first optional tablebase / probe integration on top of that retained engine.
+Phases 4 through 12 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, the first optional tablebase / probe integration, and now the first optional NNUE evaluator path on top of that retained engine.
 
 ## Current Shape
 
@@ -8,7 +8,8 @@ Phases 4 through 11 establish Volkrix's deterministic single-thread baseline, it
 - alpha-beta negamax core
 - quiescence search for tactical stabilization
 - principal variation tracking through the existing root/PV bookkeeping
-- tapered classical evaluation with middlegame/endgame blending
+- tapered classical evaluation as the retained fallback evaluator
+- an optional NNUE evaluator boundary controlled by `EvalFile`
 - transposition table integration with deterministic TT-on and TT-off paths at `Threads=1`
 - stronger move ordering through root PV hints, SEE-informed capture buckets, killer moves, and quiet history
 - aspiration windows around iterative deepening
@@ -18,119 +19,176 @@ Phases 4 through 11 establish Volkrix's deterministic single-thread baseline, it
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
-## Phase 11 Retained Tablebase Model
+## Phase 12 Retained NNUE Model
 
-The retained Phase 11 design is deliberately narrow:
+The retained Phase 12 design is deliberately narrow:
 
-- `SyzygyPath` is the only new public control surface
-- tablebase probing is optional and disabled by default
-- the runtime owns an optional internal tablebase service behind a backend-agnostic boundary
-- the approved retained backend is a vendored copy of `jdart1/Fathom`
-- tablebase files are user-provided runtime assets, never repo-managed artifacts
-- helpers must not emit user-visible info lines
-- helpers must not own or publish final `bestmove` or user-visible PV state
+- `EvalFile` is the only new public control surface
+- NNUE is optional and disabled by default
+- the runtime owns an optional internal NNUE service behind `search::nnue`
+- the retained network format is a clean-room Volkrix-owned `VOLKNNUE` binary format only
+- the retained topology is `HalfKP 128x2` only
+- one active network only
+- one retained feature scheme only
+- one retained accumulator/update architecture only
+- no external `.nnue` compatibility in this phase
+- helpers remain silent and non-authoritative for user-visible publication
 - TT remains the only shared mutable search structure
-- tablebase access is shared read-only state only
+- network weights are shared read-only across workers
 
-The retained supported probe scope is:
+When `EvalFile` is empty:
 
-- no castling rights
-- at most 6 pieces total
-- backend-specific exact eligibility checks
+- `Threads=1` preserves the authoritative retained Phase 11 fixed-depth deterministic baseline exactly
+- `Threads>1` preserves the retained Phase 11 SMP behavior
+- the classical evaluator remains the active path
+- runtime/deferred-command semantics remain unchanged
 
-Current backend-specific exact eligibility checks for the approved Fathom Layer I integration are:
+## Retained HalfKP-Like Feature Scheme
 
-- root resolution requires loaded Fathom tables for the current material cardinality
-- non-root outcome substitution requires loaded Fathom tables for the current material cardinality
-- non-root outcome substitution is limited to positions with `halfmove_clock == 0`, because the retained threaded non-root probe path uses Fathom's thread-safe WDL probing API
+The retained feature space is:
 
-## Retained Probe Semantics
+- `64` normalized king squares
+- `10` non-king piece buckets
+- `64` normalized piece squares
+- total feature count: `64 * 10 * 64 = 40,960`
 
-- direct mate/stalemate/repetition/fifty-move/insufficient-material handling stays authoritative and ahead of any probe attempt
-- root positions may resolve directly through Fathom root probing on the main thread only
-- helper workers do not perform root probe resolution and do not publish final root state
-- eligible non-root positions may substitute an exact tablebase outcome score instead of normal expansion
-- the non-root substitution path uses backend-provided WDL semantics, not naive handcrafted endgame rules
+The `10` retained non-king buckets are explicitly:
 
-The retained tablebase score mapping is:
+1. own pawn
+2. own knight
+3. own bishop
+4. own rook
+5. own queen
+6. enemy pawn
+7. enemy knight
+8. enemy bishop
+9. enemy rook
+10. enemy queen
 
-- `Win` maps into a positive tablebase score band with ply-aware shaping
-- `Loss` maps into the corresponding negative tablebase score band
-- `Draw`, `CursedWin`, and `BlessedLoss` map to `0` so fifty-move-aware draw semantics stay correct in search
-- the current tablebase score band is `20000`, explicitly kept below mate-score thresholds so tablebase wins/losses do not collide semantically with mate handling
+Squares are normalized per perspective so each accumulator sees its own side from the same board orientation. Kings are not encoded as input pieces; instead, the king square selects the active `HalfKP` slice for that perspective.
 
-## Backend Boundary and Approval
+## Retained Topology and Score Orientation
 
-Phase 11 keeps the backend boundary explicit:
+The retained topology is:
 
-- search/runtime/UCI code talks only to the internal `search::tablebase` service boundary
-- the approved retained backend is vendored exactly from `jdart1/Fathom` revision `c9c6fef0dddc05d2e242c183acf5833149ab676d`
-- no probing code was transliterated, re-ported, or cherry-picked from Stockfish, Cfish, Pyrrhic, `pyrrhic-rs`, `shakmaty-syzygy`, `python-chess`, or any other unapproved source
-- the vendored backend remains localized behind the internal boundary so later backend changes, if ever approved, do not require protocol or search-architecture rewrites
+- one shared input-to-hidden matrix: `40960 x 128`
+- one hidden bias vector: `128`
+- one output head over concatenated perspective activations: `256 -> 1`
 
-## Disabled-Path Preservation
+The retained numeric path is:
 
-When `SyzygyPath` is empty:
+- input weights: `i16`
+- hidden biases: `i16`
+- accumulator lanes: `i32`
+- output weights: `i16`
+- output bias: `i32`
+- activation: clipped ReLU to `[0, 255]`
+- final score: output sum divided by the stored output scale
 
-- `Threads=1` preserves the authoritative retained Phase 10 fixed-depth deterministic baseline exactly
-- `Threads>1` preserves the retained Phase 10 SMP behavior
-- root-state preservation remains unchanged
-- existing runtime/deferred-command semantics remain unchanged
+Final NNUE score orientation in engine terms:
+
+- positive scores favor the side to move
+- negative scores favor the opponent
+
+That matches Volkrix's retained classical static-eval convention, so search integration does not need a separate score-orientation bridge.
+
+## Evaluator Boundary and Authority Rules
+
+Phase 12 introduces a clean evaluator boundary:
+
+- retained classical evaluation when `EvalFile` is empty
+- NNUE evaluation when a network is loaded successfully
+
+The retained authority rules remain unchanged:
+
+- direct mate/stalemate/repetition/fifty-move/insufficient-material handling stays authoritative before evaluator choice matters
+- when `SyzygyPath` is enabled and a position is tablebase-resolved within the retained Phase 11 scope, tablebase handling remains authoritative and NNUE must not override that result
+- helpers do not emit user-visible info lines
+- helpers do not own or publish final `bestmove` or user-visible PV state
+
+## Thread-Local Accumulator / Update Architecture
+
+Accumulator state is deliberately kept out of `Position`.
+
+The retained model is:
+
+- search-local accumulator state stored in `SearchContext`
+- one accumulator for White-king perspective
+- one accumulator for Black-king perspective
+- exact root build from the current position at search start
+- stack-based restoration on unmake
+
+Retained incremental update rules:
+
+- ordinary non-king moves patch both perspectives incrementally by removing the old feature and adding the new feature
+- captures, promotions, and en passant apply exact piece add/remove deltas
+- if a king moves, that side's perspective accumulator is rebuilt from the child position instead of patching king-indexed features incrementally
+- castling uses the king-move rebuild for the moving side's perspective and a simple rook delta for the opposite perspective
+- unmake restoration uses accumulator stack pop, not reverse-delta reconstruction
+
+## Tiny Test Net and Real-Net Policy
+
+Phase 12 includes one deterministic in-repo integration net:
+
+- `tests/data/nnue/volkrix-halfkp128x2-test.volknnue`
+
+This file is:
+
+- clean-room and Volkrix-owned
+- minimal and synthetic
+- intended for parser, accumulator, and inference validation only
+- explicitly not treated as a production playing net
+
+Optional ignored real-net smoke tests may be run with `VOLKRIX_EVALFILE`, but that is validation convenience only and is not required for Phase 12 completion.
 
 ## Determinism and Validation Rules
 
-- no-tablebase `Threads=1` fixed-depth benchmark/profile paths remain the authoritative reproducible baseline
-- tablebase-enabled runs are correctness and benefit checks, not checksum-equality requirements
-- `Threads>1` tablebase-enabled runs are not required to preserve deterministic move order or checksum
-- `Threads>1` tablebase-enabled runs must still remain correct
+- `EvalFile` empty / `Threads=1` fixed-depth benchmark and profile paths remain the authoritative reproducible baseline
+- NNUE-enabled runs are correctness, integration, and benefit checks, not checksum-equality requirements
+- `Threads>1` NNUE-enabled runs are not required to preserve deterministic move order or checksum
+- `Threads>1` NNUE-enabled runs must still remain correct
 
-## Phase 11 Evidence
+## Phase 12 Evidence
 
-No-tablebase fixed-depth baseline preservation:
+No-network fixed-depth baseline preservation:
 
 | Profile | Nodes | Checksum |
 | --- | ---: | --- |
-| Retained Phase 10 baseline / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
-| Phase 11 default / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
+| Retained Phase 11 baseline / `EvalFile` empty / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
+| Phase 12 default / `EvalFile` empty / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
 
-Mock-backed targeted root-resolution validation on a legal 3-piece KQK position:
+Targeted tiny-test-net validation:
 
-| Scenario | Best Move | Nodes |
-| --- | --- | ---: |
-| No tablebase / `Threads=1` | `d3a6` | 38100 |
-| Mock tablebase enabled / `Threads=1` | `d3d7` | 0 |
-| Mock tablebase enabled / `Threads=2` | `d3d7` | 0 |
+| Scenario | Purpose |
+| --- | --- |
+| `tests/eval.rs::tiny_nnue_eval_returns_finite_scores_on_curated_positions` | finite-score inference sanity |
+| `src/search/nnue.rs` incremental-update tests | full rebuild vs incremental exactness |
+| `tests/uci.rs::nnue_enabled_go_depth_returns_a_legal_move` | public `EvalFile` activation and legal move production |
+| `src/search/service.rs` NNUE threaded tests | `Threads=1` and `Threads=2` correctness with shared read-only weights |
 
-Real asset-backed Fathom validation completed on this machine with:
+Manual benchmark/report hooks are available through:
 
-- `/tmp/volkrix-syzygy-min/KQvK.rtbw`
-- `/tmp/volkrix-syzygy-min/KQvK.rtbz`
-- env-gated ignored Fathom tests passing for both `Threads=1` and `Threads=2`
+- `cargo test --test tt phase_twelve_nnue_profile_report -- --ignored --nocapture`
 
-Direct UCI sanity on the same legal 3-piece KQK position:
+That report prints:
 
-| Scenario | Best Move | Nodes | Info |
-| --- | --- | ---: | --- |
-| Real Fathom enabled / `Threads=1` | `d3a3` | 0 | `info depth 0 score cp 20000 ... pv d3a3` |
-| Real Fathom enabled / `Threads=2` | `d3a3` | 0 | `info depth 0 score cp 20000 ... pv d3a3` |
+- retained Phase 11 baseline / `EvalFile` empty / `SyzygyPath` empty / `Threads=1`
+- Phase 12 default / `EvalFile` empty / `SyzygyPath` empty / `Threads=1`
+- targeted tiny-test-net checks at `Threads=1`
+- targeted tiny-test-net checks at `Threads=2`
 
-Interpretation:
+## Deferred Beyond Phase 12
 
-- the authoritative no-tablebase baseline remains unchanged
-- the retained root-resolution semantics are validated under both `Threads=1` and `Threads=2`
-- the mock-backed validation rows remain useful correctness-focused checks, not reproducibility requirements
-- the real asset-backed validation rows confirm that the approved Fathom backend resolves eligible root positions immediately under both `Threads=1` and `Threads=2`
+Still deferred beyond this first NNUE engine-integration layer:
 
-## Deferred Beyond Phase 11
+- external `.nnue` compatibility
+- training pipeline work
+- self-play data generation
+- tuner infrastructure
+- network architecture search
+- broader feature-family experimentation
+- extra public NNUE knobs
+- broad classical-eval deletion
+- broader eval/search co-design work
 
-Still deferred beyond this first tablebase / probe layer:
-
-- repo-managed tablebase assets
-- tablebase download/install tooling
-- extra public tablebase knobs
-- broader endgame tooling
-- NNUE
-- further eval expansion
-- search/selectivity expansion unrelated to this probe layer
-
-The Phase 11 goal is a still-trusted no-tablebase engine by default, plus a clean, testable, license-safe tablebase integration that uses the approved Fathom backend without destabilizing the retained Phase 10 search/runtime substrate.
+The Phase 12 goal is a still-trusted retained Phase 11 engine when `EvalFile` is empty, plus a clean, optional, testable NNUE inference path that can later support training-pipeline and tuning work without destabilizing the current search/runtime substrate.

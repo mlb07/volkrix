@@ -4,6 +4,7 @@ pub mod eval;
 #[doc(hidden)]
 pub mod internal;
 pub mod limits;
+pub(crate) mod nnue;
 mod qsearch;
 mod root;
 pub(crate) mod service;

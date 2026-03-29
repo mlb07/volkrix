@@ -11,6 +11,7 @@ use crate::core::{Move, MoveList, Position, Score, see};
 use super::{
     eval,
     limits::{SearchHeuristics, SearchLimits},
+    nnue::{NnueSearchState, NnueService},
     qsearch,
     tablebase::{self, TablebaseService},
     tt::{self, Bound, TtHit, TtStore},
@@ -92,6 +93,7 @@ pub(crate) struct SearchContext {
     heuristics: SearchHeuristics,
     control: SearchControl,
     tt: Option<Arc<tt::TranspositionTable>>,
+    nnue: Option<NnueSearchState>,
     tablebases: Option<Arc<TablebaseService>>,
     debug_counters: SearchDebugCounters,
 }
@@ -138,17 +140,18 @@ pub(crate) struct MoveOrderHints {
 }
 
 pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
-    search_with_control(position, limits, None, None, SearchControl::default())
+    search_with_control(position, limits, None, None, None, SearchControl::default())
 }
 
 pub(crate) fn search_with_control(
     position: &mut Position,
     limits: SearchLimits,
     tt: Option<Arc<tt::TranspositionTable>>,
+    nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
     control: SearchControl,
 ) -> SearchResult {
-    SearchContext::with_tt(limits, tt, tablebases, control).run(position, limits)
+    SearchContext::with_tt(limits, tt, nnue, tablebases, control).run(position, limits)
 }
 
 enum RootSearchOutcome {
@@ -159,12 +162,13 @@ enum RootSearchOutcome {
 impl SearchContext {
     #[cfg(test)]
     pub(crate) fn new(limits: SearchLimits) -> Self {
-        Self::with_tt(limits, None, None, SearchControl::default())
+        Self::with_tt(limits, None, None, None, SearchControl::default())
     }
 
     fn with_tt(
         limits: SearchLimits,
         tt: Option<Arc<tt::TranspositionTable>>,
+        nnue: Option<Arc<NnueService>>,
         tablebases: Option<Arc<TablebaseService>>,
         control: SearchControl,
     ) -> Self {
@@ -185,20 +189,22 @@ impl SearchContext {
                     .tt_enabled
                     .then(|| Arc::new(tt::TranspositionTable::new_mb(limits.hash_mb)))
             }),
+            nnue: nnue.map(NnueSearchState::new),
             tablebases,
             debug_counters: SearchDebugCounters::default(),
         }
     }
 
     fn run(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
-        if self.tablebases.is_some() {
-            self.run_core::<true>(position, limits)
-        } else {
-            self.run_core::<false>(position, limits)
+        match (self.tablebases.is_some(), self.nnue.is_some()) {
+            (false, false) => self.run_core::<false, false>(position, limits),
+            (false, true) => self.run_core::<false, true>(position, limits),
+            (true, false) => self.run_core::<true, false>(position, limits),
+            (true, true) => self.run_core::<true, true>(position, limits),
         }
     }
 
-    fn run_core<const USE_TABLEBASES: bool>(
+    fn run_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
         &mut self,
         position: &mut Position,
         limits: SearchLimits,
@@ -219,6 +225,10 @@ impl SearchContext {
             return root_probe;
         }
 
+        if USE_NNUE {
+            self.prepare_nnue(position);
+        }
+
         for depth in 1..=depth_limit {
             if self.hard_stop_requested() || (completed_depth > 0 && self.soft_stop_requested()) {
                 break;
@@ -232,13 +242,18 @@ impl SearchContext {
                 && depth > 1
                 && best_score.abs() < MATE_THRESHOLD
             {
-                self.search_root_with_aspiration_core::<USE_TABLEBASES>(
+                self.search_root_with_aspiration_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth as usize,
                     best_score,
                 )
             } else {
-                self.search_root_core::<USE_TABLEBASES>(position, depth as usize, -INF, INF)
+                self.search_root_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth as usize,
+                    -INF,
+                    INF,
+                )
             };
 
             let (depth_best_move, depth_score) = match depth_result {
@@ -339,7 +354,7 @@ impl SearchContext {
         })
     }
 
-    fn search_root_with_aspiration_core<const USE_TABLEBASES: bool>(
+    fn search_root_with_aspiration_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -353,7 +368,7 @@ impl SearchContext {
             let alpha = (guess - delta).max(-INF);
             let beta = (guess + delta).min(INF);
             let RootSearchOutcome::Complete(best_move, score) =
-                self.search_root_core::<USE_TABLEBASES>(position, depth, alpha, beta)
+                self.search_root_core::<USE_TABLEBASES, USE_NNUE>(position, depth, alpha, beta)
             else {
                 return RootSearchOutcome::Aborted(None);
             };
@@ -369,7 +384,7 @@ impl SearchContext {
         }
     }
 
-    fn search_root_core<const USE_TABLEBASES: bool>(
+    fn search_root_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -399,7 +414,7 @@ impl SearchContext {
         if let Some(helper_index) = self.control.role.helper_index() {
             let ordered_moves =
                 self.helper_root_order(position, &legal_moves, ordering_hints, helper_index);
-            return self.search_root_for_helper_core::<USE_TABLEBASES>(
+            return self.search_root_for_helper_core::<USE_TABLEBASES, USE_NNUE>(
                 position,
                 depth,
                 alpha,
@@ -416,11 +431,11 @@ impl SearchContext {
             }
             self.pick_next_move(position, &mut legal_moves, index, ordering_hints);
             let mv = legal_moves.get(index);
-            let undo = position
-                .make_move(mv)
+            let undo = self
+                .make_search_move::<USE_NNUE>(position, mv)
                 .expect("root move must be legal during search");
             let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES>(
+            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                 position,
                 depth.saturating_sub(1),
                 1,
@@ -428,10 +443,10 @@ impl SearchContext {
                 -alpha,
                 SearchNodeState { is_pv: child_is_pv },
             ) else {
-                position.unmake_move(mv, undo);
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
             };
-            position.unmake_move(mv, undo);
+            self.unmake_search_move::<USE_NNUE>(position, mv, undo);
             let score = -score;
 
             if score > alpha || best_move.is_none() {
@@ -444,7 +459,7 @@ impl SearchContext {
         RootSearchOutcome::Complete(best_move, alpha)
     }
 
-    fn search_root_for_helper_core<const USE_TABLEBASES: bool>(
+    fn search_root_for_helper_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -458,11 +473,11 @@ impl SearchContext {
             if self.hard_stop_requested() {
                 return RootSearchOutcome::Aborted(best_move);
             }
-            let undo = position
-                .make_move(mv)
+            let undo = self
+                .make_search_move::<USE_NNUE>(position, mv)
                 .expect("helper root move must be legal during search");
             let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES>(
+            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                 position,
                 depth.saturating_sub(1),
                 1,
@@ -470,10 +485,10 @@ impl SearchContext {
                 -alpha,
                 SearchNodeState { is_pv: child_is_pv },
             ) else {
-                position.unmake_move(mv, undo);
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
             };
-            position.unmake_move(mv, undo);
+            self.unmake_search_move::<USE_NNUE>(position, mv, undo);
             let score = -score;
 
             if score > alpha || best_move.is_none() {
@@ -496,14 +511,23 @@ impl SearchContext {
         beta: i32,
         node_state: SearchNodeState,
     ) -> Option<i32> {
-        if self.tablebases.is_some() {
-            self.alpha_beta_core::<true>(position, depth, ply, alpha, beta, node_state)
-        } else {
-            self.alpha_beta_core::<false>(position, depth, ply, alpha, beta, node_state)
+        match (self.tablebases.is_some(), self.nnue.is_some()) {
+            (false, false) => {
+                self.alpha_beta_core::<false, false>(position, depth, ply, alpha, beta, node_state)
+            }
+            (false, true) => {
+                self.alpha_beta_core::<false, true>(position, depth, ply, alpha, beta, node_state)
+            }
+            (true, false) => {
+                self.alpha_beta_core::<true, false>(position, depth, ply, alpha, beta, node_state)
+            }
+            (true, true) => {
+                self.alpha_beta_core::<true, true>(position, depth, ply, alpha, beta, node_state)
+            }
         }
     }
 
-    fn alpha_beta_core<const USE_TABLEBASES: bool>(
+    fn alpha_beta_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -518,7 +542,7 @@ impl SearchContext {
         }
 
         if ply >= MAX_PLY - 1 {
-            return Some(eval::evaluate(position).0);
+            return Some(self.evaluate_position::<USE_NNUE>(position));
         }
 
         if is_draw(position) {
@@ -533,7 +557,7 @@ impl SearchContext {
 
         let tt_key = position.search_key();
         let alpha_start = alpha;
-        let static_eval = eval::evaluate(position).0;
+        let static_eval = self.evaluate_position::<USE_NNUE>(position);
 
         let tt_hit = self.probe_tt(tt_key);
         if let Some(hit) = tt_hit
@@ -543,7 +567,7 @@ impl SearchContext {
         }
 
         if depth == 0 {
-            return qsearch::qsearch(self, position, ply, alpha, beta);
+            return qsearch::qsearch::<USE_NNUE>(self, position, ply, alpha, beta);
         }
 
         let in_check = position.is_in_check(position.side_to_move());
@@ -577,7 +601,9 @@ impl SearchContext {
                 quiets_searched += 1;
             }
 
-            let undo = position.make_move(mv).expect("searched move must be legal");
+            let undo = self
+                .make_search_move::<USE_NNUE>(position, mv)
+                .expect("searched move must be legal");
             let gives_check = position.is_in_check(position.side_to_move());
             let child_is_pv = node_state.is_pv && best_move.is_none();
             let is_hash_move = tt_move_hint == Some(mv);
@@ -595,7 +621,7 @@ impl SearchContext {
                 },
             ) {
                 self.debug_counters.lmr_reductions += 1;
-                let Some(reduced_score) = self.alpha_beta_core::<USE_TABLEBASES>(
+                let Some(reduced_score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth - 2,
                     ply + 1,
@@ -603,13 +629,13 @@ impl SearchContext {
                     -alpha,
                     SearchNodeState { is_pv: false },
                 ) else {
-                    position.unmake_move(mv, undo);
+                    self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                     return None;
                 };
                 let reduced_score = -reduced_score;
                 if lmr_requires_full_research(reduced_score, alpha) {
                     self.debug_counters.lmr_researches += 1;
-                    self.alpha_beta_core::<USE_TABLEBASES>(
+                    self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                         position,
                         depth - 1,
                         ply + 1,
@@ -622,7 +648,7 @@ impl SearchContext {
                     Some(reduced_score)
                 }
             } else {
-                self.alpha_beta_core::<USE_TABLEBASES>(
+                self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth - 1,
                     ply + 1,
@@ -634,10 +660,10 @@ impl SearchContext {
             };
 
             let Some(score) = score_result else {
-                position.unmake_move(mv, undo);
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return None;
             };
-            position.unmake_move(mv, undo);
+            self.unmake_search_move::<USE_NNUE>(position, mv, undo);
 
             if score > alpha {
                 alpha = score;
@@ -665,7 +691,7 @@ impl SearchContext {
             depth: depth.min(u8::MAX as usize) as u8,
             ply,
             best_move,
-            static_eval: static_eval as i16,
+            static_eval: static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
             score: alpha,
             bound,
         });
@@ -855,6 +881,55 @@ impl SearchContext {
                 bound: input.bound,
             },
         );
+    }
+
+    fn prepare_nnue(&mut self, position: &Position) {
+        self.nnue
+            .as_mut()
+            .expect("NNUE preparation requires an active NNUE service")
+            .reset(position);
+    }
+
+    pub(crate) fn evaluate_position<const USE_NNUE: bool>(&self, position: &Position) -> i32 {
+        if USE_NNUE {
+            self.nnue
+                .as_ref()
+                .expect("NNUE evaluation requires an active NNUE service")
+                .evaluate(position)
+                .0
+        } else {
+            eval::evaluate(position).0
+        }
+    }
+
+    pub(crate) fn make_search_move<const USE_NNUE: bool>(
+        &mut self,
+        position: &mut Position,
+        mv: Move,
+    ) -> Result<crate::core::UndoState, crate::core::MoveError> {
+        let undo = position.make_move(mv)?;
+        if USE_NNUE {
+            self.nnue
+                .as_mut()
+                .expect("NNUE move application requires an active NNUE service")
+                .push_child(position, mv, undo);
+        }
+        Ok(undo)
+    }
+
+    pub(crate) fn unmake_search_move<const USE_NNUE: bool>(
+        &mut self,
+        position: &mut Position,
+        mv: Move,
+        undo: crate::core::UndoState,
+    ) {
+        if USE_NNUE {
+            self.nnue
+                .as_mut()
+                .expect("NNUE move restoration requires an active NNUE service")
+                .pop();
+        }
+        position.unmake_move(mv, undo);
     }
 
     pub(crate) fn hard_stop_requested(&self) -> bool {
@@ -1373,6 +1448,7 @@ mod tests {
         let mut context = SearchContext::with_tt(
             SearchLimits::new(2),
             None,
+            None,
             Some(tablebases),
             super::SearchControl::default(),
         );
@@ -1402,6 +1478,7 @@ mod tests {
         let result = super::search_with_control(
             &mut position,
             SearchLimits::new(2),
+            None,
             None,
             Some(tablebases),
             super::SearchControl::default(),

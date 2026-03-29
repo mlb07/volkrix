@@ -2,7 +2,7 @@
 
 use volkrix::{
     core::Position,
-    search::{eval::debug_evaluate_breakdown, evaluate},
+    search::{eval::debug_evaluate_breakdown, evaluate, internal::debug_evaluate_with_tiny_nnue},
 };
 
 #[test]
@@ -137,4 +137,34 @@ fn basic_threat_terms_reward_piece_pressure() {
     let quiet_breakdown = debug_evaluate_breakdown(&quiet);
 
     assert!(active_breakdown.threats > quiet_breakdown.threats);
+}
+
+#[test]
+fn tiny_nnue_eval_returns_finite_scores_on_curated_positions() {
+    let positions = [
+        Position::startpos(),
+        Position::from_fen("4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1").expect("FEN parse must succeed"),
+        Position::from_fen("4k3/8/8/8/8/8/8/3qK3 w - - 0 1").expect("FEN parse must succeed"),
+    ];
+
+    for position in positions {
+        let score = debug_evaluate_with_tiny_nnue(&position).0;
+        assert!(score.abs() < 32_000);
+    }
+}
+
+#[test]
+fn tiny_nnue_and_classical_paths_are_both_reachable() {
+    let strong_white =
+        Position::from_fen("4k3/8/8/8/8/8/3Q4/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let strong_black =
+        Position::from_fen("4k3/8/8/8/8/8/8/3qK3 w - - 0 1").expect("FEN parse must succeed");
+
+    let classical_white = evaluate(&strong_white).0;
+    let classical_black = evaluate(&strong_black).0;
+    let nnue_white = debug_evaluate_with_tiny_nnue(&strong_white).0;
+    let nnue_black = debug_evaluate_with_tiny_nnue(&strong_black).0;
+
+    assert!(classical_white > classical_black);
+    assert!(nnue_white > nnue_black);
 }

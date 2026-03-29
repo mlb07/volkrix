@@ -12,6 +12,7 @@ use crate::core::Position;
 
 use super::{
     SearchLimits, SearchResult,
+    nnue::NnueService,
     root::{self, SearchControl, SearchThreadRole},
     tablebase::TablebaseService,
     tt::{DEFAULT_HASH_MB, TranspositionTable},
@@ -32,6 +33,7 @@ struct WorkerJob {
     position: Position,
     limits: SearchLimits,
     tt: Arc<TranspositionTable>,
+    nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
     control: SearchControl,
     done_sender: Sender<()>,
@@ -42,6 +44,7 @@ struct HelperSearchSpec<'a> {
     position: &'a Position,
     limits: SearchLimits,
     tt: Arc<TranspositionTable>,
+    nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
     stop_flag: Option<Arc<AtomicBool>>,
     helper_stop_flag: Arc<AtomicBool>,
@@ -90,6 +93,7 @@ impl WorkerPool {
                 position: spec.position.clone(),
                 limits: spec.limits,
                 tt: Arc::clone(&spec.tt),
+                nnue: spec.nnue.clone(),
                 tablebases: spec.tablebases.clone(),
                 control: SearchControl {
                     stop_flag: spec.stop_flag.clone(),
@@ -148,7 +152,9 @@ pub(crate) struct UciSearchService {
     hash_mb: usize,
     threads: usize,
     syzygy_path: String,
+    eval_file: String,
     tt: Arc<TranspositionTable>,
+    nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
     workers: WorkerPool,
 }
@@ -159,7 +165,9 @@ impl UciSearchService {
             hash_mb: DEFAULT_HASH_MB,
             threads: DEFAULT_THREADS,
             syzygy_path: String::new(),
+            eval_file: String::new(),
             tt: Arc::new(TranspositionTable::new_mb(DEFAULT_HASH_MB)),
+            nnue: None,
             tablebases: None,
             workers: WorkerPool::new(),
         }
@@ -175,6 +183,10 @@ impl UciSearchService {
 
     pub(crate) fn syzygy_path(&self) -> &str {
         &self.syzygy_path
+    }
+
+    pub(crate) fn eval_file(&self) -> &str {
+        &self.eval_file
     }
 
     pub(crate) fn set_threads(&mut self, threads: usize) {
@@ -196,6 +208,24 @@ impl UciSearchService {
         let tablebases = TablebaseService::open_syzygy_path(path, self.tablebases.as_ref())?;
         self.syzygy_path = path.to_owned();
         self.tablebases = Some(tablebases);
+        Ok(())
+    }
+
+    pub(crate) fn set_eval_file(&mut self, path: &str) -> Result<(), String> {
+        let path = path.trim();
+        if path.is_empty() {
+            self.eval_file.clear();
+            self.nnue = None;
+            return Ok(());
+        }
+
+        if path == self.eval_file {
+            return Ok(());
+        }
+
+        let nnue = NnueService::open_eval_file(path)?;
+        self.eval_file = path.to_owned();
+        self.nnue = Some(nnue);
         Ok(())
     }
 
@@ -221,6 +251,7 @@ impl UciSearchService {
                 position,
                 limits,
                 limits.tt_enabled.then(|| Arc::clone(&self.tt)),
+                self.nnue.clone(),
                 self.tablebases.clone(),
                 SearchControl {
                     stop_flag: request.stop_flag,
@@ -239,6 +270,7 @@ impl UciSearchService {
             position,
             limits,
             tt: Arc::clone(&self.tt),
+            nnue: self.nnue.clone(),
             tablebases: self.tablebases.clone(),
             stop_flag: request.stop_flag.clone(),
             helper_stop_flag: Arc::clone(&helper_stop_flag),
@@ -250,6 +282,7 @@ impl UciSearchService {
             position,
             limits,
             Some(Arc::clone(&self.tt)),
+            self.nnue.clone(),
             self.tablebases.clone(),
             SearchControl {
                 stop_flag: request.stop_flag,
@@ -290,6 +323,18 @@ impl UciSearchService {
         self.workers.active_helper_count()
     }
 
+    #[cfg(any(test, debug_assertions))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn debug_nnue_is_enabled(&self) -> bool {
+        self.nnue.is_some()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn debug_nnue_path(&self) -> &str {
+        &self.eval_file
+    }
+
     #[cfg(test)]
     pub(crate) fn debug_install_tablebases(
         &mut self,
@@ -298,6 +343,12 @@ impl UciSearchService {
     ) {
         self.syzygy_path = path.to_owned();
         self.tablebases = Some(tablebases);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_install_nnue(&mut self, path: &str, nnue: Arc<NnueService>) {
+        self.eval_file = path.to_owned();
+        self.nnue = Some(nnue);
     }
 }
 
@@ -335,6 +386,7 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
                     &mut position,
                     job.limits,
                     Some(job.tt),
+                    job.nnue,
                     job.tablebases,
                     job.control,
                 );
@@ -349,6 +401,7 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
 mod tests {
     use super::*;
     use crate::search::SearchLimits;
+    use crate::search::nnue::{NnueService, tiny_test_evalfile_path};
     use crate::search::tablebase::{MockTablebaseBackend, TablebaseService, WdlOutcome};
     use std::{sync::Arc, time::Instant};
 
@@ -362,6 +415,15 @@ mod tests {
                 Some(1),
             )),
         )
+    }
+
+    fn tiny_test_nnue() -> Arc<NnueService> {
+        NnueService::open_eval_file(
+            tiny_test_evalfile_path()
+                .to_str()
+                .expect("tiny test eval file path must be UTF-8"),
+        )
+        .expect("tiny deterministic NNUE test net must load")
     }
 
     #[test]
@@ -501,6 +563,165 @@ mod tests {
         assert!(service.debug_worker_count() >= 1);
         assert_eq!(service.debug_active_helper_count(), 0);
         assert_eq!(position.to_fen(), before);
+    }
+
+    #[test]
+    fn eval_file_reconfiguration_preserves_previous_service_on_failure() {
+        let mut service = UciSearchService::new();
+        let eval_file = tiny_test_evalfile_path();
+        let eval_file = eval_file
+            .to_str()
+            .expect("tiny test eval file path must be UTF-8");
+
+        service
+            .set_eval_file(eval_file)
+            .expect("tiny deterministic NNUE test net must load");
+        assert!(service.debug_nnue_is_enabled());
+        assert_eq!(service.debug_nnue_path(), eval_file);
+
+        let error = service
+            .set_eval_file("/tmp/missing-network.volknnue")
+            .expect_err("missing network must be rejected");
+        assert!(error.contains("failed to read EvalFile"));
+        assert!(service.debug_nnue_is_enabled());
+        assert_eq!(service.debug_nnue_path(), eval_file);
+    }
+
+    #[test]
+    fn nnue_enabled_search_preserves_root_state_in_threads_one() {
+        let mut service = UciSearchService::new();
+        service.debug_install_nnue("/mock/nnue", tiny_test_nnue());
+        let mut position =
+            Position::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3")
+                .expect("FEN parse must succeed");
+        let before = position.to_fen();
+        let before_key = position.zobrist_key();
+        let before_search_key = position.debug_search_key();
+        let before_history = position.debug_repetition_history_snapshot();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(3),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.info_lines.len(), result.depth as usize);
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(position.zobrist_key(), before_key);
+        assert_eq!(position.debug_search_key(), before_search_key);
+        assert_eq!(position.debug_repetition_history_snapshot(), before_history);
+        assert_eq!(service.debug_active_helper_count(), 0);
+    }
+
+    #[test]
+    fn nnue_enabled_search_preserves_root_state_in_threads_two() {
+        let mut service = UciSearchService::new();
+        service.set_threads(2);
+        service.debug_install_nnue("/mock/nnue", tiny_test_nnue());
+        let mut position =
+            Position::from_fen("r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3")
+                .expect("FEN parse must succeed");
+        let before = position.to_fen();
+        let before_key = position.zobrist_key();
+        let before_search_key = position.debug_search_key();
+        let before_history = position.debug_repetition_history_snapshot();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(3),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.info_lines.len(), result.depth as usize);
+        assert!(service.debug_worker_count() >= 1);
+        assert_eq!(service.debug_active_helper_count(), 0);
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(position.zobrist_key(), before_key);
+        assert_eq!(position.debug_search_key(), before_search_key);
+        assert_eq!(position.debug_repetition_history_snapshot(), before_history);
+    }
+
+    #[test]
+    fn tablebase_root_resolution_remains_authoritative_when_nnue_is_enabled() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let mut service = UciSearchService::new();
+        service.debug_install_nnue("/mock/nnue", tiny_test_nnue());
+        service.debug_install_tablebases("/mock/syzygy", mock_tablebases(fen, "d3d7"));
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert_eq!(
+            result.best_move.map(|mv| mv.to_string()),
+            Some("d3d7".to_owned())
+        );
+        assert_eq!(result.nodes, 0);
+    }
+
+    #[test]
+    #[ignore = "manual real-net smoke for Phase 12 Threads=1"]
+    fn real_net_smoke_threads_one() {
+        let eval_file = std::env::var("VOLKRIX_EVALFILE")
+            .expect("VOLKRIX_EVALFILE must point to a real NNUE file");
+        let mut service = UciSearchService::new();
+        service
+            .set_eval_file(&eval_file)
+            .expect("real NNUE file must load");
+        let mut position = Position::startpos();
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(3),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+        assert!(result.best_move.is_some());
+        assert!(result.score.0.abs() < super::root::INF);
+    }
+
+    #[test]
+    #[ignore = "manual real-net smoke for Phase 12 Threads=2"]
+    fn real_net_smoke_threads_two() {
+        let eval_file = std::env::var("VOLKRIX_EVALFILE")
+            .expect("VOLKRIX_EVALFILE must point to a real NNUE file");
+        let mut service = UciSearchService::new();
+        service.set_threads(2);
+        service
+            .set_eval_file(&eval_file)
+            .expect("real NNUE file must load");
+        let mut position = Position::startpos();
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(3),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+        assert!(result.best_move.is_some());
+        assert!(result.score.0.abs() < super::root::INF);
+        assert_eq!(service.debug_active_helper_count(), 0);
     }
 
     #[test]

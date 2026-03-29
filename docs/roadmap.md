@@ -13,16 +13,18 @@
 - Phase 8 classical eval bridge with tapered evaluation and a disciplined first expansion of the static eval terms
 - Phase 9 search depth and selectivity layer II with exact Phase 8 baseline preservation, conservative quiet-only LMR, and evidence-driven rejection of guarded null-move pruning
 - Phase 10 SMP / Lazy SMP Layer I with minimal `Threads` control, persistent helper-worker pool, shared-TT-only SMP, and authoritative `Threads=1` baseline preservation
+- Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath`, approved vendored `jdart1/Fathom` probing behind the internal tablebase boundary, and exact disabled-path baseline preservation
 
 ## Next
 
-- Phase 11 Tablebases / Probe Layer I pending signoff: minimal `SyzygyPath` control, approved vendored `jdart1/Fathom` probing behind the internal tablebase boundary, exact disabled-path baseline preservation, and conservative exact root/non-root probe integration within retained scope
-- Later phases, not yet locked in order: NNUE integration, training pipeline / net iteration, and tuning / release polish
+- Phase 12 NNUE Engine Integration Layer I pending signoff: minimal `EvalFile` control, clean evaluator boundary, retained clean-room Volkrix NNUE format, thread-local accumulator/update architecture, and exact disabled-path preservation when no network is configured
+- Later phases, not yet locked in order: training pipeline / net iteration and tuning / release polish
 
 ## Intentional Boundaries
 
 The current implementation still stops before:
 
 - split-point or work-stealing SMP
-- broader tablebase features beyond the approved probe-only Fathom Layer I design, and NNUE
+- broader tablebase features beyond the approved probe-only Fathom Layer I design
+- broader NNUE work beyond the retained single-network integration layer
 - advanced pruning and reduction heuristics

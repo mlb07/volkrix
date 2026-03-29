@@ -48,6 +48,7 @@ enum SetOptionCommand {
     ClearHash,
     Threads(usize),
     SyzygyPath,
+    EvalFile,
 }
 
 enum RuntimeInput {
@@ -88,6 +89,12 @@ impl UciEngine {
     #[doc(hidden)]
     pub fn debug_syzygy_path(&self) -> &str {
         self.search_service.syzygy_path()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_eval_file(&self) -> &str {
+        self.search_service.eval_file()
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -142,6 +149,7 @@ impl UciEngine {
                         DEFAULT_THREADS, MIN_THREADS, MAX_THREADS
                     ),
                     "option name SyzygyPath type string default".to_owned(),
+                    "option name EvalFile type string default".to_owned(),
                     "option name Clear Hash type button".to_owned(),
                     "uciok".to_owned(),
                 ],
@@ -268,6 +276,13 @@ impl UciEngine {
             Ok(SetOptionCommand::SyzygyPath) => {
                 let path = parse_syzygy_path_value(line);
                 match self.search_service.set_syzygy_path(&path) {
+                    Ok(()) => Vec::new(),
+                    Err(error) => vec![format!("info string error: {error}")],
+                }
+            }
+            Ok(SetOptionCommand::EvalFile) => {
+                let path = parse_eval_file_value(line);
+                match self.search_service.set_eval_file(&path) {
                     Ok(()) => Vec::new(),
                     Err(error) => vec![format!("info string error: {error}")],
                 }
@@ -526,11 +541,28 @@ fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, Stri
             }
             Ok(SetOptionCommand::SyzygyPath)
         }
+        "EvalFile" => {
+            if !line.contains(" value") {
+                return Err("setoption name EvalFile requires 'value <path>'".to_owned());
+            }
+            Ok(SetOptionCommand::EvalFile)
+        }
         _ => Err(format!("unsupported option '{name}'")),
     }
 }
 
 fn parse_syzygy_path_value(line: &str) -> String {
+    let trimmed = line.trim();
+    if let Some((_, value)) = trimmed.split_once(" value ") {
+        return value.trim().to_owned();
+    }
+    if trimmed.ends_with(" value") {
+        return String::new();
+    }
+    String::new()
+}
+
+fn parse_eval_file_value(line: &str) -> String {
     let trimmed = line.trim();
     if let Some((_, value)) = trimmed.split_once(" value ") {
         return value.trim().to_owned();
@@ -671,6 +703,7 @@ pub fn run_stdio() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::nnue::tiny_test_evalfile_path;
     use std::{sync::mpsc, thread, time::Duration};
 
     fn interrupted_position_fen() -> &'static str {
@@ -1113,6 +1146,80 @@ mod tests {
         assert_eq!(engine.debug_syzygy_path(), "");
         assert!(output.contains("did not load any supported Syzygy tablebase files"));
         assert_eq!(output.matches("bestmove ").count(), 1);
+    }
+
+    #[test]
+    fn setoption_evalfile_received_during_search_is_deferred_until_after_stop_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+        let eval_file = tiny_test_evalfile_path()
+            .to_str()
+            .expect("tiny test eval file path must be UTF-8")
+            .to_owned();
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            let eval_file = eval_file.clone();
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    format!("setoption name EvalFile value {eval_file}"),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        assert_eq!(engine.debug_eval_file(), "");
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        assert_eq!(engine.debug_eval_file(), eval_file);
+        assert_eq!(
+            String::from_utf8(output)
+                .expect("utf8")
+                .matches("bestmove ")
+                .count(),
+            1
+        );
     }
 
     #[test]

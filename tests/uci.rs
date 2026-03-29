@@ -1,4 +1,4 @@
-use volkrix::{core::Position, uci::UciEngine};
+use volkrix::{core::Position, search::internal::phase12_test_evalfile_path, uci::UciEngine};
 
 #[test]
 fn uci_handshake_returns_required_lines() {
@@ -34,6 +34,12 @@ fn uci_handshake_returns_required_lines() {
             .lines
             .iter()
             .any(|line| line == "option name SyzygyPath type string default")
+    );
+    assert!(
+        response
+            .lines
+            .iter()
+            .any(|line| line == "option name EvalFile type string default")
     );
 }
 
@@ -173,6 +179,40 @@ fn syzygypath_defaults_to_empty_and_rejects_unusable_paths() {
 }
 
 #[test]
+fn evalfile_defaults_to_empty_and_rejects_unusable_paths() {
+    let mut engine = UciEngine::new();
+    assert_eq!(engine.debug_eval_file(), "");
+
+    let disable = engine.handle_line("setoption name EvalFile value");
+    assert!(disable.lines.is_empty());
+    assert_eq!(engine.debug_eval_file(), "");
+
+    let invalid_path = "/tmp/definitely-missing.volknnue";
+    let rejected = engine.handle_line(&format!("setoption name EvalFile value {invalid_path}"));
+    assert!(
+        rejected
+            .lines
+            .iter()
+            .any(|line| line.contains("failed to read EvalFile"))
+    );
+    assert_eq!(engine.debug_eval_file(), "");
+
+    let eval_file = phase12_test_evalfile_path();
+    let loaded = engine.handle_line(&format!("setoption name EvalFile value {eval_file}"));
+    assert!(loaded.lines.is_empty());
+    assert_eq!(engine.debug_eval_file(), eval_file);
+
+    let still_loaded = engine.handle_line(&format!("setoption name EvalFile value {invalid_path}"));
+    assert!(
+        still_loaded
+            .lines
+            .iter()
+            .any(|line| line.contains("failed to read EvalFile"))
+    );
+    assert_eq!(engine.debug_eval_file(), eval_file);
+}
+
+#[test]
 fn clear_hash_resets_tt_without_corrupting_position_state() {
     let mut engine = UciEngine::new();
     engine.handle_line("position startpos moves e2e4 e7e5");
@@ -260,4 +300,32 @@ fn threaded_go_depth_returns_a_legal_move_and_leaves_helpers_idle() {
         .expect("threaded bestmove must be legal");
     assert!(engine.debug_worker_count() >= 1);
     assert_eq!(engine.debug_active_helper_count(), 0);
+}
+
+#[test]
+fn nnue_enabled_go_depth_returns_a_legal_move() {
+    let mut engine = UciEngine::new();
+    let eval_file = phase12_test_evalfile_path();
+    assert!(
+        engine
+            .handle_line(&format!("setoption name EvalFile value {eval_file}"))
+            .lines
+            .is_empty()
+    );
+
+    let response = engine.handle_line("go depth 2");
+    let bestmove_line = response
+        .lines
+        .iter()
+        .find(|line| line.starts_with("bestmove "))
+        .expect("bestmove line must exist");
+    let bestmove = bestmove_line
+        .strip_prefix("bestmove ")
+        .expect("bestmove line must contain prefix");
+    assert_ne!(bestmove, "0000");
+
+    let mut position = Position::startpos();
+    position
+        .apply_uci_move(bestmove)
+        .expect("NNUE-enabled bestmove must be legal");
 }
