@@ -12,16 +12,17 @@
 - Phase 7 time management and practical UCI usability on top of the correct TT-backed single-thread baseline
 - Phase 8 classical eval bridge with tapered evaluation and a disciplined first expansion of the static eval terms
 - Phase 9 search depth and selectivity layer II with exact Phase 8 baseline preservation, conservative quiet-only LMR, and evidence-driven rejection of guarded null-move pruning
+- Phase 10 SMP / Lazy SMP Layer I with minimal `Threads` control, persistent helper-worker pool, shared-TT-only SMP, and authoritative `Threads=1` baseline preservation
 
 ## Next
 
-- Phase 10 SMP / Lazy SMP Layer I pending signoff: minimal `Threads` control, persistent helper-worker pool, shared-TT-only SMP, and authoritative `Threads=1` baseline preservation
-- Later phases, not yet locked in order: tablebases, NNUE, training, and tuning/release polish
+- Phase 11 Tablebases / Probe Layer I pending signoff: minimal `SyzygyPath` control, approved vendored `jdart1/Fathom` probing behind the internal tablebase boundary, exact disabled-path baseline preservation, and conservative exact root/non-root probe integration within retained scope
+- Later phases, not yet locked in order: NNUE integration, training pipeline / net iteration, and tuning / release polish
 
 ## Intentional Boundaries
 
 The current implementation still stops before:
 
 - split-point or work-stealing SMP
-- tablebases and NNUE
+- broader tablebase features beyond the approved probe-only Fathom Layer I design, and NNUE
 - advanced pruning and reduction heuristics

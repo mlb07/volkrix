@@ -29,6 +29,12 @@ fn uci_handshake_returns_required_lines() {
             .iter()
             .any(|line| line == "option name Threads type spin default 1 min 1 max 64")
     );
+    assert!(
+        response
+            .lines
+            .iter()
+            .any(|line| line == "option name SyzygyPath type string default")
+    );
 }
 
 #[test]
@@ -145,6 +151,25 @@ fn setoption_threads_rejects_bad_values() {
             .any(|line| line.contains("Threads value must be between 1 and 64"))
     );
     assert_eq!(engine.debug_threads(), 1);
+}
+
+#[test]
+fn syzygypath_defaults_to_empty_and_rejects_unusable_paths() {
+    let mut engine = UciEngine::new();
+    assert_eq!(engine.debug_syzygy_path(), "");
+
+    let disable = engine.handle_line("setoption name SyzygyPath value");
+    assert!(disable.lines.is_empty());
+    assert_eq!(engine.debug_syzygy_path(), "");
+
+    let rejected = engine.handle_line("setoption name SyzygyPath value /tmp/syzygy");
+    assert!(
+        rejected
+            .lines
+            .iter()
+            .any(|line| line.contains("did not load any supported Syzygy tablebase files"))
+    );
+    assert_eq!(engine.debug_syzygy_path(), "");
 }
 
 #[test]

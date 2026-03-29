@@ -104,6 +104,28 @@ fn phase_ten_smp_profile_report() {
 }
 
 #[test]
+#[ignore = "manual no-tablebase profile report for Phase 11 disabled-path preservation"]
+fn phase_eleven_no_tablebase_profile_report() {
+    let baseline = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    println!(
+        "phase10_baseline_syzygy_empty_threads1: nodes {} checksum {:016x} time_ms {} nps {}",
+        baseline.total_nodes,
+        baseline.checksum,
+        baseline.elapsed_ms,
+        baseline.nps()
+    );
+
+    let current = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    println!(
+        "phase11_default_syzygy_empty_threads1: nodes {} checksum {:016x} time_ms {} nps {}",
+        current.total_nodes,
+        current.checksum,
+        current.elapsed_ms,
+        current.nps()
+    );
+}
+
+#[test]
 fn phase8_baseline_matches_documented_phase8_bench_signature() {
     let result = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
     assert_eq!(result.total_nodes, 541_650);
@@ -144,6 +166,22 @@ fn phase10_threads_one_matches_retained_phase9_signature() {
 
 #[test]
 fn phase10_threads_one_remains_reproducible() {
+    let first = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    let second = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+
+    assert_eq!(first.total_nodes, second.total_nodes);
+    assert_eq!(first.checksum, second.checksum);
+}
+
+#[test]
+fn phase11_syzygy_empty_threads_one_matches_retained_phase10_signature() {
+    let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
+    assert_eq!(result.total_nodes, 505_147);
+    assert_eq!(result.checksum, 0x244a_71a6_5613_ec7f);
+}
+
+#[test]
+fn phase11_syzygy_empty_threads_one_remains_reproducible() {
     let first = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
     let second = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
 

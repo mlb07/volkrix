@@ -13,6 +13,7 @@ use crate::core::Position;
 use super::{
     SearchLimits, SearchResult,
     root::{self, SearchControl, SearchThreadRole},
+    tablebase::TablebaseService,
     tt::{DEFAULT_HASH_MB, TranspositionTable},
 };
 
@@ -31,6 +32,7 @@ struct WorkerJob {
     position: Position,
     limits: SearchLimits,
     tt: Arc<TranspositionTable>,
+    tablebases: Option<Arc<TablebaseService>>,
     control: SearchControl,
     done_sender: Sender<()>,
 }
@@ -40,6 +42,7 @@ struct HelperSearchSpec<'a> {
     position: &'a Position,
     limits: SearchLimits,
     tt: Arc<TranspositionTable>,
+    tablebases: Option<Arc<TablebaseService>>,
     stop_flag: Option<Arc<AtomicBool>>,
     helper_stop_flag: Arc<AtomicBool>,
     soft_deadline: Option<Instant>,
@@ -87,6 +90,7 @@ impl WorkerPool {
                 position: spec.position.clone(),
                 limits: spec.limits,
                 tt: Arc::clone(&spec.tt),
+                tablebases: spec.tablebases.clone(),
                 control: SearchControl {
                     stop_flag: spec.stop_flag.clone(),
                     helper_stop_flag: Some(Arc::clone(&spec.helper_stop_flag)),
@@ -143,7 +147,9 @@ impl Drop for WorkerPool {
 pub(crate) struct UciSearchService {
     hash_mb: usize,
     threads: usize,
+    syzygy_path: String,
     tt: Arc<TranspositionTable>,
+    tablebases: Option<Arc<TablebaseService>>,
     workers: WorkerPool,
 }
 
@@ -152,7 +158,9 @@ impl UciSearchService {
         Self {
             hash_mb: DEFAULT_HASH_MB,
             threads: DEFAULT_THREADS,
+            syzygy_path: String::new(),
             tt: Arc::new(TranspositionTable::new_mb(DEFAULT_HASH_MB)),
+            tablebases: None,
             workers: WorkerPool::new(),
         }
     }
@@ -165,8 +173,30 @@ impl UciSearchService {
         self.threads
     }
 
+    pub(crate) fn syzygy_path(&self) -> &str {
+        &self.syzygy_path
+    }
+
     pub(crate) fn set_threads(&mut self, threads: usize) {
         self.threads = threads.clamp(1, MAX_THREADS);
+    }
+
+    pub(crate) fn set_syzygy_path(&mut self, path: &str) -> Result<(), String> {
+        let path = path.trim();
+        if path.is_empty() {
+            self.syzygy_path.clear();
+            self.tablebases = None;
+            return Ok(());
+        }
+
+        if path == self.syzygy_path {
+            return Ok(());
+        }
+
+        let tablebases = TablebaseService::open_syzygy_path(path, self.tablebases.as_ref())?;
+        self.syzygy_path = path.to_owned();
+        self.tablebases = Some(tablebases);
+        Ok(())
     }
 
     pub(crate) fn resize_hash(&mut self, hash_mb: usize) {
@@ -191,6 +221,7 @@ impl UciSearchService {
                 position,
                 limits,
                 limits.tt_enabled.then(|| Arc::clone(&self.tt)),
+                self.tablebases.clone(),
                 SearchControl {
                     stop_flag: request.stop_flag,
                     helper_stop_flag: None,
@@ -208,6 +239,7 @@ impl UciSearchService {
             position,
             limits,
             tt: Arc::clone(&self.tt),
+            tablebases: self.tablebases.clone(),
             stop_flag: request.stop_flag.clone(),
             helper_stop_flag: Arc::clone(&helper_stop_flag),
             soft_deadline: request.soft_deadline,
@@ -218,6 +250,7 @@ impl UciSearchService {
             position,
             limits,
             Some(Arc::clone(&self.tt)),
+            self.tablebases.clone(),
             SearchControl {
                 stop_flag: request.stop_flag,
                 helper_stop_flag: Some(Arc::clone(&helper_stop_flag)),
@@ -256,6 +289,16 @@ impl UciSearchService {
     pub(crate) fn debug_active_helper_count(&self) -> usize {
         self.workers.active_helper_count()
     }
+
+    #[cfg(test)]
+    pub(crate) fn debug_install_tablebases(
+        &mut self,
+        path: &str,
+        tablebases: Arc<TablebaseService>,
+    ) {
+        self.syzygy_path = path.to_owned();
+        self.tablebases = Some(tablebases);
+    }
 }
 
 impl Default for UciSearchService {
@@ -288,8 +331,13 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
         match command {
             WorkerCommand::Search(job) => {
                 let mut position = job.position;
-                let _ =
-                    root::search_with_control(&mut position, job.limits, Some(job.tt), job.control);
+                let _ = root::search_with_control(
+                    &mut position,
+                    job.limits,
+                    Some(job.tt),
+                    job.tablebases,
+                    job.control,
+                );
                 let _ = job.done_sender.send(());
             }
             WorkerCommand::Shutdown => break,
@@ -301,6 +349,20 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
 mod tests {
     use super::*;
     use crate::search::SearchLimits;
+    use crate::search::tablebase::{MockTablebaseBackend, TablebaseService, WdlOutcome};
+    use std::{sync::Arc, time::Instant};
+
+    fn mock_tablebases(fen: &str, best_move: &str) -> Arc<TablebaseService> {
+        TablebaseService::from_backend_for_tests(
+            "/mock/syzygy",
+            Arc::new(MockTablebaseBackend::new().with_root_probe(
+                fen,
+                best_move,
+                WdlOutcome::Win,
+                Some(1),
+            )),
+        )
+    }
 
     #[test]
     fn worker_pool_scales_and_helpers_return_to_idle() {
@@ -384,5 +446,194 @@ mod tests {
         assert_eq!(position.debug_repetition_history_snapshot(), before_history);
         assert_eq!(service.debug_active_helper_count(), 0);
         position.validate().expect("position must remain valid");
+    }
+
+    #[test]
+    fn mock_tablebase_root_resolution_is_correct_in_threads_one() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let mut service = UciSearchService::new();
+        service.debug_install_tablebases("/mock/syzygy", mock_tablebases(fen, "d3d7"));
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let before = position.to_fen();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert_eq!(
+            result.best_move.map(|mv| mv.to_string()),
+            Some("d3d7".to_owned())
+        );
+        assert_eq!(result.nodes, 0);
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(service.debug_active_helper_count(), 0);
+    }
+
+    #[test]
+    fn mock_tablebase_root_resolution_is_correct_in_threads_two() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let mut service = UciSearchService::new();
+        service.set_threads(2);
+        service.debug_install_tablebases("/mock/syzygy", mock_tablebases(fen, "d3d7"));
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let before = position.to_fen();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert_eq!(
+            result.best_move.map(|mv| mv.to_string()),
+            Some("d3d7".to_owned())
+        );
+        assert!(service.debug_worker_count() >= 1);
+        assert_eq!(service.debug_active_helper_count(), 0);
+        assert_eq!(position.to_fen(), before);
+    }
+
+    #[test]
+    #[ignore = "manual mock-backed tablebase validation report for Phase 11"]
+    fn phase_eleven_mock_tablebase_report() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+
+        let mut baseline_service = UciSearchService::new();
+        let mut baseline_position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let baseline_started = Instant::now();
+        let baseline = baseline_service.search(
+            &mut baseline_position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+        println!(
+            "mock_tb baseline threads1: bestmove {} nodes {} time_ms {}",
+            baseline
+                .best_move
+                .map(|mv| mv.to_string())
+                .unwrap_or_else(|| "0000".to_owned()),
+            baseline.nodes,
+            baseline_started.elapsed().as_millis()
+        );
+
+        let mut tb_threads1 = UciSearchService::new();
+        tb_threads1.debug_install_tablebases("/mock/syzygy", mock_tablebases(fen, "d3d7"));
+        let mut tb_position_1 = Position::from_fen(fen).expect("FEN parse must succeed");
+        let tb_started_1 = Instant::now();
+        let result_1 = tb_threads1.search(
+            &mut tb_position_1,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+        println!(
+            "mock_tb enabled threads1: bestmove {} nodes {} time_ms {}",
+            result_1
+                .best_move
+                .map(|mv| mv.to_string())
+                .unwrap_or_else(|| "0000".to_owned()),
+            result_1.nodes,
+            tb_started_1.elapsed().as_millis()
+        );
+
+        let mut tb_threads2 = UciSearchService::new();
+        tb_threads2.set_threads(2);
+        tb_threads2.debug_install_tablebases("/mock/syzygy", mock_tablebases(fen, "d3d7"));
+        let mut tb_position_2 = Position::from_fen(fen).expect("FEN parse must succeed");
+        let tb_started_2 = Instant::now();
+        let result_2 = tb_threads2.search(
+            &mut tb_position_2,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+        println!(
+            "mock_tb enabled threads2: bestmove {} nodes {} time_ms {}",
+            result_2
+                .best_move
+                .map(|mv| mv.to_string())
+                .unwrap_or_else(|| "0000".to_owned()),
+            result_2.nodes,
+            tb_started_2.elapsed().as_millis()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires VOLKRIX_SYZYGY_PATH with real Syzygy files"]
+    fn real_tablebase_root_resolution_is_correct_in_threads_one() {
+        let path = std::env::var("VOLKRIX_SYZYGY_PATH")
+            .expect("VOLKRIX_SYZYGY_PATH must be set for real tablebase tests");
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let mut service = UciSearchService::new();
+        service
+            .set_syzygy_path(&path)
+            .expect("approved Fathom backend must initialize");
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let before = position.to_fen();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.nodes, 0);
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(service.debug_active_helper_count(), 0);
+    }
+
+    #[test]
+    #[ignore = "requires VOLKRIX_SYZYGY_PATH with real Syzygy files"]
+    fn real_tablebase_root_resolution_is_correct_in_threads_two() {
+        let path = std::env::var("VOLKRIX_SYZYGY_PATH")
+            .expect("VOLKRIX_SYZYGY_PATH must be set for real tablebase tests");
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let mut service = UciSearchService::new();
+        service.set_threads(2);
+        service
+            .set_syzygy_path(&path)
+            .expect("approved Fathom backend must initialize");
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let before = position.to_fen();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(5),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+            },
+        );
+
+        assert!(result.best_move.is_some());
+        assert_eq!(result.nodes, 0);
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(service.debug_active_helper_count(), 0);
     }
 }

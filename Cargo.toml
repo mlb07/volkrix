@@ -11,3 +11,6 @@ readme = "README.md"
 internal-testing = []
 
 [dependencies]
+
+[build-dependencies]
+cc = "1.1"

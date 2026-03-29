@@ -12,6 +12,7 @@ use super::{
     eval,
     limits::{SearchHeuristics, SearchLimits},
     qsearch,
+    tablebase::{self, TablebaseService},
     tt::{self, Bound, TtHit, TtStore},
 };
 
@@ -91,6 +92,7 @@ pub(crate) struct SearchContext {
     heuristics: SearchHeuristics,
     control: SearchControl,
     tt: Option<Arc<tt::TranspositionTable>>,
+    tablebases: Option<Arc<TablebaseService>>,
     debug_counters: SearchDebugCounters,
 }
 
@@ -136,16 +138,17 @@ pub(crate) struct MoveOrderHints {
 }
 
 pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
-    search_with_control(position, limits, None, SearchControl::default())
+    search_with_control(position, limits, None, None, SearchControl::default())
 }
 
 pub(crate) fn search_with_control(
     position: &mut Position,
     limits: SearchLimits,
     tt: Option<Arc<tt::TranspositionTable>>,
+    tablebases: Option<Arc<TablebaseService>>,
     control: SearchControl,
 ) -> SearchResult {
-    SearchContext::with_tt(limits, tt, control).run(position, limits)
+    SearchContext::with_tt(limits, tt, tablebases, control).run(position, limits)
 }
 
 enum RootSearchOutcome {
@@ -156,12 +159,13 @@ enum RootSearchOutcome {
 impl SearchContext {
     #[cfg(test)]
     pub(crate) fn new(limits: SearchLimits) -> Self {
-        Self::with_tt(limits, None, SearchControl::default())
+        Self::with_tt(limits, None, None, SearchControl::default())
     }
 
     fn with_tt(
         limits: SearchLimits,
         tt: Option<Arc<tt::TranspositionTable>>,
+        tablebases: Option<Arc<TablebaseService>>,
         control: SearchControl,
     ) -> Self {
         Self {
@@ -181,11 +185,24 @@ impl SearchContext {
                     .tt_enabled
                     .then(|| Arc::new(tt::TranspositionTable::new_mb(limits.hash_mb)))
             }),
+            tablebases,
             debug_counters: SearchDebugCounters::default(),
         }
     }
 
     fn run(&mut self, position: &mut Position, limits: SearchLimits) -> SearchResult {
+        if self.tablebases.is_some() {
+            self.run_core::<true>(position, limits)
+        } else {
+            self.run_core::<false>(position, limits)
+        }
+    }
+
+    fn run_core<const USE_TABLEBASES: bool>(
+        &mut self,
+        position: &mut Position,
+        limits: SearchLimits,
+    ) -> SearchResult {
         let depth_limit = limits.depth.max(1).min((MAX_PLY - 1) as u8);
         let mut best_move = None;
         let mut best_score = 0i32;
@@ -197,6 +214,10 @@ impl SearchContext {
             .can_interrupt()
             .then(|| position.select_placeholder_bestmove())
             .flatten();
+
+        if USE_TABLEBASES && let Some(root_probe) = self.try_root_tablebase_result(position) {
+            return root_probe;
+        }
 
         for depth in 1..=depth_limit {
             if self.hard_stop_requested() || (completed_depth > 0 && self.soft_stop_requested()) {
@@ -211,9 +232,13 @@ impl SearchContext {
                 && depth > 1
                 && best_score.abs() < MATE_THRESHOLD
             {
-                self.search_root_with_aspiration(position, depth as usize, best_score)
+                self.search_root_with_aspiration_core::<USE_TABLEBASES>(
+                    position,
+                    depth as usize,
+                    best_score,
+                )
             } else {
-                self.search_root(position, depth as usize, -INF, INF)
+                self.search_root_core::<USE_TABLEBASES>(position, depth as usize, -INF, INF)
             };
 
             let (depth_best_move, depth_score) = match depth_result {
@@ -264,7 +289,57 @@ impl SearchContext {
         }
     }
 
-    fn search_root_with_aspiration(
+    fn try_root_tablebase_result(&mut self, position: &Position) -> Option<SearchResult> {
+        if is_draw(position) {
+            return None;
+        }
+
+        if !self.control.role.is_main() {
+            return None;
+        }
+
+        let tablebases = self.tablebases.as_ref()?;
+        if !tablebases.supports_root(position) {
+            return None;
+        }
+
+        let mut legal_moves = MoveList::new();
+        let mut probe_position = position.clone();
+        probe_position.generate_legal_moves(&mut legal_moves);
+        if legal_moves.is_empty() {
+            return None;
+        }
+
+        let root_probe = tablebases
+            .probe_root(&probe_position, &legal_moves)
+            .ok()??;
+        let score = tablebase::score_from_wdl(root_probe.wdl, 0);
+        let pv = vec![root_probe.best_move];
+        let info_lines = if self.control.role.is_main() {
+            vec![format_info_line(
+                0,
+                score,
+                self.nodes,
+                self.started.elapsed().as_millis(),
+                self.tt_hits,
+                &pv,
+            )]
+        } else {
+            Vec::new()
+        };
+
+        Some(SearchResult {
+            best_move: Some(root_probe.best_move),
+            score: Score(score),
+            depth: 0,
+            nodes: self.nodes,
+            pv,
+            info_lines,
+            tt_hits: self.tt_hits,
+        })
+    }
+
+    fn search_root_with_aspiration_core<const USE_TABLEBASES: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -278,7 +353,7 @@ impl SearchContext {
             let alpha = (guess - delta).max(-INF);
             let beta = (guess + delta).min(INF);
             let RootSearchOutcome::Complete(best_move, score) =
-                self.search_root(position, depth, alpha, beta)
+                self.search_root_core::<USE_TABLEBASES>(position, depth, alpha, beta)
             else {
                 return RootSearchOutcome::Aborted(None);
             };
@@ -294,7 +369,7 @@ impl SearchContext {
         }
     }
 
-    fn search_root(
+    fn search_root_core<const USE_TABLEBASES: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -324,7 +399,13 @@ impl SearchContext {
         if let Some(helper_index) = self.control.role.helper_index() {
             let ordered_moves =
                 self.helper_root_order(position, &legal_moves, ordering_hints, helper_index);
-            return self.search_root_for_helper(position, depth, alpha, beta, &ordered_moves);
+            return self.search_root_for_helper_core::<USE_TABLEBASES>(
+                position,
+                depth,
+                alpha,
+                beta,
+                &ordered_moves,
+            );
         }
 
         let mut best_move = None;
@@ -339,7 +420,7 @@ impl SearchContext {
                 .make_move(mv)
                 .expect("root move must be legal during search");
             let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta(
+            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES>(
                 position,
                 depth.saturating_sub(1),
                 1,
@@ -363,7 +444,7 @@ impl SearchContext {
         RootSearchOutcome::Complete(best_move, alpha)
     }
 
-    fn search_root_for_helper(
+    fn search_root_for_helper_core<const USE_TABLEBASES: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -381,7 +462,7 @@ impl SearchContext {
                 .make_move(mv)
                 .expect("helper root move must be legal during search");
             let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta(
+            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES>(
                 position,
                 depth.saturating_sub(1),
                 1,
@@ -405,7 +486,24 @@ impl SearchContext {
         RootSearchOutcome::Complete(best_move, alpha)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn alpha_beta(
+        &mut self,
+        position: &mut Position,
+        depth: usize,
+        ply: usize,
+        alpha: i32,
+        beta: i32,
+        node_state: SearchNodeState,
+    ) -> Option<i32> {
+        if self.tablebases.is_some() {
+            self.alpha_beta_core::<true>(position, depth, ply, alpha, beta, node_state)
+        } else {
+            self.alpha_beta_core::<false>(position, depth, ply, alpha, beta, node_state)
+        }
+    }
+
+    fn alpha_beta_core<const USE_TABLEBASES: bool>(
         &mut self,
         position: &mut Position,
         depth: usize,
@@ -425,6 +523,12 @@ impl SearchContext {
 
         if is_draw(position) {
             return Some(0);
+        }
+
+        if USE_TABLEBASES
+            && let Some(tablebase_score) = self.try_non_root_tablebase_score(position, ply)
+        {
+            return Some(tablebase_score);
         }
 
         let tt_key = position.search_key();
@@ -491,7 +595,7 @@ impl SearchContext {
                 },
             ) {
                 self.debug_counters.lmr_reductions += 1;
-                let Some(reduced_score) = self.alpha_beta(
+                let Some(reduced_score) = self.alpha_beta_core::<USE_TABLEBASES>(
                     position,
                     depth - 2,
                     ply + 1,
@@ -505,7 +609,7 @@ impl SearchContext {
                 let reduced_score = -reduced_score;
                 if lmr_requires_full_research(reduced_score, alpha) {
                     self.debug_counters.lmr_researches += 1;
-                    self.alpha_beta(
+                    self.alpha_beta_core::<USE_TABLEBASES>(
                         position,
                         depth - 1,
                         ply + 1,
@@ -518,7 +622,7 @@ impl SearchContext {
                     Some(reduced_score)
                 }
             } else {
-                self.alpha_beta(
+                self.alpha_beta_core::<USE_TABLEBASES>(
                     position,
                     depth - 1,
                     ply + 1,
@@ -566,6 +670,26 @@ impl SearchContext {
             bound,
         });
         Some(alpha)
+    }
+
+    fn try_non_root_tablebase_score(&self, position: &Position, ply: usize) -> Option<i32> {
+        let tablebases = self.tablebases.as_ref()?;
+        if !tablebases.supports_non_root(position) {
+            return None;
+        }
+
+        let mut legal_moves = MoveList::new();
+        let mut probe_position = position.clone();
+        probe_position.generate_legal_moves(&mut legal_moves);
+        if legal_moves.is_empty() {
+            return Some(terminal_score(position, ply));
+        }
+
+        tablebases
+            .probe_wdl(&probe_position)
+            .ok()
+            .flatten()
+            .map(|outcome| tablebase::score_from_wdl(outcome, ply))
     }
 
     pub(crate) fn pick_next_move(
@@ -925,7 +1049,9 @@ mod tests {
         lmr_requires_full_research, tt_cutoff_score, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
+    use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
     use crate::search::tt::{TtHit, normalize_score_for_store};
+    use std::sync::Arc;
 
     fn square(text: &str) -> Square {
         Square::from_coord_text(text).expect("test square must parse")
@@ -1234,5 +1360,53 @@ mod tests {
     fn lmr_alpha_raise_requires_full_research() {
         assert!(!lmr_requires_full_research(20, 20));
         assert!(lmr_requires_full_research(21, 20));
+    }
+
+    #[test]
+    fn tablebase_non_root_wdl_substitution_uses_dedicated_score_band() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 0 1";
+        let tablebases = TablebaseService::from_backend_for_tests(
+            "/mock",
+            Arc::new(MockTablebaseBackend::new().with_wdl_probe(fen, WdlOutcome::Win)),
+        );
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let mut context = SearchContext::with_tt(
+            SearchLimits::new(2),
+            None,
+            Some(tablebases),
+            super::SearchControl::default(),
+        );
+
+        let score = context
+            .alpha_beta(
+                &mut position,
+                2,
+                3,
+                -super::INF,
+                super::INF,
+                SearchNodeState { is_pv: false },
+            )
+            .expect("tablebase substitution must return a score");
+
+        assert_eq!(score, tablebase::score_from_wdl(WdlOutcome::Win, 3));
+    }
+
+    #[test]
+    fn tablebase_probe_does_not_override_direct_fifty_move_draw() {
+        let fen = "8/8/8/8/8/3Q4/2K5/k7 w - - 100 1";
+        let tablebases = TablebaseService::from_backend_for_tests(
+            "/mock",
+            Arc::new(MockTablebaseBackend::new().with_wdl_probe(fen, WdlOutcome::Win)),
+        );
+        let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+        let result = super::search_with_control(
+            &mut position,
+            SearchLimits::new(2),
+            None,
+            Some(tablebases),
+            super::SearchControl::default(),
+        );
+
+        assert_eq!(result.score.0, 0);
     }
 }

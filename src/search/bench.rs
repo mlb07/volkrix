@@ -222,6 +222,7 @@ fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> Timed
                 .with_tt(config.tt_enabled)
                 .with_heuristics(config.heuristics),
             None,
+            None,
             SearchControl {
                 stop_flag: None,
                 helper_stop_flag: None,

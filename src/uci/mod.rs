@@ -47,6 +47,7 @@ enum SetOptionCommand {
     Hash(usize),
     ClearHash,
     Threads(usize),
+    SyzygyPath,
 }
 
 enum RuntimeInput {
@@ -81,6 +82,12 @@ impl UciEngine {
     #[doc(hidden)]
     pub fn debug_threads(&self) -> usize {
         self.search_service.threads()
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    #[doc(hidden)]
+    pub fn debug_syzygy_path(&self) -> &str {
+        self.search_service.syzygy_path()
     }
 
     #[cfg(any(test, debug_assertions))]
@@ -134,6 +141,7 @@ impl UciEngine {
                         "option name Threads type spin default {} min {} max {}",
                         DEFAULT_THREADS, MIN_THREADS, MAX_THREADS
                     ),
+                    "option name SyzygyPath type string default".to_owned(),
                     "option name Clear Hash type button".to_owned(),
                     "uciok".to_owned(),
                 ],
@@ -156,7 +164,7 @@ impl UciEngine {
                 should_quit: false,
             },
             "setoption" => UciResponse {
-                lines: self.handle_setoption(&tokens),
+                lines: self.handle_setoption(trimmed, &tokens),
                 should_quit: false,
             },
             "go" => UciResponse {
@@ -243,8 +251,8 @@ impl UciEngine {
         Vec::new()
     }
 
-    fn handle_setoption(&mut self, tokens: &[&str]) -> Vec<String> {
-        match parse_setoption(tokens) {
+    fn handle_setoption(&mut self, line: &str, tokens: &[&str]) -> Vec<String> {
+        match parse_setoption(line, tokens) {
             Ok(SetOptionCommand::Hash(hash_mb)) => {
                 self.search_service.resize_hash(hash_mb);
                 Vec::new()
@@ -256,6 +264,13 @@ impl UciEngine {
             Ok(SetOptionCommand::Threads(threads)) => {
                 self.search_service.set_threads(threads);
                 Vec::new()
+            }
+            Ok(SetOptionCommand::SyzygyPath) => {
+                let path = parse_syzygy_path_value(line);
+                match self.search_service.set_syzygy_path(&path) {
+                    Ok(()) => Vec::new(),
+                    Err(error) => vec![format!("info string error: {error}")],
+                }
             }
             Err(error) => vec![format!("info string error: {error}")],
         }
@@ -453,7 +468,7 @@ fn parse_go(tokens: &[&str]) -> Result<GoOptions, String> {
     Ok(options)
 }
 
-fn parse_setoption(tokens: &[&str]) -> Result<SetOptionCommand, String> {
+fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, String> {
     if tokens.len() < 3 || tokens[1] != "name" {
         return Err("setoption requires 'name'".to_owned());
     }
@@ -505,8 +520,25 @@ fn parse_setoption(tokens: &[&str]) -> Result<SetOptionCommand, String> {
             }
             Ok(SetOptionCommand::Threads(threads))
         }
+        "SyzygyPath" => {
+            if !line.contains(" value") {
+                return Err("setoption name SyzygyPath requires 'value <path>'".to_owned());
+            }
+            Ok(SetOptionCommand::SyzygyPath)
+        }
         _ => Err(format!("unsupported option '{name}'")),
     }
+}
+
+fn parse_syzygy_path_value(line: &str) -> String {
+    let trimmed = line.trim();
+    if let Some((_, value)) = trimmed.split_once(" value ") {
+        return value.trim().to_owned();
+    }
+    if trimmed.ends_with(" value") {
+        return String::new();
+    }
+    String::new()
 }
 
 fn parse_depth(value: &str) -> Result<u8, String> {
@@ -1016,6 +1048,71 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn setoption_syzygypath_received_during_search_is_deferred_until_after_stop_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        let helper = {
+            let sender = sender.clone();
+            let stop_flag = Arc::clone(&stop_flag);
+            let quit_flag = Arc::clone(&quit_flag);
+            thread::spawn(move || -> io::Result<()> {
+                handle_input_line(
+                    format!("position fen {}", interrupted_position_fen()),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                handle_input_line(
+                    "go infinite".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(15));
+                handle_input_line(
+                    "setoption name SyzygyPath value /tmp/syzygy".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                thread::sleep(Duration::from_millis(10));
+                handle_input_line(
+                    "stop".to_owned(),
+                    &sender,
+                    stop_flag.as_ref(),
+                    quit_flag.as_ref(),
+                )?;
+                Ok(())
+            })
+        };
+
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        assert_eq!(engine.debug_syzygy_path(), "");
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        helper
+            .join()
+            .expect("helper thread must join")
+            .expect("helper must succeed");
+
+        let output = String::from_utf8(output).expect("utf8");
+        assert_eq!(engine.debug_syzygy_path(), "");
+        assert!(output.contains("did not load any supported Syzygy tablebase files"));
+        assert_eq!(output.matches("bestmove ").count(), 1);
     }
 
     #[test]

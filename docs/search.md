@@ -1,6 +1,6 @@
 # Search
 
-Phases 4 through 10 establish Volkrix's deterministic single-thread search baseline, its first transposition-table layer, the first correctness-first strength passes on top of that baseline, a practical time-controlled UCI runtime, a disciplined classical-eval bridge, and the first conservative SMP / Lazy SMP layer on top of the retained Phase 9 engine.
+Phases 4 through 11 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, and the first optional tablebase / probe integration on top of that retained engine.
 
 ## Current Shape
 
@@ -14,94 +14,123 @@ Phases 4 through 10 establish Volkrix's deterministic single-thread search basel
 - aspiration windows around iterative deepening
 - basic quiet-only late move reductions at eligible later quiet moves only
 - a conservative Lazy SMP Layer I when `Threads > 1`
-- debug-only internal profile hooks for exact Phase 8 baseline, retained Phase 9 default, and Phase 10 thread-count comparisons
+- an optional tablebase boundary controlled by `SyzygyPath`
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
-## Phase 10 Retained SMP Model
+## Phase 11 Retained Tablebase Model
 
-The retained Phase 10 design is deliberately narrow:
+The retained Phase 11 design is deliberately narrow:
 
-- `Threads` is the only new public control surface
-- `Threads=1` remains the authoritative retained Phase 9 debug baseline
-- one main search thread remains authoritative for orchestration, final `bestmove`, and user-visible PV/info output
-- helper workers search cloned root position/state plus thread-local search state
-- helper workers must not share mutable `Position` or state-history objects across workers
-- helper workers must not emit user-visible info lines
-- helper workers must not own or publish final `bestmove` or user-visible PV state
-- TT is the only shared mutable search structure
-- the worker-pool model is persistent and runtime-owned rather than recreated for every search
+- `SyzygyPath` is the only new public control surface
+- tablebase probing is optional and disabled by default
+- the runtime owns an optional internal tablebase service behind a backend-agnostic boundary
+- the approved retained backend is a vendored copy of `jdart1/Fathom`
+- tablebase files are user-provided runtime assets, never repo-managed artifacts
+- helpers must not emit user-visible info lines
+- helpers must not own or publish final `bestmove` or user-visible PV state
+- TT remains the only shared mutable search structure
+- tablebase access is shared read-only state only
 
-Helper diversification remains conservative:
+The retained supported probe scope is:
 
-- helpers use the same retained Phase 9 search code and heuristics
-- helpers rotate the non-hinted portion of the root move order to avoid exact duplication
-- no split points
-- no YBWC
-- no work stealing
-- no MultiPV or separate user-visible analyses
+- no castling rights
+- at most 6 pieces total
+- backend-specific exact eligibility checks
 
-## Shared State and Determinism
+Current backend-specific exact eligibility checks for the approved Fathom Layer I integration are:
 
-Phase 10 keeps shared mutable state intentionally small:
+- root resolution requires loaded Fathom tables for the current material cardinality
+- non-root outcome substitution requires loaded Fathom tables for the current material cardinality
+- non-root outcome substitution is limited to positions with `halfmove_clock == 0`, because the retained threaded non-root probe path uses Fathom's thread-safe WDL probing API
 
-- TT is the only intended shared mutable search structure
-- TT synchronization is localized to TT internals with per-cluster locking
-- all other search state remains thread-local in workers
+## Retained Probe Semantics
 
-Determinism rules:
+- direct mate/stalemate/repetition/fifty-move/insufficient-material handling stays authoritative and ahead of any probe attempt
+- root positions may resolve directly through Fathom root probing on the main thread only
+- helper workers do not perform root probe resolution and do not publish final root state
+- eligible non-root positions may substitute an exact tablebase outcome score instead of normal expansion
+- the non-root substitution path uses backend-provided WDL semantics, not naive handcrafted endgame rules
 
-- `Threads=1` benchmark/profile paths remain the authoritative reproducible baseline
-- `Threads>1` results are not required to preserve deterministic move order or checksum
-- `Threads>1` results must still remain correct and measurably beneficial
+The retained tablebase score mapping is:
 
-## Phase 10 Benchmark Evidence
+- `Win` maps into a positive tablebase score band with ply-aware shaping
+- `Loss` maps into the corresponding negative tablebase score band
+- `Draw`, `CursedWin`, and `BlessedLoss` map to `0` so fifty-move-aware draw semantics stay correct in search
+- the current tablebase score band is `20000`, explicitly kept below mate-score thresholds so tablebase wins/losses do not collide semantically with mate handling
 
-Observed fixed-depth depth-5 comparison on the built-in four-position suite:
+## Backend Boundary and Approval
 
-| Profile | Threads | Nodes | Checksum | Time (ms) | NPS |
-| --- | ---: | ---: | --- | ---: | ---: |
-| Retained Phase 9 baseline | 1 | 505147 | `244a71a65613ec7f` | 16336 | 30922 |
-| Phase 10 default | 1 | 505147 | `244a71a65613ec7f` | 11903 | 42438 |
-| Phase 10 default | 2 | 442898 | `244a723163d23d4b` | 12934 | 34242 |
-| Phase 10 default | 4 | 370831 | `244a735ef6371ec5` | 14317 | 25901 |
+Phase 11 keeps the backend boundary explicit:
 
-Observed fixed-time comparison at 50 ms per position:
+- search/runtime/UCI code talks only to the internal `search::tablebase` service boundary
+- the approved retained backend is vendored exactly from `jdart1/Fathom` revision `c9c6fef0dddc05d2e242c183acf5833149ab676d`
+- no probing code was transliterated, re-ported, or cherry-picked from Stockfish, Cfish, Pyrrhic, `pyrrhic-rs`, `shakmaty-syzygy`, `python-chess`, or any other unapproved source
+- the vendored backend remains localized behind the internal boundary so later backend changes, if ever approved, do not require protocol or search-architecture rewrites
 
-| Profile | Threads | Depth Sum | Nodes | Checksum | Time (ms) |
-| --- | ---: | ---: | ---: | --- | ---: |
-| Retained Phase 9 baseline | 1 | 10 | 7781 | `a78c4124670c793e` | 205 |
-| Phase 10 default | 1 | 10 | 8604 | `a78c413e1f0c793e` | 216 |
-| Phase 10 default | 2 | 11 | 11646 | `a78c41611d1f8b3e` | 335 |
-| Phase 10 default | 4 | 12 | 10617 | `a78c41411d1e713e` | 358 |
+## Disabled-Path Preservation
+
+When `SyzygyPath` is empty:
+
+- `Threads=1` preserves the authoritative retained Phase 10 fixed-depth deterministic baseline exactly
+- `Threads>1` preserves the retained Phase 10 SMP behavior
+- root-state preservation remains unchanged
+- existing runtime/deferred-command semantics remain unchanged
+
+## Determinism and Validation Rules
+
+- no-tablebase `Threads=1` fixed-depth benchmark/profile paths remain the authoritative reproducible baseline
+- tablebase-enabled runs are correctness and benefit checks, not checksum-equality requirements
+- `Threads>1` tablebase-enabled runs are not required to preserve deterministic move order or checksum
+- `Threads>1` tablebase-enabled runs must still remain correct
+
+## Phase 11 Evidence
+
+No-tablebase fixed-depth baseline preservation:
+
+| Profile | Nodes | Checksum |
+| --- | ---: | --- |
+| Retained Phase 10 baseline / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
+| Phase 11 default / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
+
+Mock-backed targeted root-resolution validation on a legal 3-piece KQK position:
+
+| Scenario | Best Move | Nodes |
+| --- | --- | ---: |
+| No tablebase / `Threads=1` | `d3a6` | 38100 |
+| Mock tablebase enabled / `Threads=1` | `d3d7` | 0 |
+| Mock tablebase enabled / `Threads=2` | `d3d7` | 0 |
+
+Real asset-backed Fathom validation completed on this machine with:
+
+- `/tmp/volkrix-syzygy-min/KQvK.rtbw`
+- `/tmp/volkrix-syzygy-min/KQvK.rtbz`
+- env-gated ignored Fathom tests passing for both `Threads=1` and `Threads=2`
+
+Direct UCI sanity on the same legal 3-piece KQK position:
+
+| Scenario | Best Move | Nodes | Info |
+| --- | --- | ---: | --- |
+| Real Fathom enabled / `Threads=1` | `d3a3` | 0 | `info depth 0 score cp 20000 ... pv d3a3` |
+| Real Fathom enabled / `Threads=2` | `d3a3` | 0 | `info depth 0 score cp 20000 ... pv d3a3` |
 
 Interpretation:
 
-- `Threads=1` preserves the retained Phase 9 default bench signature exactly
-- on this validation machine, the retained SMP Layer I design does not improve fixed-depth elapsed time over the retained `Threads=1` default row
-- `Threads=2` and `Threads=4` do improve fixed-time completed depth, reaching depth sums `11` and `12` versus `10` at `Threads=1`
-- the retained Layer I SMP design is accepted because `Threads>1` stays correct and shows practical time-to-depth benefit without weakening the authoritative `Threads=1` baseline
+- the authoritative no-tablebase baseline remains unchanged
+- the retained root-resolution semantics are validated under both `Threads=1` and `Threads=2`
+- the mock-backed validation rows remain useful correctness-focused checks, not reproducibility requirements
+- the real asset-backed validation rows confirm that the approved Fathom backend resolves eligible root positions immediately under both `Threads=1` and `Threads=2`
 
-## Runtime Notes
+## Deferred Beyond Phase 11
 
-- the stdio runtime still uses one input helper thread only to observe `stop` and `quit`
-- the main thread remains the sole owner of command application boundaries
-- `Hash`, `Clear Hash`, `Threads`, `position`, and `ucinewgame` still apply only after the active search fully unwinds
-- worker threads are owned by the persistent search service and shut down explicitly with the runtime
+Still deferred beyond this first tablebase / probe layer:
 
-## Deferred Beyond Phase 10
-
-Still deferred beyond this Layer I SMP pass:
-
-- split-point search
-- YBWC-style parallel search
-- work stealing
-- distributed search
-- pondering
-- MultiPV expansion
-- tablebases
+- repo-managed tablebase assets
+- tablebase download/install tooling
+- extra public tablebase knobs
+- broader endgame tooling
 - NNUE
 - further eval expansion
-- further selectivity expansion unrelated to SMP
+- search/selectivity expansion unrelated to this probe layer
 
-The Phase 10 goal is a stronger but still disciplined engine: a trusted `Threads=1` baseline plus a conservative helper-worker SMP mode that remains easy to reason about, easy to disable, and safe under the existing runtime/control model.
+The Phase 11 goal is a still-trusted no-tablebase engine by default, plus a clean, testable, license-safe tablebase integration that uses the approved Fathom backend without destabilizing the retained Phase 10 search/runtime substrate.
