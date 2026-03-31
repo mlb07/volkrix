@@ -62,6 +62,23 @@ cargo test
 cargo run --release -- bench
 ```
 
+## Change Tracking
+
+Any meaningful change made to Volkrix must be written down somewhere in the repository so a future agent can pick up the work without relying on prior chat history.
+
+Requirements:
+
+- do not leave important implementation state only in conversation history
+- record the current status, decisions, workflow, evidence, or next-step guidance in a durable repo document
+- the note does not have to live in `README.md`; it can live in a more appropriate file such as:
+  - `docs/search.md`
+  - `docs/nnue-training.md`
+  - `docs/roadmap.md`
+  - another dedicated doc if that is the clearest location
+- when a topic already has an authoritative handoff doc, update that doc instead of scattering notes across multiple places
+
+The goal is simple: if a new agent is asked to work on a feature, it should be able to read the repo and understand what was done, what was proved, and what still remains.
+
 ## Current UCI Surface
 
 The engine currently supports:

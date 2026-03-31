@@ -10,11 +10,15 @@ const KNIGHT_MOBILITY: PhaseScore = PhaseScore::new(4, 3);
 const BISHOP_MOBILITY: PhaseScore = PhaseScore::new(5, 5);
 const ROOK_MOBILITY: PhaseScore = PhaseScore::new(2, 4);
 const QUEEN_MOBILITY: PhaseScore = PhaseScore::new(1, 2);
+const KNIGHT_OUTPOST_BONUS: PhaseScore = PhaseScore::new(18, 10);
 const BISHOP_PAIR_BONUS: PhaseScore = PhaseScore::new(28, 42);
 const DOUBLED_PAWN_PENALTY: PhaseScore = PhaseScore::new(10, 14);
 const ISOLATED_PAWN_PENALTY: PhaseScore = PhaseScore::new(12, 10);
+const PAWN_ISLAND_PENALTY: PhaseScore = PhaseScore::new(8, 10);
+const PHALANX_PAWN_BONUS: PhaseScore = PhaseScore::new(8, 12);
 const OPEN_FILE_ROOK_BONUS: PhaseScore = PhaseScore::new(18, 12);
 const SEMI_OPEN_FILE_ROOK_BONUS: PhaseScore = PhaseScore::new(10, 6);
+const ROOK_ON_SEVENTH_BONUS: PhaseScore = PhaseScore::new(10, 24);
 const PASSED_PAWN_BONUS: [PhaseScore; 8] = [
     PhaseScore::new(0, 0),
     PhaseScore::new(8, 10),
@@ -22,6 +26,16 @@ const PASSED_PAWN_BONUS: [PhaseScore; 8] = [
     PhaseScore::new(24, 36),
     PhaseScore::new(40, 62),
     PhaseScore::new(68, 104),
+    PhaseScore::new(0, 0),
+    PhaseScore::new(0, 0),
+];
+const PROTECTED_PASSED_PAWN_BONUS: [PhaseScore; 8] = [
+    PhaseScore::new(0, 0),
+    PhaseScore::new(0, 0),
+    PhaseScore::new(4, 8),
+    PhaseScore::new(8, 14),
+    PhaseScore::new(12, 20),
+    PhaseScore::new(18, 28),
     PhaseScore::new(0, 0),
     PhaseScore::new(0, 0),
 ];
@@ -158,11 +172,14 @@ fn evaluate_color(position: &Position, color: Color) -> EvalTerms {
 
 fn material_and_piece_square(position: &Position, color: Color) -> PhaseScore {
     let mut score = PhaseScore::default();
+    let own_pawns = position.pieces(color, PieceType::Pawn);
+    let enemy_pawns = position.pieces(color.opposite(), PieceType::Pawn);
     for piece_type in PieceType::ALL {
         let mut pieces = position.pieces(color, piece_type);
         while let Some(square) = pop_lsb(&mut pieces) {
             score += PhaseScore::new(MG_VALUES[piece_type.index()], EG_VALUES[piece_type.index()]);
             score += piece_square_term(piece_type, color, square);
+            score += piece_positional_term(piece_type, color, square, own_pawns, enemy_pawns);
         }
     }
     score
@@ -181,6 +198,21 @@ fn piece_square_term(piece_type: PieceType, color: Color, square: Square) -> Pha
         PieceType::Rook => PhaseScore::new(advance * 2 + FILE_CENTRALITY[file] / 2, advance * 5),
         PieceType::Queen => PhaseScore::new(center / 2, center / 3),
         PieceType::King => PhaseScore::new(18 - center - advance * 3, center + advance * 2),
+    }
+}
+
+fn piece_positional_term(
+    piece_type: PieceType,
+    color: Color,
+    square: Square,
+    own_pawns: u64,
+    enemy_pawns: u64,
+) -> PhaseScore {
+    match piece_type {
+        PieceType::Knight if knight_is_supported_outpost(color, square, own_pawns, enemy_pawns) => {
+            KNIGHT_OUTPOST_BONUS
+        }
+        _ => PhaseScore::default(),
     }
 }
 
@@ -271,9 +303,16 @@ fn pawn_shield(color: Color, king_square: Square, pawns: u64) -> PhaseScore {
 fn pawn_structure(position: &Position, color: Color) -> PhaseScore {
     let pawns = position.pieces(color, PieceType::Pawn);
     let mut score = PhaseScore::default();
+    let mut islands = 0i32;
+    let mut previous_file_occupied = false;
 
     for file in 0..8u8 {
+        let file_has_pawn = pawns & file_mask(file) != 0;
         let pawns_on_file = (pawns & file_mask(file)).count_ones() as i32;
+        if file_has_pawn && !previous_file_occupied {
+            islands += 1;
+        }
+        previous_file_occupied = file_has_pawn;
         if pawns_on_file > 1 {
             score += scale_by_count(DOUBLED_PAWN_PENALTY, -(pawns_on_file - 1));
         }
@@ -288,16 +327,29 @@ fn pawn_structure(position: &Position, color: Color) -> PhaseScore {
         }
     }
 
+    let phalanx_pairs = count_phalanx_pairs(pawns);
+    if phalanx_pairs > 0 {
+        score += scale_by_count(PHALANX_PAWN_BONUS, phalanx_pairs);
+    }
+    if islands > 1 {
+        score += scale_by_count(PAWN_ISLAND_PENALTY, -(islands - 1));
+    }
+
     score
 }
 
 fn passed_pawns(position: &Position, color: Color) -> PhaseScore {
     let mut pawns = position.pieces(color, PieceType::Pawn);
+    let own_pawns = pawns;
     let mut score = PhaseScore::default();
 
     while let Some(square) = pop_lsb(&mut pawns) {
         if is_passed_pawn(position, color, square) {
-            score += PASSED_PAWN_BONUS[relative_rank(color, square) as usize];
+            let relative_rank = relative_rank(color, square) as usize;
+            score += PASSED_PAWN_BONUS[relative_rank];
+            if pawn_is_protected_by_friendly_pawn(color, square, own_pawns) {
+                score += PROTECTED_PASSED_PAWN_BONUS[relative_rank];
+            }
         }
     }
 
@@ -323,6 +375,9 @@ fn rook_placement(position: &Position, color: Color) -> PhaseScore {
         let file = square.file();
         let own_file_pawns = own_pawns & file_mask(file);
         let enemy_file_pawns = enemy_pawns & file_mask(file);
+        if relative_rank(color, square) == 6 && enemy_pawns != 0 {
+            score += ROOK_ON_SEVENTH_BONUS;
+        }
         if own_file_pawns == 0 {
             score += if enemy_file_pawns == 0 {
                 OPEN_FILE_ROOK_BONUS
@@ -429,6 +484,48 @@ fn is_passed_pawn(position: &Position, color: Color, square: Square) -> bool {
     }
 
     true
+}
+
+fn knight_is_supported_outpost(
+    color: Color,
+    square: Square,
+    own_pawns: u64,
+    enemy_pawns: u64,
+) -> bool {
+    let relative_rank = relative_rank(color, square);
+    if relative_rank < 3 {
+        return false;
+    }
+
+    let supported_by_pawn = attacks::pawn_attackers_to(square, color) & own_pawns != 0;
+    let attacked_by_enemy_pawn =
+        attacks::pawn_attackers_to(square, color.opposite()) & enemy_pawns != 0;
+    supported_by_pawn && !attacked_by_enemy_pawn
+}
+
+fn pawn_is_protected_by_friendly_pawn(color: Color, square: Square, own_pawns: u64) -> bool {
+    let backward_rank_delta = -color.pawn_direction();
+    [-1, 1].into_iter().any(|file_delta| {
+        square
+            .offset(file_delta, backward_rank_delta)
+            .is_some_and(|support_square| own_pawns & support_square.bit() != 0)
+    })
+}
+
+fn count_phalanx_pairs(pawns: u64) -> i32 {
+    let mut remaining = pawns;
+    let mut pairs = 0i32;
+    while let Some(square) = pop_lsb(&mut remaining) {
+        if square.file() == 7 {
+            continue;
+        }
+        let right = Square::from_coords(square.file() + 1, square.rank())
+            .expect("file+1 must remain on board");
+        if pawns & right.bit() != 0 {
+            pairs += 1;
+        }
+    }
+    pairs
 }
 
 fn neighboring_files(center: u8) -> impl Iterator<Item = u8> {

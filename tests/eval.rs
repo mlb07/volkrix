@@ -58,6 +58,26 @@ fn bishop_pair_bonus_is_present_only_with_two_bishops() {
 }
 
 #[test]
+fn supported_knight_outpost_is_rewarded() {
+    let outpost =
+        Position::from_fen("4k3/8/8/3N4/2P5/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let ordinary =
+        Position::from_fen("4k3/8/8/3N4/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    assert!(evaluate(&outpost).0 > evaluate(&ordinary).0);
+}
+
+#[test]
+fn enemy_pawn_pressure_cancels_knight_outpost_bonus() {
+    let stable =
+        Position::from_fen("4k3/8/8/3N4/2P5/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let challenged =
+        Position::from_fen("4k3/8/2p5/3N4/2P5/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    assert!(evaluate(&stable).0 > evaluate(&challenged).0);
+}
+
+#[test]
 fn passed_pawn_bonus_grows_with_advance() {
     let advanced =
         Position::from_fen("4k3/8/3P4/8/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
@@ -71,6 +91,19 @@ fn passed_pawn_bonus_grows_with_advance() {
 }
 
 #[test]
+fn protected_passed_pawn_is_rewarded_over_unprotected_passer() {
+    let protected =
+        Position::from_fen("4k3/8/8/3P4/2P5/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let unprotected =
+        Position::from_fen("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    let protected_breakdown = debug_evaluate_breakdown(&protected);
+    let unprotected_breakdown = debug_evaluate_breakdown(&unprotected);
+
+    assert!(protected_breakdown.passed_pawns > unprotected_breakdown.passed_pawns);
+}
+
+#[test]
 fn isolated_and_doubled_pawns_are_penalized() {
     let healthy =
         Position::from_fen("4k3/8/8/8/8/3P4/2P1P3/4K3 w - - 0 1").expect("FEN parse must succeed");
@@ -81,6 +114,19 @@ fn isolated_and_doubled_pawns_are_penalized() {
     let damaged_breakdown = debug_evaluate_breakdown(&damaged);
 
     assert!(healthy_breakdown.pawn_structure > damaged_breakdown.pawn_structure);
+}
+
+#[test]
+fn pawn_phalanx_is_rewarded_in_structure_terms() {
+    let connected =
+        Position::from_fen("4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let split =
+        Position::from_fen("4k3/8/8/8/8/8/2P1P3/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    let connected_breakdown = debug_evaluate_breakdown(&connected);
+    let split_breakdown = debug_evaluate_breakdown(&split);
+
+    assert!(connected_breakdown.pawn_structure > split_breakdown.pawn_structure);
 }
 
 #[test]
@@ -98,6 +144,19 @@ fn rook_file_terms_distinguish_open_semi_open_and_blocked_files() {
 
     assert!(open_breakdown.rook_placement > semi_open_breakdown.rook_placement);
     assert!(semi_open_breakdown.rook_placement > blocked_breakdown.rook_placement);
+}
+
+#[test]
+fn rook_on_seventh_rank_is_rewarded() {
+    let active =
+        Position::from_fen("4k3/3Rpppp/8/8/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let passive =
+        Position::from_fen("4k3/3ppppp/8/3R4/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    let active_breakdown = debug_evaluate_breakdown(&active);
+    let passive_breakdown = debug_evaluate_breakdown(&passive);
+
+    assert!(active_breakdown.rook_placement > passive_breakdown.rook_placement);
 }
 
 #[test]

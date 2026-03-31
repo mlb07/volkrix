@@ -21,6 +21,34 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
+## Current Classical Eval Status
+
+The retained fallback evaluator is still the strongest practical Volkrix evaluator today when `EvalFile=""`.
+
+Recent classical-eval additions on top of the existing tapered material / piece-square / mobility / king-safety / pawn-structure base include:
+
+- pawn-island penalties
+- pawn-phalanx bonuses
+- protected passed-pawn bonuses
+- rook-on-seventh bonuses
+- supported knight-outpost bonuses
+
+What is currently proved:
+
+- the targeted eval test suite covers these terms directly in `tests/eval.rs`
+- the eval path remains deterministic and does not mutate position state in the covered tests
+
+What is not yet proved:
+
+- these terms do not yet have match evidence proving Elo gain
+- they should be treated as plausible classical improvements until proxy bench and match testing support them
+
+Future-agent guidance:
+
+- record any new classical-eval terms and their evidence here or in a more specific eval handoff note
+- do not claim Elo gain from classical-eval edits unless match evidence supports it
+- if search work is in flight elsewhere, keep eval changes isolated from search-logic edits
+
 ## Current NNUE Runtime Model
 
 The retained NNUE runtime design is still deliberately narrow:
