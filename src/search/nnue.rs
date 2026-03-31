@@ -296,10 +296,10 @@ pub(crate) fn encode_volknnue(
 
     let mut bytes = Vec::with_capacity(
         EXPECTED_HEADER_BYTES
-            + hidden_biases.len() * std::mem::size_of::<i16>()
+            + std::mem::size_of_val(hidden_biases)
             + std::mem::size_of_val(input_weights)
             + std::mem::size_of::<i32>()
-            + output_weights.len() * std::mem::size_of::<i16>(),
+            + std::mem::size_of_val(output_weights),
     );
     bytes.extend_from_slice(NNUE_MAGIC);
     bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());

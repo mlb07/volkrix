@@ -124,12 +124,12 @@ impl WorkerPool {
         self.active_helpers.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     fn worker_count(&self) -> usize {
         self.workers.len()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     fn active_helper_count(&self) -> usize {
         self.active_helpers.load(Ordering::Relaxed)
     }
@@ -308,28 +308,28 @@ impl UciSearchService {
             .clamp(1, MAX_THREADS)
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) fn debug_tt_entry_count(&self) -> usize {
         self.tt.debug_entry_count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) fn debug_worker_count(&self) -> usize {
         self.workers.worker_count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) fn debug_active_helper_count(&self) -> usize {
         self.workers.active_helper_count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn debug_nnue_is_enabled(&self) -> bool {
         self.nnue.is_some()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn debug_nnue_path(&self) -> &str {
         &self.eval_file

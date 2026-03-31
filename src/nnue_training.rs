@@ -59,6 +59,9 @@ pub const CHECKPOINT_OUTPUT_WEIGHTS_FILE: &str = "output_weights.f32le";
 pub const CHECKPOINT_OUTPUT_BIAS_FILE: &str = "output_bias.f32le";
 const VALIDATION_MODULUS: u64 = 10;
 
+type ExportWorkResult = Result<ExportDecision, String>;
+type OrderedExportResult = (usize, ExportWorkResult);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LabelGenerationConfig {
     pub depth: u8,
@@ -451,7 +454,7 @@ pub fn export_examples_with_config(
 fn process_export_work_items(
     work_items: &[(usize, String)],
     config: LabelGenerationConfig,
-) -> Result<Vec<(usize, Result<ExportDecision, String>)>, String> {
+) -> Result<Vec<OrderedExportResult>, String> {
     if work_items.is_empty() {
         return Ok(Vec::new());
     }
@@ -475,7 +478,7 @@ fn process_export_work_items(
             .map(|(index, (line_number, fen))| (index, *line_number, fen.clone()))
             .collect::<Vec<_>>(),
     )));
-    let (sender, receiver) = mpsc::channel::<(usize, usize, Result<ExportDecision, String>)>();
+    let (sender, receiver) = mpsc::channel::<(usize, OrderedExportResult)>();
     let mut handles = Vec::with_capacity(worker_count);
 
     for _ in 0..worker_count {
@@ -494,7 +497,7 @@ fn process_export_work_items(
                     return Ok(());
                 };
                 let result = export_example_from_fen(&fen, config, &mut label_service);
-                sender.send((index, line_number, result)).map_err(|error| {
+                sender.send((index, (line_number, result))).map_err(|error| {
                     format!("failed to send export result from worker: {error}")
                 })?;
             }
@@ -504,10 +507,10 @@ fn process_export_work_items(
 
     let mut ordered = vec![None; work_items.len()];
     for _ in 0..work_items.len() {
-        let (index, line_number, result) = receiver
+        let (index, result) = receiver
             .recv()
             .map_err(|error| format!("failed to receive export result from worker: {error}"))?;
-        ordered[index] = Some((line_number, result));
+        ordered[index] = Some(result);
     }
     for handle in handles {
         handle

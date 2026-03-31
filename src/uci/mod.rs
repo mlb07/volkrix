@@ -73,43 +73,43 @@ impl UciEngine {
         &self.position
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_hash_mb(&self) -> usize {
         self.search_service.hash_mb()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_threads(&self) -> usize {
         self.search_service.threads()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_syzygy_path(&self) -> &str {
         self.search_service.syzygy_path()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_eval_file(&self) -> &str {
         self.search_service.eval_file()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_tt_entry_count(&self) -> usize {
         self.search_service.debug_tt_entry_count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_worker_count(&self) -> usize {
         self.search_service.debug_worker_count()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[doc(hidden)]
     pub fn debug_active_helper_count(&self) -> usize {
         self.search_service.debug_active_helper_count()
