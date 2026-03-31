@@ -62,6 +62,10 @@ cargo test
 cargo run --release -- bench
 ```
 
+## Releases
+
+Publishing a GitHub Release triggers `.github/workflows/release.yml` to build the `volkrix` binary and upload per-platform archives to the release assets list.
+
 ## Change Tracking
 
 Any meaningful change made to Volkrix must be written down somewhere in the repository so a future agent can pick up the work without relying on prior chat history.
