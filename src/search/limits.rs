@@ -3,9 +3,14 @@ pub(crate) struct SearchHeuristics {
     pub(crate) pv_move_ordering: bool,
     pub(crate) capture_buckets: bool,
     pub(crate) killer_moves: bool,
+    pub(crate) counter_moves: bool,
     pub(crate) quiet_history: bool,
     pub(crate) aspiration_windows: bool,
     pub(crate) late_move_reductions: bool,
+    pub(crate) null_move_pruning: bool,
+    pub(crate) reverse_futility_pruning: bool,
+    pub(crate) futility_pruning: bool,
+    pub(crate) late_move_pruning: bool,
 }
 
 impl SearchHeuristics {
@@ -14,9 +19,14 @@ impl SearchHeuristics {
             pv_move_ordering: true,
             capture_buckets: true,
             killer_moves: true,
+            counter_moves: true,
             quiet_history: true,
             aspiration_windows: true,
             late_move_reductions: false,
+            null_move_pruning: false,
+            reverse_futility_pruning: false,
+            futility_pruning: false,
+            late_move_pruning: false,
         }
     }
 
@@ -25,9 +35,14 @@ impl SearchHeuristics {
             pv_move_ordering: true,
             capture_buckets: true,
             killer_moves: true,
+            counter_moves: true,
             quiet_history: true,
             aspiration_windows: true,
             late_move_reductions: true,
+            null_move_pruning: true,
+            reverse_futility_pruning: true,
+            futility_pruning: true,
+            late_move_pruning: true,
         }
     }
 
@@ -38,6 +53,30 @@ impl SearchHeuristics {
 
     pub(crate) const fn with_late_move_reductions(mut self, enabled: bool) -> Self {
         self.late_move_reductions = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_null_move_pruning(mut self, enabled: bool) -> Self {
+        self.null_move_pruning = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_reverse_futility_pruning(mut self, enabled: bool) -> Self {
+        self.reverse_futility_pruning = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_futility_pruning(mut self, enabled: bool) -> Self {
+        self.futility_pruning = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_late_move_pruning(mut self, enabled: bool) -> Self {
+        self.late_move_pruning = enabled;
         self
     }
 }

@@ -92,6 +92,14 @@ pub struct UndoState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NullMoveState {
+    previous_en_passant: Option<Square>,
+    previous_halfmove_clock: u16,
+    previous_fullmove_number: u16,
+    previous_zobrist_key: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MoveGenStage {
     All,
     Captures,
@@ -217,12 +225,12 @@ impl Position {
         hash
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub fn debug_repetition_history_snapshot(&self) -> Vec<u64> {
         self.repetition_history.as_slice().to_vec()
     }
 
-    #[cfg(any(test, debug_assertions))]
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub fn debug_search_key(&self) -> u64 {
         self.search_key()
     }
@@ -571,6 +579,48 @@ impl Position {
         self.make_move_with_history(mv, HistoryMode::Persistent)
     }
 
+    pub(crate) fn make_null_move(&mut self) -> Result<NullMoveState, MoveError> {
+        let moving_color = self.side_to_move;
+        let undo = NullMoveState {
+            previous_en_passant: self.en_passant,
+            previous_halfmove_clock: self.halfmove_clock,
+            previous_fullmove_number: self.fullmove_number,
+            previous_zobrist_key: self.zobrist_key,
+        };
+
+        self.set_en_passant_hashed(None);
+        self.halfmove_clock = self.halfmove_clock.saturating_add(1);
+        if moving_color == Color::Black {
+            self.fullmove_number = self.fullmove_number.saturating_add(1);
+        }
+        self.set_side_to_move_hashed(moving_color.opposite());
+
+        if self.repetition_history.push(self.zobrist_key).is_err() {
+            self.side_to_move = moving_color;
+            self.en_passant = undo.previous_en_passant;
+            self.halfmove_clock = undo.previous_halfmove_clock;
+            self.fullmove_number = undo.previous_fullmove_number;
+            self.zobrist_key = undo.previous_zobrist_key;
+            return Err(MoveError::HistoryOverflow);
+        }
+
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
+        debug_assert_eq!(self.repetition_history.current(), Some(self.zobrist_key));
+        Ok(undo)
+    }
+
+    pub(crate) fn unmake_null_move(&mut self, undo: NullMoveState) {
+        self.side_to_move = self.side_to_move.opposite();
+        self.en_passant = undo.previous_en_passant;
+        self.halfmove_clock = undo.previous_halfmove_clock;
+        self.fullmove_number = undo.previous_fullmove_number;
+        self.zobrist_key = undo.previous_zobrist_key;
+        self.repetition_history.pop();
+
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
+        debug_assert_eq!(self.repetition_history.current(), Some(self.zobrist_key));
+    }
+
     fn make_move_with_history(
         &mut self,
         mv: Move,
@@ -661,6 +711,14 @@ impl Position {
 
     pub(crate) fn occupancy_by(&self, color: Color) -> u64 {
         self.occupancies[color.index()]
+    }
+
+    pub(crate) fn has_non_pawn_material(&self, color: Color) -> bool {
+        self.pieces(color, PieceType::Knight)
+            | self.pieces(color, PieceType::Bishop)
+            | self.pieces(color, PieceType::Rook)
+            | self.pieces(color, PieceType::Queen)
+            != 0
     }
 
     pub(crate) fn check_info(&self) -> CheckInfo {
@@ -1693,6 +1751,24 @@ mod tests {
             position.unmake_move(mv, undo);
             assert_eq!(snapshot(&position), before, "round-trip must restore {uci}");
         }
+    }
+
+    #[test]
+    fn null_move_round_trip_restores_persistent_state() {
+        let mut position = Position::from_fen("r3k2r/8/8/3pP3/8/8/8/R3K2R w KQkq d6 7 12")
+            .expect("FEN parse must succeed");
+        let before = snapshot(&position);
+
+        let undo = position.make_null_move().expect("null move must succeed");
+        assert_eq!(position.side_to_move(), super::Color::Black);
+        assert_eq!(position.halfmove_clock(), before.halfmove_clock + 1);
+        assert_eq!(
+            position.to_fen(),
+            "r3k2r/8/8/3pP3/8/8/8/R3K2R b KQkq - 8 12"
+        );
+
+        position.unmake_null_move(undo);
+        assert_eq!(snapshot(&position), before);
     }
 
     #[test]

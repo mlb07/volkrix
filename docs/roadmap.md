@@ -11,7 +11,7 @@
 - Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic heuristic toggles, and documented Phase 5 baseline comparisons
 - Phase 7 time management and practical UCI usability on top of the correct TT-backed single-thread baseline
 - Phase 8 classical eval bridge with tapered evaluation and a disciplined first expansion of the static eval terms
-- Phase 9 search depth and selectivity layer II with exact Phase 8 baseline preservation, conservative quiet-only LMR, and evidence-driven rejection of guarded null-move pruning
+- Phase 9 search depth and selectivity layer II with staged move picking, PVS, deeper move-ordering feedback, stronger qsearch, and conservative selective pruning on top of the retained baseline
 - Phase 10 SMP / Lazy SMP Layer I with minimal `Threads` control, persistent helper-worker pool, shared-TT-only SMP, and authoritative `Threads=1` baseline preservation
 - Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath`, approved vendored `jdart1/Fathom` probing behind the internal tablebase boundary, and exact disabled-path baseline preservation
 - Phase 12 NNUE Engine Integration Layer I with minimal `EvalFile` control, clean evaluator boundary, retained clean-room Volkrix NNUE format, thread-local accumulator/update architecture, and exact disabled-path preservation when no network is configured
@@ -28,4 +28,4 @@ The current implementation still stops before:
 - split-point or work-stealing SMP
 - broader tablebase features beyond the approved probe-only Fathom Layer I design
 - broader NNUE work beyond the retained single-network integration and first offline training layer
-- advanced pruning and reduction heuristics
+- deeper history-table work, more aggressive selectivity, and larger SMP/search refactors
