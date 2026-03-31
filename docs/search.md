@@ -21,6 +21,43 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
+## Uncommitted Search Handoff
+
+As of the current working tree, the search layer has been rolled back to the last stronger proven classical state from commit `cacaa10` and this rollback is intentionally **not committed yet**.
+
+Files restored to the `cacaa10` search state in the working tree:
+
+- `src/search/limits.rs`
+- `src/search/mod.rs`
+- `src/search/qsearch.rs`
+- `src/search/root.rs`
+- `src/search/movepicker.rs` removed from the working tree
+
+Reason for the rollback:
+
+- the later search bundle in `1f18ee3` searched far fewer nodes, but match testing showed it was weaker than the `cacaa10` classical baseline
+- the strongest practical current classical configuration remained the older search behavior plus the newer classical-eval terms
+- targeted ablations showed the biggest single regression source was aggressive selective pruning, especially reverse futility pruning, but no narrower forward fix was proved stronger than the restored `cacaa10` search state
+
+Evidence collected for the rollback candidate in the current working tree:
+
+- proxy bench: `623756` nodes, checksum `5873b4276c1d4c51`
+- match vs clean `HEAD` search binary: `6W 8D 2L`
+- match vs clean `cacaa10` binary: `2W 12D 2L`
+
+Validation notes:
+
+- `cargo test --lib search::root` passed
+- `cargo test --test search` passed
+- `cargo clippy --all-targets --all-features -- -D warnings` still fails on unrelated existing issues in `src/core/position.rs`, `src/nnue_training.rs`, and `src/search/nnue.rs`
+- the benchmark regression test in `tests/tt.rs` still fails because that file currently carries unrelated dirty expectations from another agent
+
+Future-agent guidance:
+
+- treat this rollback as the current strongest uncommitted classical-search candidate unless new match evidence disproves it
+- do not assume the later `1f18ee3` search bundle is stronger just because it searches fewer nodes
+- if further search work resumes, compare against this rollback candidate, not only against committed `HEAD`
+
 ## Current Classical Eval Status
 
 The retained fallback evaluator is still the strongest practical Volkrix evaluator today when `EvalFile=""`.
