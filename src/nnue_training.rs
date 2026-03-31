@@ -497,9 +497,11 @@ fn process_export_work_items(
                     return Ok(());
                 };
                 let result = export_example_from_fen(&fen, config, &mut label_service);
-                sender.send((index, (line_number, result))).map_err(|error| {
-                    format!("failed to send export result from worker: {error}")
-                })?;
+                sender
+                    .send((index, (line_number, result)))
+                    .map_err(|error| {
+                        format!("failed to send export result from worker: {error}")
+                    })?;
             }
         }));
     }
