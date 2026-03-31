@@ -89,4 +89,4 @@ Malformed FEN strings, invalid moves, and malformed UCI commands are handled wit
 - `docs/architecture.md`
 - `docs/roadmap.md`
 - `docs/search.md`
-- `docs/nnue-training.md`
+- `docs/nnue-training.md` for the retained NNUE workflow, current status, and future-agent handoff

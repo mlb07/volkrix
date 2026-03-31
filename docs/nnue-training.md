@@ -2,6 +2,69 @@
 
 Phase 13 adds Volkrix's first retained offline NNUE training and net-iteration path. It does not add new runtime or UCI controls.
 
+## Current Status And Handoff
+
+This document is the authoritative NNUE handoff note for future work.
+
+Preserved NNUE baseline:
+
+- NNUE-only preservation commit: `58044c8`
+- retained runtime format: Volkrix-owned `VOLKNNUE`
+- retained feature scheme: `HalfKP`
+- retained production topology: `HalfKP 256x2`
+- retained runtime compatibility asset: synthetic in-repo `HalfKP 128x2` test net
+- retained offline trainer backend: Bullet CPU through `tools/volkrix-nnue`
+
+What was changed and kept:
+
+- the old Python trainer was removed
+- offline training now runs through Bullet
+- Rust remains authoritative for feature semantics, export semantics, packing, and loader validation
+- the runtime is topology-aware for retained clean-room HalfKP topologies
+- the practical corpus workflow now exists:
+  - `selfplay-fens`
+  - `export-examples`
+  - `train-bullet`
+  - `pack-volknnue`
+  - `validate-volknnue`
+  - `compare-fallback`
+- two-stage training exists through `--init-from-checkpoint-dir`
+- depth-2 quiet search-label export is practical
+
+What was proved:
+
+- the Bullet adapter/pack/load/runtime bridge works
+- packed nets load through the existing `EvalFile` path
+- the retained fallback engine path still exists when `EvalFile=""`
+- the current training bottleneck is not the loader or packer
+
+What was not proved:
+
+- no current trained candidate net has yet beaten fallback in practical match testing
+
+Largest real NNUE evidence run so far:
+
+- stage 1 corpus: `263,198` realistic self-play positions with depth-1 search labels
+- stage 2 corpus: `12,074` depth-2 quiet search-labeled positions
+- production training target: `HalfKP 256x2`
+- comparison setup: `Threads=1`, `Hash=64`, `SyzygyPath=""`, fallback via `EvalFile=""`, `movetime 50 ms`
+- result:
+  - stage-1 candidate vs fallback: `0W 0D 16L`
+  - stage-2 two-stage candidate vs fallback: `0W 0D 16L`
+
+Current conclusion:
+
+- keep the NNUE runtime and offline tooling work
+- do not treat the current candidate nets as strong
+- if continuing NNUE work, the next priority is larger and stronger search-labeled data, not more NNUE infrastructure rewrites
+
+Boundary for future agents:
+
+- when asked about NNUE, start from this document first
+- treat unrelated search/runtime changes outside the preserved NNUE slice as separate work unless explicitly requested
+- do not claim NNUE strength gains from the current local candidate nets
+- do not widen runtime/UCI behavior unless explicitly requested
+
 ## Retained Runtime Baseline
 
 Authoritative retained baseline:
