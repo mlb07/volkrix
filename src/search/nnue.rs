@@ -9,10 +9,41 @@ use crate::core::{Color, Move, PieceType, Position, Score, Square, UndoState};
 pub(crate) const NNUE_MAGIC: &[u8; 8] = b"VOLKNNUE";
 pub(crate) const NNUE_VERSION: u32 = 1;
 pub(crate) const NNUE_TOPOLOGY_HALFKP_128X2: u32 = 1;
+pub(crate) const NNUE_TOPOLOGY_HALFKP_256X2: u32 = 2;
 pub(crate) const NNUE_FEATURE_BUCKETS: usize = 10;
-pub(crate) const NNUE_HIDDEN_SIZE: usize = 128;
-pub(crate) const NNUE_OUTPUT_INPUTS: usize = NNUE_HIDDEN_SIZE * 2;
 pub(crate) const NNUE_FEATURE_COUNT: usize = 64 * NNUE_FEATURE_BUCKETS * 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HalfkpTopology {
+    pub(crate) id: u32,
+    pub(crate) name: &'static str,
+    pub(crate) hidden_size: usize,
+}
+
+impl HalfkpTopology {
+    pub(crate) const fn output_inputs(self) -> usize {
+        self.hidden_size * 2
+    }
+
+    pub(crate) const fn input_weight_count(self) -> usize {
+        NNUE_FEATURE_COUNT * self.hidden_size
+    }
+}
+
+pub(crate) const HALFKP_128X2: HalfkpTopology = HalfkpTopology {
+    id: NNUE_TOPOLOGY_HALFKP_128X2,
+    name: "HalfKP128x2",
+    hidden_size: 128,
+};
+
+pub(crate) const HALFKP_256X2: HalfkpTopology = HalfkpTopology {
+    id: NNUE_TOPOLOGY_HALFKP_256X2,
+    name: "HalfKP256x2",
+    hidden_size: 256,
+};
+
+#[cfg_attr(not(feature = "offline-tools"), allow(dead_code))]
+pub(crate) const RETAINED_PRODUCTION_TOPOLOGY: HalfkpTopology = HALFKP_256X2;
 
 // Retained HalfKP-like bucket order:
 // own pawn, own knight, own bishop, own rook, own queen,
@@ -59,25 +90,24 @@ pub(crate) struct NnueMetadata {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AccumulatorPair {
-    perspectives: [[i32; NNUE_HIDDEN_SIZE]; 2],
+    perspectives: [Vec<i32>; 2],
 }
 
 impl AccumulatorPair {
-    fn from_biases(hidden_biases: &[i16; NNUE_HIDDEN_SIZE]) -> Self {
-        let mut perspectives = [[0i32; NNUE_HIDDEN_SIZE]; 2];
-        for lanes in &mut perspectives {
-            for (index, lane) in lanes.iter_mut().enumerate() {
-                *lane = hidden_biases[index] as i32;
-            }
-        }
+    fn from_biases(hidden_biases: &[i16]) -> Self {
+        let lanes = hidden_biases
+            .iter()
+            .map(|bias| i32::from(*bias))
+            .collect::<Vec<_>>();
+        let perspectives = [lanes.clone(), lanes];
         Self { perspectives }
     }
 
-    fn perspective(&self, color: Color) -> &[i32; NNUE_HIDDEN_SIZE] {
+    fn perspective(&self, color: Color) -> &[i32] {
         &self.perspectives[color.index()]
     }
 
-    fn perspective_mut(&mut self, color: Color) -> &mut [i32; NNUE_HIDDEN_SIZE] {
+    fn perspective_mut(&mut self, color: Color) -> &mut [i32] {
         &mut self.perspectives[color.index()]
     }
 }
@@ -228,18 +258,36 @@ fn sparse_features_for_perspective(position: &Position, perspective: Color) -> V
 
 #[cfg(feature = "offline-tools")]
 pub(crate) fn encode_volknnue(
-    hidden_biases: &[i16; NNUE_HIDDEN_SIZE],
+    topology: HalfkpTopology,
+    hidden_biases: &[i16],
     input_weights: &[i16],
     output_bias: i32,
-    output_weights: &[i16; NNUE_OUTPUT_INPUTS],
+    output_weights: &[i16],
     output_scale: i32,
 ) -> Result<Vec<u8>, String> {
-    let input_weight_count = NNUE_FEATURE_COUNT * NNUE_HIDDEN_SIZE;
+    if hidden_biases.len() != topology.hidden_size {
+        return Err(format!(
+            "hidden bias count {} did not match topology {} hidden size {}",
+            hidden_biases.len(),
+            topology.name,
+            topology.hidden_size
+        ));
+    }
+    let input_weight_count = topology.input_weight_count();
     if input_weights.len() != input_weight_count {
         return Err(format!(
-            "input weight count {} did not match retained count {}",
+            "input weight count {} did not match topology {} count {}",
             input_weights.len(),
+            topology.name,
             input_weight_count
+        ));
+    }
+    if output_weights.len() != topology.output_inputs() {
+        return Err(format!(
+            "output weight count {} did not match topology {} count {}",
+            output_weights.len(),
+            topology.name,
+            topology.output_inputs()
         ));
     }
     if output_scale <= 0 {
@@ -255,10 +303,10 @@ pub(crate) fn encode_volknnue(
     );
     bytes.extend_from_slice(NNUE_MAGIC);
     bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&NNUE_TOPOLOGY_HALFKP_128X2.to_le_bytes());
+    bytes.extend_from_slice(&topology.id.to_le_bytes());
     bytes.extend_from_slice(&(NNUE_FEATURE_COUNT as u32).to_le_bytes());
-    bytes.extend_from_slice(&(NNUE_HIDDEN_SIZE as u32).to_le_bytes());
-    bytes.extend_from_slice(&(NNUE_OUTPUT_INPUTS as u32).to_le_bytes());
+    bytes.extend_from_slice(&(topology.hidden_size as u32).to_le_bytes());
+    bytes.extend_from_slice(&(topology.output_inputs() as u32).to_le_bytes());
     bytes.extend_from_slice(&output_scale.to_le_bytes());
     for bias in hidden_biases {
         bytes.extend_from_slice(&bias.to_le_bytes());
@@ -276,11 +324,12 @@ pub(crate) fn encode_volknnue(
 }
 
 struct NnueNetwork {
+    topology: HalfkpTopology,
     metadata: NnueMetadata,
-    hidden_biases: [i16; NNUE_HIDDEN_SIZE],
+    hidden_biases: Box<[i16]>,
     input_weights: Box<[i16]>,
     output_bias: i32,
-    output_weights: [i16; NNUE_OUTPUT_INPUTS],
+    output_weights: Box<[i16]>,
 }
 
 impl NnueNetwork {
@@ -309,49 +358,36 @@ impl NnueNetwork {
                 metadata.version, NNUE_VERSION
             ));
         }
-        if metadata.topology != NNUE_TOPOLOGY_HALFKP_128X2 {
-            return Err(format!(
-                "unsupported VOLKNNUE topology {} (expected HalfKP128x2/{})",
-                metadata.topology, NNUE_TOPOLOGY_HALFKP_128X2
-            ));
-        }
+        let topology = supported_halfkp_topology(
+            metadata.topology,
+            metadata.hidden_size as usize,
+            metadata.output_inputs as usize,
+        )?;
         if metadata.feature_count as usize != NNUE_FEATURE_COUNT {
             return Err(format!(
                 "VOLKNNUE feature count {} did not match retained HalfKP feature count {}",
                 metadata.feature_count, NNUE_FEATURE_COUNT
             ));
         }
-        if metadata.hidden_size as usize != NNUE_HIDDEN_SIZE {
-            return Err(format!(
-                "VOLKNNUE hidden size {} did not match retained hidden size {}",
-                metadata.hidden_size, NNUE_HIDDEN_SIZE
-            ));
-        }
-        if metadata.output_inputs as usize != NNUE_OUTPUT_INPUTS {
-            return Err(format!(
-                "VOLKNNUE output input count {} did not match retained output input count {}",
-                metadata.output_inputs, NNUE_OUTPUT_INPUTS
-            ));
-        }
         if metadata.output_scale <= 0 {
             return Err("VOLKNNUE output scale must be positive".to_owned());
         }
 
-        let mut hidden_biases = [0i16; NNUE_HIDDEN_SIZE];
-        for bias in &mut hidden_biases {
-            *bias = read_i16_le(bytes, &mut cursor)?;
+        let mut hidden_biases = Vec::with_capacity(topology.hidden_size);
+        for _ in 0..topology.hidden_size {
+            hidden_biases.push(read_i16_le(bytes, &mut cursor)?);
         }
 
-        let input_weight_count = NNUE_FEATURE_COUNT * NNUE_HIDDEN_SIZE;
+        let input_weight_count = topology.input_weight_count();
         let mut input_weights = Vec::with_capacity(input_weight_count);
         for _ in 0..input_weight_count {
             input_weights.push(read_i16_le(bytes, &mut cursor)?);
         }
 
         let output_bias = read_i32_le(bytes, &mut cursor)?;
-        let mut output_weights = [0i16; NNUE_OUTPUT_INPUTS];
-        for weight in &mut output_weights {
-            *weight = read_i16_le(bytes, &mut cursor)?;
+        let mut output_weights = Vec::with_capacity(topology.output_inputs());
+        for _ in 0..topology.output_inputs() {
+            output_weights.push(read_i16_le(bytes, &mut cursor)?);
         }
 
         if cursor != bytes.len() {
@@ -363,11 +399,12 @@ impl NnueNetwork {
         }
 
         Ok(Self {
+            topology,
             metadata,
-            hidden_biases,
+            hidden_biases: hidden_biases.into_boxed_slice(),
             input_weights: input_weights.into_boxed_slice(),
             output_bias,
-            output_weights,
+            output_weights: output_weights.into_boxed_slice(),
         })
     }
 
@@ -492,15 +529,12 @@ impl NnueNetwork {
         child
     }
 
-    fn build_perspective(
-        &self,
-        position: &Position,
-        perspective: Color,
-    ) -> [i32; NNUE_HIDDEN_SIZE] {
-        let mut lanes = [0i32; NNUE_HIDDEN_SIZE];
-        for (index, lane) in lanes.iter_mut().enumerate() {
-            *lane = self.hidden_biases[index] as i32;
-        }
+    fn build_perspective(&self, position: &Position, perspective: Color) -> Vec<i32> {
+        let mut lanes = self
+            .hidden_biases
+            .iter()
+            .map(|bias| i32::from(*bias))
+            .collect::<Vec<_>>();
 
         let king_square = position.king_square(perspective);
         for piece_color in Color::ALL {
@@ -544,11 +578,13 @@ impl NnueNetwork {
         };
 
         let mut output = self.output_bias;
-        for (index, lane) in active.iter().enumerate() {
-            output += clipped_relu(*lane) * self.output_weights[index] as i32;
+        let (active_weights, passive_weights) =
+            self.output_weights.split_at(self.topology.hidden_size);
+        for (lane, weight) in active.iter().zip(active_weights.iter()) {
+            output += clipped_relu(*lane) * i32::from(*weight);
         }
-        for (index, lane) in passive.iter().enumerate() {
-            output += clipped_relu(*lane) * self.output_weights[NNUE_HIDDEN_SIZE + index] as i32;
+        for (lane, weight) in passive.iter().zip(passive_weights.iter()) {
+            output += clipped_relu(*lane) * i32::from(*weight);
         }
 
         // Final NNUE score orientation matches the engine's static-eval convention:
@@ -558,7 +594,7 @@ impl NnueNetwork {
 
     fn apply_piece_delta(
         &self,
-        lanes: &mut [i32; NNUE_HIDDEN_SIZE],
+        lanes: &mut [i32],
         perspective: Color,
         king_square: Square,
         feature: PieceFeature,
@@ -568,12 +604,46 @@ impl NnueNetwork {
             return;
         };
         let feature_index = feature_index(perspective, king_square, bucket, feature.square);
-        let weights_offset = feature_index * NNUE_HIDDEN_SIZE;
-        let weights = &self.input_weights[weights_offset..weights_offset + NNUE_HIDDEN_SIZE];
+        let weights_offset = feature_index * self.topology.hidden_size;
+        let weights =
+            &self.input_weights[weights_offset..weights_offset + self.topology.hidden_size];
         for (lane, weight) in lanes.iter_mut().zip(weights.iter()) {
             *lane += delta * *weight as i32;
         }
     }
+}
+
+pub(crate) fn supported_halfkp_topology(
+    topology_id: u32,
+    hidden_size: usize,
+    output_inputs: usize,
+) -> Result<HalfkpTopology, String> {
+    if output_inputs != hidden_size * 2 {
+        return Err(format!(
+            "VOLKNNUE output input count {} did not equal 2 * hidden size {}",
+            output_inputs, hidden_size
+        ));
+    }
+
+    let topology = match (topology_id, hidden_size) {
+        (NNUE_TOPOLOGY_HALFKP_128X2, 128) => HALFKP_128X2,
+        (NNUE_TOPOLOGY_HALFKP_256X2, 256) => HALFKP_256X2,
+        _ => {
+            return Err(format!(
+                "unsupported VOLKNNUE HalfKP topology {} with hidden size {} and output inputs {}",
+                topology_id, hidden_size, output_inputs
+            ));
+        }
+    };
+    if output_inputs != topology.output_inputs() {
+        return Err(format!(
+            "VOLKNNUE output input count {} did not match topology {} count {}",
+            output_inputs,
+            topology.name,
+            topology.output_inputs()
+        ));
+    }
+    Ok(topology)
 }
 
 fn read_u32_le(bytes: &[u8], cursor: &mut usize) -> Result<u32, String> {
@@ -737,15 +807,18 @@ mod tests {
     }
 
     #[test]
-    fn tiny_test_net_metadata_matches_retained_topology() {
+    fn tiny_test_net_metadata_matches_supported_compatibility_topology() {
         let service = tiny_test_service();
         let metadata = service.metadata();
 
         assert_eq!(metadata.version, NNUE_VERSION);
-        assert_eq!(metadata.topology, NNUE_TOPOLOGY_HALFKP_128X2);
+        assert_eq!(metadata.topology, HALFKP_128X2.id);
         assert_eq!(metadata.feature_count as usize, NNUE_FEATURE_COUNT);
-        assert_eq!(metadata.hidden_size as usize, NNUE_HIDDEN_SIZE);
-        assert_eq!(metadata.output_inputs as usize, NNUE_OUTPUT_INPUTS);
+        assert_eq!(metadata.hidden_size as usize, HALFKP_128X2.hidden_size);
+        assert_eq!(
+            metadata.output_inputs as usize,
+            HALFKP_128X2.output_inputs()
+        );
         assert!(metadata.output_scale > 0);
     }
 
@@ -766,6 +839,13 @@ mod tests {
                 "enemy_queen",
             ]
         );
+    }
+
+    #[test]
+    fn retained_production_topology_is_halfkp256x2() {
+        assert_eq!(RETAINED_PRODUCTION_TOPOLOGY, HALFKP_256X2);
+        assert_eq!(RETAINED_PRODUCTION_TOPOLOGY.hidden_size, 256);
+        assert_eq!(RETAINED_PRODUCTION_TOPOLOGY.output_inputs(), 512);
     }
 
     #[test]
@@ -842,8 +922,8 @@ mod tests {
         bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
         bytes.extend_from_slice(&NNUE_TOPOLOGY_HALFKP_128X2.to_le_bytes());
         bytes.extend_from_slice(&(NNUE_FEATURE_COUNT as u32).to_le_bytes());
-        bytes.extend_from_slice(&(NNUE_HIDDEN_SIZE as u32).to_le_bytes());
-        bytes.extend_from_slice(&(NNUE_OUTPUT_INPUTS as u32).to_le_bytes());
+        bytes.extend_from_slice(&(HALFKP_128X2.hidden_size as u32).to_le_bytes());
+        bytes.extend_from_slice(&(HALFKP_128X2.output_inputs() as u32).to_le_bytes());
         bytes.extend_from_slice(&1i32.to_le_bytes());
         assert!(NnueNetwork::parse(&bytes).is_err());
     }

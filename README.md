@@ -19,7 +19,7 @@ The repository currently includes:
 - Phase 10 SMP / Lazy SMP Layer I with `Threads` and shared-TT-only helpers
 - Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath` and retained Fathom-backed probing
 - Phase 12 NNUE Engine Integration Layer I with optional `EvalFile`, retained VOLKNNUE format, and exact disabled-path preservation
-- Phase 13 Training Pipeline and Net Iteration Layer I with isolated offline export / training / packing tooling and first real candidate-net validation workflow
+- Phase 13 Training Pipeline and Net Iteration Layer I with isolated offline export / Bullet training / packing tooling, topology-aware HalfKP runtime support, retained `HalfKP 256x2` production topology, and first real candidate-net validation workflow
 
 What is intentionally not here yet:
 

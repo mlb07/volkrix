@@ -18,7 +18,7 @@
 
 ## Next
 
-- Phase 13 Training Pipeline and Net Iteration Layer I pending signoff: isolated offline export/pack/validate tooling, deterministic fixed-depth 5 label generation, hybrid Rust/Python training flow, and first real candidate-net validation through `EvalFile`
+- Phase 13 Training Pipeline and Net Iteration Layer I pending signoff: isolated offline export/pack/validate tooling, Bullet-based offline training, topology-aware HalfKP runtime support with retained `HalfKP 256x2` production topology, and real candidate-net validation through `EvalFile`
 - Later phases, not yet locked in order: broader net iteration / tuning / release polish
 
 ## Intentional Boundaries

@@ -21,15 +21,17 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
-## Phase 12 Retained NNUE Model
+## Current NNUE Runtime Model
 
-The retained Phase 12 design is deliberately narrow:
+The retained NNUE runtime design is still deliberately narrow:
 
 - `EvalFile` is the only new public control surface
 - NNUE is optional and disabled by default
 - the runtime owns an optional internal NNUE service behind `search::nnue`
 - the retained network format is a clean-room Volkrix-owned `VOLKNNUE` binary format only
-- the retained topology is `HalfKP 128x2` only
+- the runtime supports only retained clean-room HalfKP topologies
+- retained production topology is `HalfKP 256x2`
+- retained compatibility support includes the synthetic in-repo `HalfKP 128x2` test net
 - one active network only
 - one retained feature scheme only
 - one retained accumulator/update architecture only
@@ -71,11 +73,13 @@ Squares are normalized per perspective so each accumulator sees its own side fro
 
 ## Retained Topology and Score Orientation
 
-The retained topology is:
+The retained production topology is:
 
-- one shared input-to-hidden matrix: `40960 x 128`
-- one hidden bias vector: `128`
-- one output head over concatenated perspective activations: `256 -> 1`
+- one shared input-to-hidden matrix: `40960 x 256`
+- one hidden bias vector: `256`
+- one output head over concatenated perspective activations: `512 -> 1`
+
+The runtime remains compatibility-capable for the synthetic in-repo `HalfKP 128x2` test asset, but new retained production checkpoints and packed nets target `HalfKP 256x2`.
 
 The retained numeric path is:
 
@@ -138,6 +142,7 @@ This file is:
 
 - clean-room and Volkrix-owned
 - minimal and synthetic
+- a compatibility asset, not the retained production topology target
 - intended for parser, accumulator, and inference validation only
 - explicitly not treated as a production playing net
 

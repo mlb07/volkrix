@@ -6,9 +6,11 @@ It is:
 
 - clean-room and Volkrix-owned
 - deterministic
-- sized for the retained `HalfKP 128x2` topology
+- sized for the supported compatibility `HalfKP 128x2` topology
 - intended only for parser, accumulator, and inference validation
 - not a production playing net
+
+It is not the retained production topology target. New retained production checkpoints and packed nets target `HalfKP 256x2`.
 
 The weights are synthetic and primarily encode simple material-count signals so the Phase 12 tests can validate:
 
@@ -22,6 +24,6 @@ The weights are synthetic and primarily encode simple material-count signals so 
 It is:
 
 - a small in-repo FEN-lines corpus
-- intended for export/training/packing smoke validation only
+- intended for export/Bullet-training/packing smoke validation only
 - not intended to be a strength corpus
 - kept separate from any real locally trained candidate-net artifacts

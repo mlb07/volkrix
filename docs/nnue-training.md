@@ -13,19 +13,17 @@ Authoritative retained baseline:
 
 ## Offline Tooling Boundary
 
-Phase 13 uses a locked hybrid split:
+Phase 13 uses a retained Rust-first split:
 
 - Rust remains authoritative for:
   - HalfKP feature semantics
   - example-format semantics
   - VOLKNNUE packing
   - final load validation
-- Python is allowed only for offline optimization/training
-- no Python dependency is introduced into the engine runtime path
+- the isolated offline trainer uses Bullet's CPU backend through the `volkrix-nnue` tool crate
+- no Bullet dependency is introduced into the engine runtime path
 
 Retained Rust offline tooling lives in the isolated workspace member `tools/volkrix-nnue`.
-
-Retained Python training code lives under `tools/nnue/`.
 
 ## Retained Corpus Input
 
@@ -41,22 +39,23 @@ Retained tiny in-repo fixture corpus:
 
 ## Retained Label Environment
 
-Phase 13 labels are generated only in this explicit environment:
+Every exported label is generated only in an explicit isolated environment:
 
 - `Threads=1`
 - `SyzygyPath=""`
 - `EvalFile=""`
-- `SearchLimits::new(5).without_tt()`
+- an explicit search/static label mode recorded in the export manifest
+- explicit search depth, TT setting, hash size, worker count, position filter, and optional timeout recorded in the export manifest
 
 No retained label may depend on hidden runtime state.
 
-The exporter creates a fresh isolated search service for each label so prior TT contents, network state, tablebase state, and deferred UCI/runtime configuration cannot leak into labeling.
+The exporter creates fresh isolated search services for labeling so prior TT contents, network state, tablebase state, and deferred UCI/runtime configuration cannot leak into the corpus.
 
 ## Retained Target Semantics
 
 The retained scalar target scheme is:
 
-- deterministic fixed-depth 5 Volkrix search
+- explicit Volkrix-generated scalar supervision recorded by the export manifest
 - score orientation matches the engine's existing side-to-move convention
 - direct rules remain authoritative
 - retained Phase 11 tablebase-scope positions are excluded from the corpus
@@ -127,6 +126,10 @@ Retained trainer checkpoint directory contents:
 - `hidden_biases.f32le`
 - `output_weights.f32le`
 - `output_bias.f32le`
+- `train.bulletdata`
+- `validation.bulletdata`
+- `bullet-training.json`
+- `bullet-checkpoints/`
 
 Retained checkpoint manifest fields include:
 
@@ -138,6 +141,31 @@ Retained checkpoint manifest fields include:
 - example counts
 - retained topology metadata
 - source export manifest
+- optional parent-checkpoint traceability for two-stage training:
+  - `init_from_mode`
+  - `init_from_checkpoint_dir`
+  - `init_from_checkpoint_trainer_version`
+  - `init_from_checkpoint_epochs`
+  - `init_from_checkpoint_examples_path`
+
+Retained Bullet sidecar metadata records:
+
+- Bullet git revision
+- backend (`Bullet CPU`)
+- activation (`crelu` in the training graph, matching runtime clipped ReLU after `QA=255` scaling)
+- eval scale
+- batch size
+- batches per superbatch
+- superbatch range
+- learning-rate schedule endpoints
+- data file paths
+- optional parent-checkpoint traceability:
+  - `init_from_mode`
+  - `init_from_checkpoint_dir`
+  - `init_from_bullet_checkpoint`
+  - `init_from_checkpoint_trainer_version`
+  - `init_from_checkpoint_epochs`
+  - `init_from_checkpoint_examples_path`
 
 Retained packed net traceability lives alongside the packed VOLKNNUE file only:
 
@@ -156,12 +184,24 @@ cargo run -p volkrix-nnue -- export-examples \
   --output /tmp/volkrix-phase13-fixture.examples
 ```
 
-Train retained checkpoint:
+Train retained checkpoint with Bullet:
 
 ```bash
-python3 tools/nnue/train_halfkp128x2.py \
+cargo run -p volkrix-nnue -- train-bullet \
   --examples /tmp/volkrix-phase13-fixture.examples \
   --checkpoint-dir /tmp/volkrix-phase13-checkpoint
+```
+
+Initialize a new Bullet run from a prior Volkrix checkpoint:
+
+```bash
+cargo run -p volkrix-nnue -- train-bullet \
+  --examples /tmp/volkrix-phase13-fixture.examples \
+  --checkpoint-dir /tmp/volkrix-phase13-stage2-checkpoint \
+  --init-from-checkpoint-dir /tmp/volkrix-phase13-checkpoint \
+  --superbatches 64 \
+  --initial-lr 0.0002 \
+  --final-lr 0.00002
 ```
 
 Pack retained VOLKNNUE:
@@ -184,11 +224,90 @@ cargo run -p volkrix-nnue -- validate-volknnue \
 Retained fixture smoke flow:
 
 1. export from `tests/data/nnue/phase13-fixture.fens`
-2. train the retained Python checkpoint
+2. train the retained Bullet checkpoint
 3. pack to VOLKNNUE
 4. validate load through the retained Phase 12 loader
 
 This is a smoke path only. It is not a strength corpus.
+
+## Bullet Training Notes
+
+The retained Bullet trainer is pinned to:
+
+- Bullet git revision `feab6443fc523c9d349427bca2d5bb3c04369420`
+- CPU backend only
+- retained HalfKP `40960 -> 256x2 -> 1` production graph
+- deterministic normalized-FEN split
+- `AdamW`
+- sigmoid-squared-error value loss
+
+The training graph uses normalized hidden-layer parameters with `QA=255` and exports them back into Volkrix's runtime integer layout after training:
+
+- `l0` weights and biases are multiplied by `255`
+- `l1` weights are multiplied by `400 * 64 / 255`
+- `l1` bias is multiplied by `400 * 64`
+
+That scaling is what keeps the retained VOLKNNUE pack path compatible with the runtime loader without changing the engine.
+
+Two-stage training uses checkpoint initialization, not raw Bullet schedule continuation:
+
+- `--init-from-checkpoint-dir` resolves the prior Volkrix checkpoint directory
+- the tool loads the prior Bullet weights from that checkpoint
+- stage 2 then trains over the full new corpus from batch 0 with its own local superbatch schedule
+- parent-checkpoint traceability is recorded in both `manifest.json` and `bullet-training.json`
+
+This keeps the fine-tune corpus fully visible to stage 2 instead of inheriting Bullet's dataset-offset behavior from schedule resume.
+
+## Canonical Two-Stage Workflow
+
+Canonical current experiment:
+
+1. Stage 1 pretrain on a large self-play search-labeled corpus with cheap depth-1 labels
+2. Stage 2 fine-tune from that checkpoint on a smaller higher-quality depth-2 quiet self-play search corpus
+3. pack and validate the final VOLKNNUE
+4. compare it against fallback at `Threads=1`, `Hash=64`, `SyzygyPath=""`
+
+Example commands:
+
+```bash
+target/release/volkrix-nnue export-examples \
+  --input /tmp/volkrix-bullet-selfplay-40000-d1.fens \
+  --output /tmp/volkrix-bullet-selfplay-40000-d1-search1-w8.examples \
+  --label-mode search \
+  --label-depth 1 \
+  --tt on \
+  --hash-mb 64 \
+  --workers 8
+
+target/release/volkrix-nnue train-bullet \
+  --examples /tmp/volkrix-bullet-selfplay-40000-d1-search1-w8.examples \
+  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage1-checkpoint \
+  --batch-size 512 \
+  --superbatches 128
+
+target/release/volkrix-nnue train-bullet \
+  --examples /tmp/volkrix-bullet-selfplay-40000-d2w8-quiet-timeout100.examples \
+  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage2-checkpoint \
+  --init-from-checkpoint-dir /tmp/volkrix-bullet-two-stage-stage1-checkpoint \
+  --batch-size 512 \
+  --superbatches 64 \
+  --initial-lr 0.0002 \
+  --final-lr 0.00002
+
+target/release/volkrix-nnue pack-volknnue \
+  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage2-checkpoint \
+  --output /tmp/volkrix-bullet-two-stage-stage2.volknnue
+
+target/release/volkrix-nnue validate-volknnue \
+  --evalfile /tmp/volkrix-bullet-two-stage-stage2.volknnue
+
+target/release/volkrix-nnue compare-fallback \
+  --openings /tmp/volkrix-bullet-eval-openings.fens \
+  --candidate /tmp/volkrix-bullet-two-stage-stage2.volknnue \
+  --movetime-ms 50 \
+  --hash-mb 64 \
+  --max-plies 120
+```
 
 ## Real Candidate-Net Validation
 
@@ -226,6 +345,7 @@ That file remains:
 
 - deterministic
 - synthetic
+- a runtime compatibility asset for the older `HalfKP 128x2` shape
 - intended only for parser/integration validation
 
-Phase 13 real trained candidate nets are separate local artifacts produced by the retained export/train/pack workflow and are not checked into the repo.
+Phase 13+ real trained candidate nets are separate local artifacts produced by the retained export/train/pack workflow. New retained production checkpoints and packed nets target `HalfKP 256x2` and are not checked into the repo.
