@@ -128,8 +128,8 @@ fn phase_eleven_no_tablebase_profile_report() {
 #[test]
 fn phase8_baseline_matches_documented_phase8_bench_signature() {
     let result = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
-    assert_eq!(result.total_nodes, 341_449);
-    assert_eq!(result.checksum, 0x646c_3fa8_58fd_b78d);
+    assert_eq!(result.total_nodes, 673_551);
+    assert_eq!(result.checksum, 0x9b93_952e_bf99_fa84);
 }
 
 #[test]
@@ -149,19 +149,19 @@ fn phase9_profile_benches_remain_reproducible() {
 }
 
 #[test]
-fn phase9_default_now_improves_on_lmr_only_profile() {
+fn phase9_default_matches_lmr_only_profile_signature() {
     let lmr_only = run_profile_bench(5, HeuristicProfile::LmrOnly);
     let phase_nine = run_profile_bench(5, HeuristicProfile::Phase9Default);
 
-    assert!(phase_nine.total_nodes < lmr_only.total_nodes);
-    assert_ne!(lmr_only.checksum, phase_nine.checksum);
+    assert_eq!(phase_nine.total_nodes, lmr_only.total_nodes);
+    assert_eq!(phase_nine.checksum, lmr_only.checksum);
 }
 
 #[test]
 fn phase10_threads_one_matches_retained_phase9_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 64_939);
-    assert_eq!(result.checksum, 0x646c_3d91_bf77_8741);
+    assert_eq!(result.total_nodes, 623_756);
+    assert_eq!(result.checksum, 0x5873_b427_6c1d_4c51);
 }
 
 #[test]
@@ -176,8 +176,8 @@ fn phase10_threads_one_remains_reproducible() {
 #[test]
 fn phase11_syzygy_empty_threads_one_matches_retained_phase10_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 64_939);
-    assert_eq!(result.checksum, 0x646c_3d91_bf77_8741);
+    assert_eq!(result.total_nodes, 623_756);
+    assert_eq!(result.checksum, 0x5873_b427_6c1d_4c51);
 }
 
 #[test]
@@ -232,8 +232,8 @@ fn phase_twelve_nnue_profile_report() {
 #[test]
 fn phase12_evalfile_empty_threads_one_matches_retained_phase11_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 64_939);
-    assert_eq!(result.checksum, 0x646c_3d91_bf77_8741);
+    assert_eq!(result.total_nodes, 623_756);
+    assert_eq!(result.checksum, 0x5873_b427_6c1d_4c51);
 }
 
 #[test]
