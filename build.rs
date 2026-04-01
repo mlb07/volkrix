@@ -14,8 +14,13 @@ fn main() {
     build
         .file("vendor/fathom/src/tbprobe.c")
         .include("vendor/fathom/src")
-        .flag_if_supported("-std=gnu99")
         .warnings(false);
+
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        build.flag_if_supported("/std:c11");
+    } else {
+        build.flag_if_supported("-std=gnu11");
+    }
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         build.flag("-mmacosx-version-min=11.0.0");
