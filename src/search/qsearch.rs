@@ -1,8 +1,7 @@
 use crate::core::{MoveList, Position};
 
-use super::root::{
-    MAX_PLY, MoveOrderHints, SearchContext, is_draw, is_quiescence_move, terminal_score,
-};
+use super::root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, terminal_score};
+use super::movepicker::MovePicker;
 
 pub(crate) fn qsearch<const USE_NNUE: bool>(
     context: &mut SearchContext,
@@ -49,20 +48,17 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
         tt_move: None,
     };
 
-    for index in 0..legal_moves.len() {
-        context.pick_next_move(position, &mut legal_moves, index, ordering_hints);
-        let mv = legal_moves.get(index);
-        if !in_check && !is_quiescence_move(mv, position) {
-            continue;
-        }
-
+    for mv in MovePicker::new(context, position, &legal_moves, ordering_hints).ordered() {
         let undo = context
             .make_search_move::<USE_NNUE>(position, mv)
             .expect("quiescence move must be legal");
+        context.set_previous_move(ply + 1, mv);
         let Some(score) = qsearch::<USE_NNUE>(context, position, ply + 1, -beta, -alpha) else {
+            context.set_previous_move(ply + 1, crate::core::Move::NONE);
             context.unmake_search_move::<USE_NNUE>(position, mv, undo);
             return None;
         };
+        context.set_previous_move(ply + 1, crate::core::Move::NONE);
         context.unmake_search_move::<USE_NNUE>(position, mv, undo);
         let score = -score;
 

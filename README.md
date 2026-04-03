@@ -21,6 +21,12 @@ The repository currently includes:
 - Phase 12 NNUE Engine Integration Layer I with optional `EvalFile`, retained VOLKNNUE format, and exact disabled-path preservation
 - Phase 13 Training Pipeline and Net Iteration Layer I with isolated offline export / Bullet training / packing tooling, topology-aware HalfKP runtime support, retained `HalfKP 256x2` production topology, and first real candidate-net validation workflow
 
+Current project priority:
+
+- only changes with evidence-backed Elo improvement matter
+- before returning to broader NNUE work, priority is to maximize the retained classical engine path first
+- that means classical eval, classical search, and their validation workflow take precedence over new NNUE feature work
+
 What is intentionally not here yet:
 
 - split-point or work-stealing SMP

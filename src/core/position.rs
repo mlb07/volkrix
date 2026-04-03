@@ -91,7 +91,6 @@ pub struct UndoState {
     pub previous_zobrist_key: u64,
 }
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct NullMoveState {
     previous_en_passant: Option<Square>,
@@ -580,7 +579,6 @@ impl Position {
         self.make_move_with_history(mv, HistoryMode::Persistent)
     }
 
-    #[cfg(test)]
     pub(crate) fn make_null_move(&mut self) -> Result<NullMoveState, MoveError> {
         let moving_color = self.side_to_move;
         let undo = NullMoveState {
@@ -611,7 +609,6 @@ impl Position {
         Ok(undo)
     }
 
-    #[cfg(test)]
     pub(crate) fn unmake_null_move(&mut self, undo: NullMoveState) {
         self.side_to_move = self.side_to_move.opposite();
         self.en_passant = undo.previous_en_passant;
@@ -714,6 +711,14 @@ impl Position {
 
     pub(crate) fn occupancy_by(&self, color: Color) -> u64 {
         self.occupancies[color.index()]
+    }
+
+    pub(crate) fn has_non_pawn_material(&self, color: Color) -> bool {
+        self.pieces(color, PieceType::Knight)
+            | self.pieces(color, PieceType::Bishop)
+            | self.pieces(color, PieceType::Rook)
+            | self.pieces(color, PieceType::Queen)
+            != 0
     }
 
     pub(crate) fn check_info(&self) -> CheckInfo {

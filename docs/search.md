@@ -85,6 +85,7 @@ Future-agent guidance:
 - record any new classical-eval terms and their evidence here or in a more specific eval handoff note
 - do not claim Elo gain from classical-eval edits unless match evidence supports it
 - if search work is in flight elsewhere, keep eval changes isolated from search-logic edits
+- for baseline-vs-candidate classical testing, prefer `cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N]`
 
 ## Current NNUE Runtime Model
 

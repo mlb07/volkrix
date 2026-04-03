@@ -1,8 +1,10 @@
 use std::path::Path;
 
 mod bullet_trainer;
+mod engine_match;
 
 use bullet_trainer::{BulletTrainingConfig, train_bullet, train_bullet_with_config};
+use engine_match::compare_external_engines;
 use volkrix::nnue_training::{
     CorpusExpansionConfig, LabelGenerationConfig, LabelMode, MatchConfig, MatchMode,
     PositionFilter, SelfPlayCorpusConfig, compare_candidate_vs_fallback, expand_fen_corpus,
@@ -256,6 +258,69 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        Some("compare-engines") => {
+            let mut flags = parse_flag_map(args)?;
+            let openings = take_required_flag(&mut flags, "--openings")?;
+            let baseline = take_required_flag(&mut flags, "--baseline")?;
+            let candidate = take_required_flag(&mut flags, "--candidate")?;
+            let hash_mb = parse_optional_flag(&mut flags, "--hash-mb")?.unwrap_or(64usize);
+            let max_plies = parse_optional_flag(&mut flags, "--max-plies")?.unwrap_or(160usize);
+            let max_openings = parse_optional_flag(&mut flags, "--max-openings")?;
+            let mode = match (
+                parse_optional_flag::<u8>(&mut flags, "--depth")?,
+                parse_optional_flag::<u64>(&mut flags, "--movetime-ms")?,
+            ) {
+                (Some(depth), None) => MatchMode::FixedDepth(depth),
+                (None, Some(movetime_ms)) => MatchMode::MoveTimeMs(movetime_ms),
+                (None, None) => MatchMode::MoveTimeMs(100),
+                (Some(_), Some(_)) => {
+                    return Err("use either --depth or --movetime-ms, not both".to_owned());
+                }
+            };
+            ensure_no_unknown_flags(flags)?;
+            let summary = compare_external_engines(
+                Path::new(&openings),
+                Path::new(&baseline),
+                Path::new(&candidate),
+                MatchConfig {
+                    hash_mb,
+                    max_plies,
+                    mode,
+                },
+                max_openings,
+            )?;
+            let score = candidate_score_fraction(&summary);
+            println!(
+                "candidate vs baseline: {} games over {} openings => {}W {}D {}L score {:.1}%",
+                summary.games,
+                summary.openings,
+                summary.candidate_wins,
+                summary.draws,
+                summary.fallback_wins,
+                score * 100.0
+            );
+            if let Some(elo) = approximate_elo_from_score(score) {
+                println!("approximate Elo difference from score rate: {elo:+.1}");
+            }
+            for game in summary.game_summaries.iter().take(4) {
+                println!(
+                    "game candidate {:?} opening '{}' outcome {:?} plies {} candidate_score {:?} baseline_score {:?}",
+                    game.candidate_color,
+                    game.opening_fen,
+                    game.outcome,
+                    game.plies_played,
+                    game.first_candidate_score_cp,
+                    game.first_fallback_score_cp
+                );
+                if let Some(info) = &game.first_candidate_info_line {
+                    println!("candidate info {}", info);
+                }
+                if let Some(info) = &game.first_fallback_info_line {
+                    println!("baseline info {}", info);
+                }
+            }
+            Ok(())
+        }
         Some("validate-volknnue") => {
             let mut flags = parse_flag_map(args)?;
             let evalfile = take_required_flag(&mut flags, "--evalfile")?;
@@ -368,6 +433,22 @@ fn ensure_no_unknown_flags(
     }
 }
 
+fn candidate_score_fraction(summary: &volkrix::nnue_training::MatchSummary) -> f64 {
+    if summary.games == 0 {
+        return 0.0;
+    }
+
+    (summary.candidate_wins as f64 + 0.5 * summary.draws as f64) / summary.games as f64
+}
+
+fn approximate_elo_from_score(score: f64) -> Option<f64> {
+    if !(0.0..1.0).contains(&score) || score == 0.5 {
+        return None;
+    }
+
+    Some(-400.0 * ((1.0 / score) - 1.0).log10())
+}
+
 fn usage() -> String {
     [
         "usage:",
@@ -377,6 +458,7 @@ fn usage() -> String {
         "  cargo run -p volkrix-nnue -- train-bullet --examples <examples.txt> --checkpoint-dir <dir> [--init-from-checkpoint-dir <prior-dir>] [--batch-size N] [--superbatches N] [--initial-lr F] [--final-lr F]",
         "  cargo run -p volkrix-nnue -- pack-volknnue --checkpoint-dir <dir> --output <net.volknnue>",
         "  cargo run -p volkrix-nnue -- compare-fallback --openings <fens.txt> --candidate <net.volknnue> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N]",
+        "  cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N] [--max-openings N]",
         "  cargo run -p volkrix-nnue -- validate-volknnue --evalfile <net.volknnue>",
     ]
     .join("\n")

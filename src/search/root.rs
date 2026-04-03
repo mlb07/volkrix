@@ -11,6 +11,7 @@ use crate::core::{Move, MoveList, Position, Score, see};
 use super::{
     eval,
     limits::{SearchHeuristics, SearchLimits},
+    movepicker::MovePicker,
     nnue::{NnueSearchState, NnueService},
     qsearch,
     tablebase::{self, TablebaseService},
@@ -23,6 +24,9 @@ pub(crate) const MATE_SCORE: i32 = 30_000;
 const MATE_THRESHOLD: i32 = MATE_SCORE - MAX_PLY as i32;
 const ASPIRATION_DELTA: i32 = 32;
 const HISTORY_MAX: i32 = 16_384;
+const PIECE_TYPE_COUNT: usize = 6;
+
+type ContinuationHistory = [[[[[i16; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchStats {
@@ -88,8 +92,10 @@ pub(crate) struct SearchContext {
     pub(crate) pv_length: [usize; MAX_PLY],
     previous_iteration_pv: [Move; MAX_PLY],
     previous_iteration_pv_length: usize,
+    previous_moves: [Move; MAX_PLY],
     killer_moves: [[Move; 2]; MAX_PLY],
     quiet_history: [[[i16; 64]; 64]; 2],
+    continuation_history: Box<ContinuationHistory>,
     heuristics: SearchHeuristics,
     control: SearchControl,
     tt: Option<Arc<tt::TranspositionTable>>,
@@ -104,9 +110,32 @@ struct SearchDebugCounters {
     lmr_researches: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SearchNodeState {
     pub(crate) is_pv: bool,
+    pub(crate) null_move_allowed: bool,
+}
+
+impl SearchNodeState {
+    const fn new(is_pv: bool) -> Self {
+        Self {
+            is_pv,
+            null_move_allowed: true,
+        }
+    }
+
+    const fn after_null_move() -> Self {
+        Self {
+            is_pv: false,
+            null_move_allowed: false,
+        }
+    }
+}
+
+impl Default for SearchNodeState {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,8 +209,10 @@ impl SearchContext {
             pv_length: [0; MAX_PLY],
             previous_iteration_pv: [Move::NONE; MAX_PLY],
             previous_iteration_pv_length: 0,
+            previous_moves: [Move::NONE; MAX_PLY],
             killer_moves: [[Move::NONE; 2]; MAX_PLY],
             quiet_history: [[[0; 64]; 64]; 2],
+            continuation_history: Box::new([[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2]),
             heuristics: limits.heuristics,
             control,
             tt: tt.or_else(|| {
@@ -425,12 +456,10 @@ impl SearchContext {
 
         let mut best_move = None;
 
-        for index in 0..legal_moves.len() {
+        for mv in MovePicker::new(self, position, &legal_moves, ordering_hints).ordered() {
             if self.hard_stop_requested() {
                 return RootSearchOutcome::Aborted(best_move);
             }
-            self.pick_next_move(position, &mut legal_moves, index, ordering_hints);
-            let mv = legal_moves.get(index);
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("root move must be legal during search");
@@ -441,7 +470,7 @@ impl SearchContext {
                 1,
                 -beta,
                 -alpha,
-                SearchNodeState { is_pv: child_is_pv },
+                SearchNodeState::new(child_is_pv),
             ) else {
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
@@ -483,7 +512,7 @@ impl SearchContext {
                 1,
                 -beta,
                 -alpha,
-                SearchNodeState { is_pv: child_is_pv },
+                SearchNodeState::new(child_is_pv),
             ) else {
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
@@ -593,9 +622,49 @@ impl SearchContext {
         let mut best_move = Move::NONE;
         let mut quiets_searched = 0usize;
 
-        for index in 0..legal_moves.len() {
-            self.pick_next_move(position, &mut legal_moves, index, ordering_hints);
-            let mv = legal_moves.get(index);
+        if null_move_is_eligible(
+            self.heuristics,
+            position,
+            node_state,
+            depth,
+            beta,
+            static_eval,
+            in_check,
+        ) && let Ok(null_undo) = position.make_null_move()
+        {
+            self.set_previous_move(ply + 1, Move::NONE);
+            let reduction = null_move_reduction(depth);
+            let null_beta = (-beta).saturating_add(1).min(INF);
+            let null_score = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                position,
+                depth - 1 - reduction,
+                ply + 1,
+                -beta,
+                null_beta,
+                SearchNodeState::after_null_move(),
+            );
+            position.unmake_null_move(null_undo);
+            self.set_previous_move(ply + 1, Move::NONE);
+
+            if let Some(score) = null_score {
+                if -score >= beta {
+                    self.store_tt(TtStoreInput {
+                        key: tt_key,
+                        depth: depth.min(u8::MAX as usize) as u8,
+                        ply,
+                        best_move: Move::NONE,
+                        static_eval: static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                        score: beta,
+                        bound: Bound::Lower,
+                    });
+                    return Some(beta);
+                }
+            } else {
+                return None;
+            }
+        }
+
+        for mv in MovePicker::new(self, position, &legal_moves, ordering_hints).ordered() {
             let is_quiet = !mv.is_capture() && !mv.is_promotion();
             if is_quiet {
                 quiets_searched += 1;
@@ -604,6 +673,7 @@ impl SearchContext {
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("searched move must be legal");
+            self.previous_moves[ply + 1] = mv;
             let gives_check = position.is_in_check(position.side_to_move());
             let child_is_pv = node_state.is_pv && best_move.is_none();
             let is_hash_move = tt_move_hint == Some(mv);
@@ -627,7 +697,7 @@ impl SearchContext {
                     ply + 1,
                     -beta,
                     -alpha,
-                    SearchNodeState { is_pv: false },
+                    SearchNodeState::new(false),
                 ) else {
                     self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                     return None;
@@ -641,7 +711,7 @@ impl SearchContext {
                         ply + 1,
                         -beta,
                         -alpha,
-                        SearchNodeState { is_pv: false },
+                        SearchNodeState::new(false),
                     )
                     .map(|score| -score)
                 } else {
@@ -654,15 +724,17 @@ impl SearchContext {
                     ply + 1,
                     -beta,
                     -alpha,
-                    SearchNodeState { is_pv: child_is_pv },
+                    SearchNodeState::new(child_is_pv),
                 )
                 .map(|score| -score)
             };
 
             let Some(score) = score_result else {
+                self.previous_moves[ply + 1] = Move::NONE;
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return None;
             };
+            self.previous_moves[ply + 1] = Move::NONE;
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
 
             if score > alpha {
@@ -672,7 +744,7 @@ impl SearchContext {
                 if alpha >= beta {
                     if !mv.is_capture() && !mv.is_promotion() {
                         self.record_killer(ply, mv);
-                        self.record_quiet_cutoff(position, mv, depth);
+                        self.record_quiet_cutoff(position, mv, ply, depth);
                     }
                     break;
                 }
@@ -718,29 +790,6 @@ impl SearchContext {
             .map(|outcome| tablebase::score_from_wdl(outcome, ply))
     }
 
-    pub(crate) fn pick_next_move(
-        &self,
-        position: &Position,
-        moves: &mut MoveList,
-        start: usize,
-        hints: MoveOrderHints,
-    ) {
-        let mut best_index = start;
-        let mut best_score = i32::MIN;
-        for index in start..moves.len() {
-            let mv = moves.get(index);
-            if hints.quiescence_only && !is_quiescence_move(mv, position) {
-                continue;
-            }
-            let score = self.score_move(position, mv, hints);
-            if score > best_score {
-                best_score = score;
-                best_index = index;
-            }
-        }
-        moves.swap(start, best_index);
-    }
-
     pub(crate) fn update_pv(&mut self, ply: usize, mv: Move) {
         self.pv_table[ply][ply] = mv;
         let next_len = self.pv_length[ply + 1];
@@ -776,7 +825,7 @@ impl SearchContext {
         (!mv.is_none()).then_some(mv)
     }
 
-    fn score_move(&self, position: &Position, mv: Move, hints: MoveOrderHints) -> i32 {
+    pub(crate) fn score_move(&self, position: &Position, mv: Move, hints: MoveOrderHints) -> i32 {
         if self.heuristics.pv_move_ordering && hints.pv_move == Some(mv) {
             return 500_000;
         }
@@ -809,6 +858,9 @@ impl SearchContext {
         if self.heuristics.quiet_history {
             quiet_score += self.history_score(position, mv);
         }
+        if self.heuristics.continuation_history {
+            quiet_score += self.continuation_score(position, mv, hints.ply);
+        }
         quiet_score
     }
 
@@ -832,14 +884,62 @@ impl SearchContext {
         self.quiet_history[color][mv.from().index()][mv.to().index()] as i32
     }
 
-    fn record_quiet_cutoff(&mut self, position: &Position, mv: Move, depth: usize) {
-        if !self.heuristics.quiet_history {
+    fn continuation_score(&self, position: &Position, mv: Move, ply: usize) -> i32 {
+        let Some((prev_piece, prev_to)) = self.previous_move_context(position, ply) else {
+            return 0;
+        };
+        let Some(piece) = position.piece_at(mv.from()) else {
+            return 0;
+        };
+        let color = position.side_to_move().index();
+        self.continuation_history[color][prev_piece][prev_to.index()][piece.piece_type().index()]
+            [mv.to().index()] as i32
+    }
+
+    fn previous_move_context(
+        &self,
+        position: &Position,
+        ply: usize,
+    ) -> Option<(usize, crate::core::Square)> {
+        if ply == 0 {
+            return None;
+        }
+
+        let prev = self.previous_moves[ply];
+        if prev.is_none() {
+            return None;
+        }
+        let piece = position.piece_at(prev.to())?;
+        Some((piece.piece_type().index(), prev.to()))
+    }
+
+    fn record_quiet_cutoff(&mut self, position: &Position, mv: Move, ply: usize, depth: usize) {
+        if !self.heuristics.quiet_history && !self.heuristics.continuation_history {
             return;
         }
 
         let bonus = ((depth * depth) as i32 * 32).clamp(32, HISTORY_MAX);
+        if self.heuristics.quiet_history {
+            let color = position.side_to_move().index();
+            let entry = &mut self.quiet_history[color][mv.from().index()][mv.to().index()];
+            let current = *entry as i32;
+            let updated = current + bonus - current * bonus / HISTORY_MAX;
+            *entry = updated.clamp(-HISTORY_MAX, HISTORY_MAX) as i16;
+        }
+
+        if !self.heuristics.continuation_history {
+            return;
+        }
+
+        let Some((prev_piece, prev_to)) = self.previous_move_context(position, ply) else {
+            return;
+        };
+        let Some(piece) = position.piece_at(mv.from()) else {
+            return;
+        };
         let color = position.side_to_move().index();
-        let entry = &mut self.quiet_history[color][mv.from().index()][mv.to().index()];
+        let entry = &mut self.continuation_history[color][prev_piece][prev_to.index()]
+            [piece.piece_type().index()][mv.to().index()];
         let current = *entry as i32;
         let updated = current + bonus - current * bonus / HISTORY_MAX;
         *entry = updated.clamp(-HISTORY_MAX, HISTORY_MAX) as i16;
@@ -932,6 +1032,12 @@ impl SearchContext {
         position.unmake_move(mv, undo);
     }
 
+    pub(crate) fn set_previous_move(&mut self, ply: usize, mv: Move) {
+        if ply < MAX_PLY {
+            self.previous_moves[ply] = mv;
+        }
+    }
+
     pub(crate) fn hard_stop_requested(&self) -> bool {
         self.control
             .stop_flag
@@ -976,6 +1082,30 @@ fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
     reduced_score > alpha
 }
 
+fn null_move_is_eligible(
+    heuristics: SearchHeuristics,
+    position: &Position,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+) -> bool {
+    heuristics.null_move_pruning
+        && node_state.null_move_allowed
+        && !node_state.is_pv
+        && !in_check
+        && depth >= 3
+        && beta > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD
+        && static_eval >= beta
+        && position.has_non_pawn_material(position.side_to_move())
+}
+
+fn null_move_reduction(depth: usize) -> usize {
+    if depth >= 7 { 3 } else { 2 }
+}
+
 impl SearchContext {
     fn helper_root_order(
         &self,
@@ -984,8 +1114,7 @@ impl SearchContext {
         hints: MoveOrderHints,
         helper_index: usize,
     ) -> Vec<Move> {
-        let mut ordered = legal_moves.as_slice().to_vec();
-        ordered.sort_by_key(|mv| std::cmp::Reverse(self.score_move(position, *mv, hints)));
+        let mut ordered = MovePicker::new(self, position, legal_moves, hints).ordered();
 
         let hinted_prefix = ordered
             .iter()
@@ -1121,7 +1250,8 @@ mod tests {
     use super::{
         Bound, LmrCandidate, Move, MoveList, MoveOrderHints, Position, SearchContext,
         SearchHeuristics, SearchLimits, SearchNodeState, lmr_is_eligible,
-        lmr_requires_full_research, tt_cutoff_score, validated_tt_move_hint,
+        lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
+        tt_cutoff_score, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -1279,6 +1409,55 @@ mod tests {
     }
 
     #[test]
+    fn continuation_history_boosts_matching_reply() {
+        let mut position = Position::startpos();
+        let mut initial_moves = MoveList::new();
+        position.generate_legal_moves(&mut initial_moves);
+        let previous_move = initial_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("e2e4").expect("parse must succeed")))
+            .expect("previous move must exist");
+        position
+            .make_move(previous_move)
+            .expect("previous move must be legal");
+
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let boosted = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("g8f6").expect("parse must succeed")))
+            .expect("boosted move must exist");
+        let plain = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("a7a6").expect("parse must succeed")))
+            .expect("plain move must exist");
+
+        let mut context = SearchContext::new(SearchLimits::new(3));
+        context.previous_moves[1] = previous_move;
+        let moved_piece = position
+            .piece_at(boosted.from())
+            .expect("boosted move piece must exist");
+        let entry = &mut context.continuation_history[position.side_to_move().index()]
+            [crate::core::PieceType::Pawn.index()][square("e4").index()]
+            [moved_piece.piece_type().index()][boosted.to().index()];
+        *entry = 4_000;
+
+        let hints = MoveOrderHints {
+            ply: 1,
+            quiescence_only: false,
+            pv_move: None,
+            tt_move: None,
+        };
+        let boosted_score = context.score_move(&position, boosted, hints);
+        let plain_score = context.score_move(&position, plain, hints);
+
+        assert!(boosted_score > plain_score);
+    }
+
+    #[test]
     fn capture_buckets_prefer_non_losing_captures() {
         let position = Position::from_fen("4k3/8/8/5r1q/3N4/8/4p3/4K3 w - - 0 1")
             .expect("FEN parse must succeed");
@@ -1423,7 +1602,7 @@ mod tests {
                 1,
                 -20,
                 20,
-                SearchNodeState { is_pv: false },
+                SearchNodeState::new(false),
             )
             .expect("search must complete");
 
@@ -1435,6 +1614,78 @@ mod tests {
     fn lmr_alpha_raise_requires_full_research() {
         assert!(!lmr_requires_full_research(20, 20));
         assert!(lmr_requires_full_research(21, 20));
+    }
+
+    #[test]
+    fn null_move_pruning_respects_core_guards() {
+        let mut position = Position::startpos();
+        let heuristics = SearchHeuristics::phase8_baseline().with_null_move_pruning(true);
+        let eval = 64;
+
+        assert!(null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            4,
+            32,
+            eval,
+            false,
+        ));
+        assert!(!null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(true),
+            4,
+            32,
+            eval,
+            false,
+        ));
+        assert!(!null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::after_null_move(),
+            4,
+            32,
+            eval,
+            false,
+        ));
+        assert!(!null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            2,
+            32,
+            eval,
+            false,
+        ));
+        assert!(!null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            4,
+            32,
+            16,
+            false,
+        ));
+
+        position = Position::from_fen("8/8/8/8/3k4/8/4p3/3K4 b - - 0 1")
+            .expect("FEN parse must succeed");
+        assert!(!null_move_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            4,
+            32,
+            eval,
+            false,
+        ));
+    }
+
+    #[test]
+    fn null_move_reduction_grows_with_depth() {
+        assert_eq!(null_move_reduction(3), 2);
+        assert_eq!(null_move_reduction(6), 2);
+        assert_eq!(null_move_reduction(7), 3);
     }
 
     #[test]
@@ -1460,7 +1711,7 @@ mod tests {
                 3,
                 -super::INF,
                 super::INF,
-                SearchNodeState { is_pv: false },
+                SearchNodeState::new(false),
             )
             .expect("tablebase substitution must return a score");
 

@@ -4,8 +4,10 @@ pub(crate) struct SearchHeuristics {
     pub(crate) capture_buckets: bool,
     pub(crate) killer_moves: bool,
     pub(crate) quiet_history: bool,
+    pub(crate) continuation_history: bool,
     pub(crate) aspiration_windows: bool,
     pub(crate) late_move_reductions: bool,
+    pub(crate) null_move_pruning: bool,
 }
 
 impl SearchHeuristics {
@@ -15,8 +17,10 @@ impl SearchHeuristics {
             capture_buckets: true,
             killer_moves: true,
             quiet_history: true,
+            continuation_history: false,
             aspiration_windows: true,
             late_move_reductions: false,
+            null_move_pruning: false,
         }
     }
 
@@ -26,8 +30,10 @@ impl SearchHeuristics {
             capture_buckets: true,
             killer_moves: true,
             quiet_history: true,
+            continuation_history: true,
             aspiration_windows: true,
             late_move_reductions: true,
+            null_move_pruning: true,
         }
     }
 
@@ -38,6 +44,12 @@ impl SearchHeuristics {
 
     pub(crate) const fn with_late_move_reductions(mut self, enabled: bool) -> Self {
         self.late_move_reductions = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn with_null_move_pruning(mut self, enabled: bool) -> Self {
+        self.null_move_pruning = enabled;
         self
     }
 }
