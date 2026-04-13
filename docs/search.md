@@ -21,42 +21,47 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
 - terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
 
-## Uncommitted Search Handoff
+## Current Search Candidate Status
 
-As of the current working tree, the search layer has been rolled back to the last stronger proven classical state from commit `cacaa10` and this rollback is intentionally **not committed yet**.
+The current committed search bundle reintroduced a staged move picker and selective-search work on top of the older stronger classical baseline.
 
-Files restored to the `cacaa10` search state in the working tree:
+Current search-specific changes in the committed tree include:
 
-- `src/search/limits.rs`
-- `src/search/mod.rs`
-- `src/search/qsearch.rs`
-- `src/search/root.rs`
-- `src/search/movepicker.rs` removed from the working tree
+- staged move picking in `src/search/movepicker.rs`
+- continuation-history scoring for quiet replies
+- null-move pruning backed by reversible null moves in `Position`
+- qsearch and root search refactors to consume the staged picker
+- an external-engine comparison tool in `tools/volkrix-nnue` for same-machine A/B match testing
 
-Reason for the rollback:
+What is currently proved against the immediate pre-search-change baseline `e9a5a06`:
 
-- the later search bundle in `1f18ee3` searched far fewer nodes, but match testing showed it was weaker than the `cacaa10` classical baseline
-- the strongest practical current classical configuration remained the older search behavior plus the newer classical-eval terms
-- targeted ablations showed the biggest single regression source was aggressive selective pruning, especially reverse futility pruning, but no narrower forward fix was proved stronger than the restored `cacaa10` search state
+- proxy bench improved from `623756` nodes / checksum `5873b4276c1d4c51` to `655322` nodes / checksum `5873b44162c8b651`
+- wall-clock bench time on the same machine dropped from `803 ms` to `482 ms`
+- `cargo test --quiet --lib search::root` passed
+- `cargo test --quiet --test search` passed
+- `cargo test --quiet --test uci` passed
 
-Evidence collected for the rollback candidate in the current working tree:
+What is not yet proved:
 
-- proxy bench: `623756` nodes, checksum `5873b4276c1d4c51`
-- match vs clean `HEAD` search binary: `6W 8D 2L`
-- match vs clean `cacaa10` binary: `2W 12D 2L`
+- no Elo gain is established yet
+- quick same-machine matches versus `e9a5a06` were fully neutral in the first samples
+- `4` games over `2` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 4D 0L`
+- `16` games over `8` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 16D 0L`
+- `8` games over `4` expanded openings at `--movetime-ms 50 --max-plies 60`: `0W 8D 0L`
 
-Validation notes:
+Current interpretation:
 
-- `cargo test --lib search::root` passed
-- `cargo test --test search` passed
-- `cargo clippy --all-targets --all-features -- -D warnings` still fails on unrelated existing issues in `src/core/position.rs`, `src/nnue_training.rs`, and `src/search/nnue.rs`
-- the benchmark regression test in `tests/tt.rs` still fails because that file currently carries unrelated dirty expectations from another agent
+- the search bundle clearly changes node counts, checksums, and wall time
+- the search bundle is not currently justified as an Elo improvement
+- until a longer match produces a real score edge, treat this as a performance-positive but strength-unproven candidate
 
 Future-agent guidance:
 
-- treat this rollback as the current strongest uncommitted classical-search candidate unless new match evidence disproves it
-- do not assume the later `1f18ee3` search bundle is stronger just because it searches fewer nodes
-- if further search work resumes, compare against this rollback candidate, not only against committed `HEAD`
+- do not claim Elo gain from this search bundle based on bench movement alone
+- if search tuning resumes, compare directly against `e9a5a06` or another explicitly recorded strong baseline binary
+- prefer the external-engine match workflow over checksum-only reasoning
+- `cargo run -p volkrix-nnue -- expand-fens --input tests/data/nnue/phase13-fixture.fens --output /tmp/volkrix-openings.fens --max-plies 4 --branching 3 --max-positions 96`
+- `cargo run -p volkrix-nnue -- compare-engines --openings /tmp/volkrix-openings.fens --baseline <baseline-bin> --candidate <candidate-bin> --movetime-ms <n> --max-plies <n> --max-openings <n>`
 
 ## Current Classical Eval Status
 
@@ -74,17 +79,50 @@ What is currently proved:
 
 - the targeted eval test suite covers these terms directly in `tests/eval.rs`
 - the eval path remains deterministic and does not mutate position state in the covered tests
+- the classical evaluator now exposes a parameterized `ClassicalEvalWeights` surface while preserving default behavior, so offline tuning can vary weights without changing engine code shape
+- the offline toolchain now includes a first-pass `texel-tune` command that reads retained examples files and fits classical weights offline
+- a first tuned candidate on `96` depth-2 search-labeled expanded positions improved offline loss:
+- train log-loss `0.694556 -> 0.693712`
+- validation log-loss `0.691864 -> 0.690567`
+- a stronger follow-up corpus on `256` expanded positions with quiet-filtered depth-2 search labels produced `84` examples, but the tuned candidate was not better:
+- train log-loss `0.692744 -> 0.692738`
+- validation log-loss `0.692891 -> 0.692899`
+- a depth-3 pass on a smaller curated expanded corpus improved offline loss but the direct tuned weights were too aggressive to promote unchanged
+- a broader depth-2 pass on a `64`-position expanded curated corpus improved offline loss:
+- `any` corpus: train log-loss `0.694906 -> 0.693533`, validation log-loss `0.690616 -> 0.688720`
+- `quiet` corpus: train log-loss `0.692755 -> 0.692683`
+- the low-risk `quiet`-subset candidate was promoted into the current default classical weights with these effective deltas from the old defaults:
+- knight mobility `4 -> 7`
+- bishop mobility `5 -> 8`
+- queen mobility `1 -> 3`
+- phalanx pawn bonus `8 -> 12`
+- pawn-threat-vs-minor `12 -> 13`
+- that candidate produced the first positive same-machine match score against the frozen pre-tuning baseline binary:
+- `64` games over `32` expanded curated openings at `--movetime-ms 10 --max-plies 60`: `4W 58D 2L`, score `51.6%`, approximate Elo `+10.9`
 
 What is not yet proved:
 
-- these terms do not yet have match evidence proving Elo gain
-- they should be treated as plausible classical improvements until proxy bench and match testing support them
+- the current positive match result is still a small same-machine sample, not a statistically solid Elo claim
+- the current tuner is a score-target logistic tuning pass over retained examples data, not yet a large-scale game-result Texel workflow with proven Elo gains
+- the first tuned candidate was neutral in a same-machine engine match and was not kept as the default evaluator:
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 60`: `0W 16D 0L`
+- several more aggressive depth-3-derived candidates stayed neutral or regressed on broader follow-up matches, so the current default keeps only the low-risk quiet-subset deltas above
 
 Future-agent guidance:
 
 - record any new classical-eval terms and their evidence here or in a more specific eval handoff note
 - do not claim Elo gain from classical-eval edits unless match evidence supports it
 - if search work is in flight elsewhere, keep eval changes isolated from search-logic edits
+- for Texel tuning, start from the new parameterized classical weights in `src/search/eval.rs` instead of editing constants in-place
+- current first-pass workflow:
+- `cargo run -p volkrix-nnue -- export-examples --input <fens.txt> --output /tmp/volkrix.examples [--label-mode search|static]`
+- `cargo run -p volkrix-nnue -- texel-tune --examples /tmp/volkrix.examples --output /tmp/volkrix-weights.json [--iterations N] [--step N] [--sigmoid-scale F] [--regularization F] [--max-examples N]`
+- after tuning, treat the emitted weights JSON as a candidate artifact first; do not replace default eval weights without a match result
+- the most useful workflow so far was:
+- `cargo run -p volkrix-nnue -- expand-fens --input <seed-fens> --output /tmp/volkrix-expanded.fens --max-plies 4 --branching 3 --max-positions 64`
+- `cargo run -p volkrix-nnue -- export-examples --input /tmp/volkrix-expanded.fens --output /tmp/volkrix-expanded-d2-quiet.examples --label-depth 2 --label-mode search --workers 4 --tt off --position-filter quiet`
+- `cargo run -p volkrix-nnue -- texel-tune --examples /tmp/volkrix-expanded-d2-quiet.examples --output /tmp/volkrix-expanded-d2-quiet.weights.json --iterations 12 --step 8 --regularization 0.000001`
+- promote only the low-risk overlapping deltas that survive eval tests and then validate with `compare-engines`
 - for baseline-vs-candidate classical testing, prefer `cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N]`
 
 ## Current NNUE Runtime Model

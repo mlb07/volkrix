@@ -8,6 +8,10 @@ mod movepicker;
 pub(crate) mod nnue;
 mod qsearch;
 mod root;
+#[cfg(feature = "offline-tools")]
+#[doc(hidden)]
+pub mod service;
+#[cfg(not(feature = "offline-tools"))]
 pub(crate) mod service;
 pub(crate) mod tablebase;
 mod tt;

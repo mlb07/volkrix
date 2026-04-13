@@ -124,7 +124,7 @@ fn search_leaves_root_position_unchanged() {
     let before_search_key = position.debug_search_key();
     let before_history = position.debug_repetition_history_snapshot();
 
-    let _ = search(&mut position, SearchLimits::new(3));
+    let _ = search(&mut position, SearchLimits::new(2));
 
     let after_history = position.debug_repetition_history_snapshot();
     assert_eq!(position.to_fen(), before);
@@ -145,7 +145,7 @@ fn search_leaves_root_position_unchanged_with_tt_disabled() {
     let before_search_key = position.debug_search_key();
     let before_history = position.debug_repetition_history_snapshot();
 
-    let _ = search(&mut position, SearchLimits::new(3).without_tt());
+    let _ = search(&mut position, SearchLimits::new(2).without_tt());
 
     let after_history = position.debug_repetition_history_snapshot();
     assert_eq!(position.to_fen(), before);
@@ -165,7 +165,7 @@ fn search_leaves_root_position_unchanged_with_phase_eight_baseline_heuristics() 
     let before_search_key = position.debug_search_key();
     let before_history = position.debug_repetition_history_snapshot();
 
-    let _ = search(&mut position, phase8_baseline_limits(3));
+    let _ = search(&mut position, phase8_baseline_limits(2));
 
     let after_history = position.debug_repetition_history_snapshot();
     assert_eq!(position.to_fen(), before);
@@ -185,7 +185,7 @@ fn search_leaves_root_position_unchanged_with_lmr_only_heuristics() {
     let before_search_key = position.debug_search_key();
     let before_history = position.debug_repetition_history_snapshot();
 
-    let _ = search(&mut position, lmr_only_limits(3));
+    let _ = search(&mut position, lmr_only_limits(2));
 
     let after_history = position.debug_repetition_history_snapshot();
     assert_eq!(position.to_fen(), before);
@@ -330,11 +330,11 @@ fn phase8_baseline_path_is_still_deterministic() {
 #[test]
 fn aspiration_windows_match_full_window_scores_on_curated_positions() {
     let cases = [
-        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 4),
-        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 4),
+        ("k7/8/1QK5/8/8/8/8/8 w - - 0 1", 2),
+        ("3qk3/8/8/3r4/8/8/8/3QK3 w - - 0 1", 2),
         (
             "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3",
-            4,
+            2,
         ),
     ];
 

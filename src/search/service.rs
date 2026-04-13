@@ -12,6 +12,7 @@ use crate::core::Position;
 
 use super::{
     SearchLimits, SearchResult,
+    eval,
     nnue::NnueService,
     root::{self, SearchControl, SearchThreadRole},
     tablebase::TablebaseService,
@@ -22,11 +23,12 @@ pub(crate) const DEFAULT_THREADS: usize = 1;
 pub(crate) const MAX_THREADS: usize = 64;
 
 #[derive(Clone)]
-pub(crate) struct SearchRequest {
-    pub(crate) limits: SearchLimits,
-    pub(crate) soft_deadline: Option<Instant>,
-    pub(crate) hard_deadline: Option<Instant>,
-    pub(crate) stop_flag: Option<Arc<AtomicBool>>,
+#[doc(hidden)]
+pub struct SearchRequest {
+    pub limits: SearchLimits,
+    pub soft_deadline: Option<Instant>,
+    pub hard_deadline: Option<Instant>,
+    pub stop_flag: Option<Arc<AtomicBool>>,
 }
 
 struct WorkerJob {
@@ -35,6 +37,7 @@ struct WorkerJob {
     tt: Arc<TranspositionTable>,
     nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
+    classical_weights: Option<eval::ClassicalEvalWeights>,
     control: SearchControl,
     done_sender: Sender<()>,
 }
@@ -46,6 +49,7 @@ struct HelperSearchSpec<'a> {
     tt: Arc<TranspositionTable>,
     nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
+    classical_weights: Option<eval::ClassicalEvalWeights>,
     stop_flag: Option<Arc<AtomicBool>>,
     helper_stop_flag: Arc<AtomicBool>,
     soft_deadline: Option<Instant>,
@@ -95,6 +99,7 @@ impl WorkerPool {
                 tt: Arc::clone(&spec.tt),
                 nnue: spec.nnue.clone(),
                 tablebases: spec.tablebases.clone(),
+                classical_weights: spec.classical_weights,
                 control: SearchControl {
                     stop_flag: spec.stop_flag.clone(),
                     helper_stop_flag: Some(Arc::clone(&spec.helper_stop_flag)),
@@ -148,7 +153,8 @@ impl Drop for WorkerPool {
     }
 }
 
-pub(crate) struct UciSearchService {
+#[doc(hidden)]
+pub struct UciSearchService {
     hash_mb: usize,
     threads: usize,
     syzygy_path: String,
@@ -156,11 +162,12 @@ pub(crate) struct UciSearchService {
     tt: Arc<TranspositionTable>,
     nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
+    classical_weights: Option<eval::ClassicalEvalWeights>,
     workers: WorkerPool,
 }
 
 impl UciSearchService {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             hash_mb: DEFAULT_HASH_MB,
             threads: DEFAULT_THREADS,
@@ -169,6 +176,7 @@ impl UciSearchService {
             tt: Arc::new(TranspositionTable::new_mb(DEFAULT_HASH_MB)),
             nnue: None,
             tablebases: None,
+            classical_weights: None,
             workers: WorkerPool::new(),
         }
     }
@@ -189,8 +197,14 @@ impl UciSearchService {
         &self.eval_file
     }
 
-    pub(crate) fn set_threads(&mut self, threads: usize) {
+    pub fn set_threads(&mut self, threads: usize) {
         self.threads = threads.clamp(1, MAX_THREADS);
+    }
+
+    #[cfg(feature = "offline-tools")]
+    #[doc(hidden)]
+    pub fn set_classical_weights(&mut self, weights: Option<eval::ClassicalEvalWeights>) {
+        self.classical_weights = weights;
     }
 
     pub(crate) fn set_syzygy_path(&mut self, path: &str) -> Result<(), String> {
@@ -229,17 +243,17 @@ impl UciSearchService {
         Ok(())
     }
 
-    pub(crate) fn resize_hash(&mut self, hash_mb: usize) {
+    pub fn resize_hash(&mut self, hash_mb: usize) {
         let hash_mb = hash_mb.max(1);
         self.hash_mb = hash_mb;
         self.tt = Arc::new(TranspositionTable::new_mb(hash_mb));
     }
 
-    pub(crate) fn clear_hash(&mut self) {
+    pub fn clear_hash(&mut self) {
         self.tt.clear();
     }
 
-    pub(crate) fn search(
+    pub fn search(
         &mut self,
         position: &mut Position,
         request: SearchRequest,
@@ -253,6 +267,7 @@ impl UciSearchService {
                 limits.tt_enabled.then(|| Arc::clone(&self.tt)),
                 self.nnue.clone(),
                 self.tablebases.clone(),
+                self.classical_weights,
                 SearchControl {
                     stop_flag: request.stop_flag,
                     helper_stop_flag: None,
@@ -272,6 +287,7 @@ impl UciSearchService {
             tt: Arc::clone(&self.tt),
             nnue: self.nnue.clone(),
             tablebases: self.tablebases.clone(),
+            classical_weights: self.classical_weights,
             stop_flag: request.stop_flag.clone(),
             helper_stop_flag: Arc::clone(&helper_stop_flag),
             soft_deadline: request.soft_deadline,
@@ -284,6 +300,7 @@ impl UciSearchService {
             Some(Arc::clone(&self.tt)),
             self.nnue.clone(),
             self.tablebases.clone(),
+            self.classical_weights,
             SearchControl {
                 stop_flag: request.stop_flag,
                 helper_stop_flag: Some(Arc::clone(&helper_stop_flag)),
@@ -388,6 +405,7 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
                     Some(job.tt),
                     job.nnue,
                     job.tablebases,
+                    job.classical_weights,
                     job.control,
                 );
                 let _ = job.done_sender.send(());

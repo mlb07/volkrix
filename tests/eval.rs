@@ -2,7 +2,14 @@
 
 use volkrix::{
     core::Position,
-    search::{eval::debug_evaluate_breakdown, evaluate, internal::debug_evaluate_with_tiny_nnue},
+    search::{
+        eval::{
+            ClassicalEvalWeights, debug_evaluate_breakdown, debug_evaluate_breakdown_with_weights,
+            evaluate_with_weights,
+        },
+        evaluate,
+        internal::debug_evaluate_with_tiny_nnue,
+    },
 };
 
 #[test]
@@ -41,6 +48,70 @@ fn eval_is_deterministic_and_does_not_mutate_position_state() {
     assert_eq!(position.debug_search_key(), before_search_key);
     assert_eq!(position.debug_repetition_history_snapshot(), before_history);
     position.validate().expect("position must remain valid");
+}
+
+#[test]
+fn default_classical_weights_are_pinned_and_wired_into_evaluate() {
+    let positions = [
+        Position::startpos(),
+        Position::from_fen("r2q1rk1/ppp2ppp/2npbn2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8")
+            .expect("FEN parse must succeed"),
+        Position::from_fen("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1")
+            .expect("FEN parse must succeed"),
+    ];
+    let weights = ClassicalEvalWeights::default();
+    let expected = ClassicalEvalWeights {
+        mg_values: [100, 325, 335, 500, 900, 0],
+        eg_values: [100, 310, 345, 520, 900, 0],
+        knight_mobility: volkrix::search::eval::PhaseScore { mg: 7, eg: 3 },
+        bishop_mobility: volkrix::search::eval::PhaseScore { mg: 8, eg: 5 },
+        rook_mobility: volkrix::search::eval::PhaseScore { mg: 2, eg: 4 },
+        queen_mobility: volkrix::search::eval::PhaseScore { mg: 3, eg: 2 },
+        knight_outpost_bonus: volkrix::search::eval::PhaseScore { mg: 18, eg: 10 },
+        bishop_pair_bonus: volkrix::search::eval::PhaseScore { mg: 28, eg: 42 },
+        doubled_pawn_penalty: volkrix::search::eval::PhaseScore { mg: 10, eg: 14 },
+        isolated_pawn_penalty: volkrix::search::eval::PhaseScore { mg: 12, eg: 10 },
+        pawn_island_penalty: volkrix::search::eval::PhaseScore { mg: 8, eg: 10 },
+        phalanx_pawn_bonus: volkrix::search::eval::PhaseScore { mg: 12, eg: 12 },
+        open_file_rook_bonus: volkrix::search::eval::PhaseScore { mg: 18, eg: 12 },
+        semi_open_file_rook_bonus: volkrix::search::eval::PhaseScore { mg: 10, eg: 6 },
+        rook_on_seventh_bonus: volkrix::search::eval::PhaseScore { mg: 10, eg: 24 },
+        passed_pawn_bonus: [
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+            volkrix::search::eval::PhaseScore { mg: 8, eg: 10 },
+            volkrix::search::eval::PhaseScore { mg: 14, eg: 20 },
+            volkrix::search::eval::PhaseScore { mg: 24, eg: 36 },
+            volkrix::search::eval::PhaseScore { mg: 40, eg: 62 },
+            volkrix::search::eval::PhaseScore { mg: 68, eg: 104 },
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+        ],
+        protected_passed_pawn_bonus: [
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+            volkrix::search::eval::PhaseScore { mg: 4, eg: 8 },
+            volkrix::search::eval::PhaseScore { mg: 8, eg: 14 },
+            volkrix::search::eval::PhaseScore { mg: 12, eg: 20 },
+            volkrix::search::eval::PhaseScore { mg: 18, eg: 28 },
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+            volkrix::search::eval::PhaseScore { mg: 0, eg: 0 },
+        ],
+        pawn_threat_minor: volkrix::search::eval::PhaseScore { mg: 13, eg: 8 },
+        pawn_threat_rook: volkrix::search::eval::PhaseScore { mg: 18, eg: 12 },
+        pawn_threat_queen: volkrix::search::eval::PhaseScore { mg: 26, eg: 18 },
+        minor_threat_rook: volkrix::search::eval::PhaseScore { mg: 10, eg: 8 },
+        minor_threat_queen: volkrix::search::eval::PhaseScore { mg: 14, eg: 10 },
+    };
+
+    assert_eq!(weights, expected);
+
+    for position in positions {
+        assert_eq!(evaluate(&position), evaluate_with_weights(&position, &weights));
+        assert_eq!(
+            debug_evaluate_breakdown(&position),
+            debug_evaluate_breakdown_with_weights(&position, &weights)
+        );
+    }
 }
 
 #[test]

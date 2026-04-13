@@ -96,6 +96,7 @@ pub(crate) struct SearchContext {
     killer_moves: [[Move; 2]; MAX_PLY],
     quiet_history: [[[i16; 64]; 64]; 2],
     continuation_history: Box<ContinuationHistory>,
+    classical_weights: Option<eval::ClassicalEvalWeights>,
     heuristics: SearchHeuristics,
     control: SearchControl,
     tt: Option<Arc<tt::TranspositionTable>>,
@@ -169,7 +170,7 @@ pub(crate) struct MoveOrderHints {
 }
 
 pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
-    search_with_control(position, limits, None, None, None, SearchControl::default())
+    search_with_control(position, limits, None, None, None, None, SearchControl::default())
 }
 
 pub(crate) fn search_with_control(
@@ -178,9 +179,11 @@ pub(crate) fn search_with_control(
     tt: Option<Arc<tt::TranspositionTable>>,
     nnue: Option<Arc<NnueService>>,
     tablebases: Option<Arc<TablebaseService>>,
+    classical_weights: Option<eval::ClassicalEvalWeights>,
     control: SearchControl,
 ) -> SearchResult {
-    SearchContext::with_tt(limits, tt, nnue, tablebases, control).run(position, limits)
+    SearchContext::with_tt(limits, tt, nnue, tablebases, classical_weights, control)
+        .run(position, limits)
 }
 
 enum RootSearchOutcome {
@@ -191,7 +194,7 @@ enum RootSearchOutcome {
 impl SearchContext {
     #[cfg(test)]
     pub(crate) fn new(limits: SearchLimits) -> Self {
-        Self::with_tt(limits, None, None, None, SearchControl::default())
+        Self::with_tt(limits, None, None, None, None, SearchControl::default())
     }
 
     fn with_tt(
@@ -199,6 +202,7 @@ impl SearchContext {
         tt: Option<Arc<tt::TranspositionTable>>,
         nnue: Option<Arc<NnueService>>,
         tablebases: Option<Arc<TablebaseService>>,
+        classical_weights: Option<eval::ClassicalEvalWeights>,
         control: SearchControl,
     ) -> Self {
         Self {
@@ -213,6 +217,7 @@ impl SearchContext {
             killer_moves: [[Move::NONE; 2]; MAX_PLY],
             quiet_history: [[[0; 64]; 64]; 2],
             continuation_history: Box::new([[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2]),
+            classical_weights,
             heuristics: limits.heuristics,
             control,
             tt: tt.or_else(|| {
@@ -998,7 +1003,11 @@ impl SearchContext {
                 .evaluate(position)
                 .0
         } else {
-            eval::evaluate(position).0
+            self.classical_weights
+                .as_ref()
+                .map_or_else(|| eval::evaluate(position).0, |weights| {
+                    eval::evaluate_with_weights(position, weights).0
+                })
         }
     }
 
@@ -1701,6 +1710,7 @@ mod tests {
             None,
             None,
             Some(tablebases),
+            None,
             super::SearchControl::default(),
         );
 
@@ -1732,6 +1742,7 @@ mod tests {
             None,
             None,
             Some(tablebases),
+            None,
             super::SearchControl::default(),
         );
 

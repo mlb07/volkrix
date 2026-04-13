@@ -4,51 +4,12 @@ const TOTAL_PHASE: i32 = 24;
 const FILE_CENTRALITY: [i32; 8] = [0, 4, 8, 12, 12, 8, 4, 0];
 const RANK_CENTRALITY: [i32; 8] = [0, 4, 8, 12, 12, 8, 4, 0];
 const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
-const MG_VALUES: [i32; 6] = [100, 325, 335, 500, 900, 0];
-const EG_VALUES: [i32; 6] = [100, 310, 345, 520, 900, 0];
-const KNIGHT_MOBILITY: PhaseScore = PhaseScore::new(4, 3);
-const BISHOP_MOBILITY: PhaseScore = PhaseScore::new(5, 5);
-const ROOK_MOBILITY: PhaseScore = PhaseScore::new(2, 4);
-const QUEEN_MOBILITY: PhaseScore = PhaseScore::new(1, 2);
-const KNIGHT_OUTPOST_BONUS: PhaseScore = PhaseScore::new(18, 10);
-const BISHOP_PAIR_BONUS: PhaseScore = PhaseScore::new(28, 42);
-const DOUBLED_PAWN_PENALTY: PhaseScore = PhaseScore::new(10, 14);
-const ISOLATED_PAWN_PENALTY: PhaseScore = PhaseScore::new(12, 10);
-const PAWN_ISLAND_PENALTY: PhaseScore = PhaseScore::new(8, 10);
-const PHALANX_PAWN_BONUS: PhaseScore = PhaseScore::new(8, 12);
-const OPEN_FILE_ROOK_BONUS: PhaseScore = PhaseScore::new(18, 12);
-const SEMI_OPEN_FILE_ROOK_BONUS: PhaseScore = PhaseScore::new(10, 6);
-const ROOK_ON_SEVENTH_BONUS: PhaseScore = PhaseScore::new(10, 24);
-const PASSED_PAWN_BONUS: [PhaseScore; 8] = [
-    PhaseScore::new(0, 0),
-    PhaseScore::new(8, 10),
-    PhaseScore::new(14, 20),
-    PhaseScore::new(24, 36),
-    PhaseScore::new(40, 62),
-    PhaseScore::new(68, 104),
-    PhaseScore::new(0, 0),
-    PhaseScore::new(0, 0),
-];
-const PROTECTED_PASSED_PAWN_BONUS: [PhaseScore; 8] = [
-    PhaseScore::new(0, 0),
-    PhaseScore::new(0, 0),
-    PhaseScore::new(4, 8),
-    PhaseScore::new(8, 14),
-    PhaseScore::new(12, 20),
-    PhaseScore::new(18, 28),
-    PhaseScore::new(0, 0),
-    PhaseScore::new(0, 0),
-];
-const PAWN_THREAT_MINOR: PhaseScore = PhaseScore::new(12, 8);
-const PAWN_THREAT_ROOK: PhaseScore = PhaseScore::new(18, 12);
-const PAWN_THREAT_QUEEN: PhaseScore = PhaseScore::new(26, 18);
-const MINOR_THREAT_ROOK: PhaseScore = PhaseScore::new(10, 8);
-const MINOR_THREAT_QUEEN: PhaseScore = PhaseScore::new(14, 10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct PhaseScore {
-    mg: i32,
-    eg: i32,
+#[cfg_attr(feature = "offline-tools", derive(serde::Serialize, serde::Deserialize))]
+pub struct PhaseScore {
+    pub mg: i32,
+    pub eg: i32,
 }
 
 impl PhaseScore {
@@ -73,6 +34,80 @@ impl std::ops::Sub for PhaseScore {
 
     fn sub(self, rhs: Self) -> Self::Output {
         Self::new(self.mg - rhs.mg, self.eg - rhs.eg)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "offline-tools", derive(serde::Serialize, serde::Deserialize))]
+pub struct ClassicalEvalWeights {
+    pub mg_values: [i32; 6],
+    pub eg_values: [i32; 6],
+    pub knight_mobility: PhaseScore,
+    pub bishop_mobility: PhaseScore,
+    pub rook_mobility: PhaseScore,
+    pub queen_mobility: PhaseScore,
+    pub knight_outpost_bonus: PhaseScore,
+    pub bishop_pair_bonus: PhaseScore,
+    pub doubled_pawn_penalty: PhaseScore,
+    pub isolated_pawn_penalty: PhaseScore,
+    pub pawn_island_penalty: PhaseScore,
+    pub phalanx_pawn_bonus: PhaseScore,
+    pub open_file_rook_bonus: PhaseScore,
+    pub semi_open_file_rook_bonus: PhaseScore,
+    pub rook_on_seventh_bonus: PhaseScore,
+    pub passed_pawn_bonus: [PhaseScore; 8],
+    pub protected_passed_pawn_bonus: [PhaseScore; 8],
+    pub pawn_threat_minor: PhaseScore,
+    pub pawn_threat_rook: PhaseScore,
+    pub pawn_threat_queen: PhaseScore,
+    pub minor_threat_rook: PhaseScore,
+    pub minor_threat_queen: PhaseScore,
+}
+
+impl Default for ClassicalEvalWeights {
+    fn default() -> Self {
+        Self {
+            mg_values: [100, 325, 335, 500, 900, 0],
+            eg_values: [100, 310, 345, 520, 900, 0],
+            knight_mobility: PhaseScore::new(7, 3),
+            bishop_mobility: PhaseScore::new(8, 5),
+            rook_mobility: PhaseScore::new(2, 4),
+            queen_mobility: PhaseScore::new(3, 2),
+            knight_outpost_bonus: PhaseScore::new(18, 10),
+            bishop_pair_bonus: PhaseScore::new(28, 42),
+            doubled_pawn_penalty: PhaseScore::new(10, 14),
+            isolated_pawn_penalty: PhaseScore::new(12, 10),
+            pawn_island_penalty: PhaseScore::new(8, 10),
+            phalanx_pawn_bonus: PhaseScore::new(12, 12),
+            open_file_rook_bonus: PhaseScore::new(18, 12),
+            semi_open_file_rook_bonus: PhaseScore::new(10, 6),
+            rook_on_seventh_bonus: PhaseScore::new(10, 24),
+            passed_pawn_bonus: [
+                PhaseScore::new(0, 0),
+                PhaseScore::new(8, 10),
+                PhaseScore::new(14, 20),
+                PhaseScore::new(24, 36),
+                PhaseScore::new(40, 62),
+                PhaseScore::new(68, 104),
+                PhaseScore::new(0, 0),
+                PhaseScore::new(0, 0),
+            ],
+            protected_passed_pawn_bonus: [
+                PhaseScore::new(0, 0),
+                PhaseScore::new(0, 0),
+                PhaseScore::new(4, 8),
+                PhaseScore::new(8, 14),
+                PhaseScore::new(12, 20),
+                PhaseScore::new(18, 28),
+                PhaseScore::new(0, 0),
+                PhaseScore::new(0, 0),
+            ],
+            pawn_threat_minor: PhaseScore::new(13, 8),
+            pawn_threat_rook: PhaseScore::new(18, 12),
+            pawn_threat_queen: PhaseScore::new(26, 18),
+            minor_threat_rook: PhaseScore::new(10, 8),
+            minor_threat_queen: PhaseScore::new(14, 10),
+        }
     }
 }
 
@@ -119,7 +154,11 @@ impl EvalTerms {
 }
 
 pub fn evaluate(position: &Position) -> Score {
-    let breakdown = evaluate_breakdown(position);
+    evaluate_with_weights(position, &ClassicalEvalWeights::default())
+}
+
+pub fn evaluate_with_weights(position: &Position, weights: &ClassicalEvalWeights) -> Score {
+    let breakdown = evaluate_breakdown_with_weights(position, weights);
     let score = match position.side_to_move() {
         Color::White => breakdown.blended,
         Color::Black => -breakdown.blended,
@@ -130,13 +169,27 @@ pub fn evaluate(position: &Position) -> Score {
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
 #[doc(hidden)]
 pub fn debug_evaluate_breakdown(position: &Position) -> EvalBreakdown {
-    evaluate_breakdown(position)
+    evaluate_breakdown_with_weights(position, &ClassicalEvalWeights::default())
 }
 
-fn evaluate_breakdown(position: &Position) -> EvalBreakdown {
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "internal-testing",
+    feature = "offline-tools"
+))]
+#[doc(hidden)]
+pub fn debug_evaluate_breakdown_with_weights(
+    position: &Position,
+    weights: &ClassicalEvalWeights,
+) -> EvalBreakdown {
+    evaluate_breakdown_with_weights(position, weights)
+}
+
+fn evaluate_breakdown_with_weights(position: &Position, weights: &ClassicalEvalWeights) -> EvalBreakdown {
     let phase = game_phase(position);
-    let white = evaluate_color(position, Color::White);
-    let black = evaluate_color(position, Color::Black);
+    let white = evaluate_color(position, Color::White, weights);
+    let black = evaluate_color(position, Color::Black, weights);
     let diff = white.total() - black.total();
 
     EvalBreakdown {
@@ -157,29 +210,36 @@ fn evaluate_breakdown(position: &Position) -> EvalBreakdown {
     }
 }
 
-fn evaluate_color(position: &Position, color: Color) -> EvalTerms {
+fn evaluate_color(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> EvalTerms {
     EvalTerms {
-        material_and_piece_square: material_and_piece_square(position, color),
-        mobility: mobility(position, color),
+        material_and_piece_square: material_and_piece_square(position, color, weights),
+        mobility: mobility(position, color, weights),
         king_safety: king_safety(position, color),
-        pawn_structure: pawn_structure(position, color),
-        passed_pawns: passed_pawns(position, color),
-        bishop_pair: bishop_pair(color, position),
-        rook_placement: rook_placement(position, color),
-        threats: threats(position, color),
+        pawn_structure: pawn_structure(position, color, weights),
+        passed_pawns: passed_pawns(position, color, weights),
+        bishop_pair: bishop_pair(color, position, weights),
+        rook_placement: rook_placement(position, color, weights),
+        threats: threats(position, color, weights),
     }
 }
 
-fn material_and_piece_square(position: &Position, color: Color) -> PhaseScore {
+fn material_and_piece_square(
+    position: &Position,
+    color: Color,
+    weights: &ClassicalEvalWeights,
+) -> PhaseScore {
     let mut score = PhaseScore::default();
     let own_pawns = position.pieces(color, PieceType::Pawn);
     let enemy_pawns = position.pieces(color.opposite(), PieceType::Pawn);
     for piece_type in PieceType::ALL {
         let mut pieces = position.pieces(color, piece_type);
         while let Some(square) = pop_lsb(&mut pieces) {
-            score += PhaseScore::new(MG_VALUES[piece_type.index()], EG_VALUES[piece_type.index()]);
+            score += PhaseScore::new(
+                weights.mg_values[piece_type.index()],
+                weights.eg_values[piece_type.index()],
+            );
             score += piece_square_term(piece_type, color, square);
-            score += piece_positional_term(piece_type, color, square, own_pawns, enemy_pawns);
+            score += piece_positional_term(piece_type, color, square, own_pawns, enemy_pawns, weights);
         }
     }
     score
@@ -207,16 +267,17 @@ fn piece_positional_term(
     square: Square,
     own_pawns: u64,
     enemy_pawns: u64,
+    weights: &ClassicalEvalWeights,
 ) -> PhaseScore {
     match piece_type {
         PieceType::Knight if knight_is_supported_outpost(color, square, own_pawns, enemy_pawns) => {
-            KNIGHT_OUTPOST_BONUS
+            weights.knight_outpost_bonus
         }
         _ => PhaseScore::default(),
     }
 }
 
-fn mobility(position: &Position, color: Color) -> PhaseScore {
+fn mobility(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let occupied = position.occupancy();
     let friendly = position.occupancy_by(color);
     let mut score = PhaseScore::default();
@@ -224,7 +285,7 @@ fn mobility(position: &Position, color: Color) -> PhaseScore {
     let mut knights = position.pieces(color, PieceType::Knight);
     while let Some(square) = pop_lsb(&mut knights) {
         score += scale_by_count(
-            KNIGHT_MOBILITY,
+            weights.knight_mobility,
             (attacks::knight_attacks(square) & !friendly).count_ones() as i32,
         );
     }
@@ -232,7 +293,7 @@ fn mobility(position: &Position, color: Color) -> PhaseScore {
     let mut bishops = position.pieces(color, PieceType::Bishop);
     while let Some(square) = pop_lsb(&mut bishops) {
         score += scale_by_count(
-            BISHOP_MOBILITY,
+            weights.bishop_mobility,
             (attacks::bishop_attacks(square, occupied) & !friendly).count_ones() as i32,
         );
     }
@@ -240,7 +301,7 @@ fn mobility(position: &Position, color: Color) -> PhaseScore {
     let mut rooks = position.pieces(color, PieceType::Rook);
     while let Some(square) = pop_lsb(&mut rooks) {
         score += scale_by_count(
-            ROOK_MOBILITY,
+            weights.rook_mobility,
             (attacks::rook_attacks(square, occupied) & !friendly).count_ones() as i32,
         );
     }
@@ -248,7 +309,7 @@ fn mobility(position: &Position, color: Color) -> PhaseScore {
     let mut queens = position.pieces(color, PieceType::Queen);
     while let Some(square) = pop_lsb(&mut queens) {
         score += scale_by_count(
-            QUEEN_MOBILITY,
+            weights.queen_mobility,
             (attacks::queen_attacks(square, occupied) & !friendly).count_ones() as i32,
         );
     }
@@ -300,7 +361,7 @@ fn pawn_shield(color: Color, king_square: Square, pawns: u64) -> PhaseScore {
     score
 }
 
-fn pawn_structure(position: &Position, color: Color) -> PhaseScore {
+fn pawn_structure(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let pawns = position.pieces(color, PieceType::Pawn);
     let mut score = PhaseScore::default();
     let mut islands = 0i32;
@@ -314,7 +375,7 @@ fn pawn_structure(position: &Position, color: Color) -> PhaseScore {
         }
         previous_file_occupied = file_has_pawn;
         if pawns_on_file > 1 {
-            score += scale_by_count(DOUBLED_PAWN_PENALTY, -(pawns_on_file - 1));
+            score += scale_by_count(weights.doubled_pawn_penalty, -(pawns_on_file - 1));
         }
         if pawns_on_file == 0 {
             continue;
@@ -323,22 +384,22 @@ fn pawn_structure(position: &Position, color: Color) -> PhaseScore {
         let left = file.checked_sub(1).map(file_mask).unwrap_or(0);
         let right = if file < 7 { file_mask(file + 1) } else { 0 };
         if pawns & (left | right) == 0 {
-            score += scale_by_count(ISOLATED_PAWN_PENALTY, -pawns_on_file);
+            score += scale_by_count(weights.isolated_pawn_penalty, -pawns_on_file);
         }
     }
 
     let phalanx_pairs = count_phalanx_pairs(pawns);
     if phalanx_pairs > 0 {
-        score += scale_by_count(PHALANX_PAWN_BONUS, phalanx_pairs);
+        score += scale_by_count(weights.phalanx_pawn_bonus, phalanx_pairs);
     }
     if islands > 1 {
-        score += scale_by_count(PAWN_ISLAND_PENALTY, -(islands - 1));
+        score += scale_by_count(weights.pawn_island_penalty, -(islands - 1));
     }
 
     score
 }
 
-fn passed_pawns(position: &Position, color: Color) -> PhaseScore {
+fn passed_pawns(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let mut pawns = position.pieces(color, PieceType::Pawn);
     let own_pawns = pawns;
     let mut score = PhaseScore::default();
@@ -346,9 +407,9 @@ fn passed_pawns(position: &Position, color: Color) -> PhaseScore {
     while let Some(square) = pop_lsb(&mut pawns) {
         if is_passed_pawn(position, color, square) {
             let relative_rank = relative_rank(color, square) as usize;
-            score += PASSED_PAWN_BONUS[relative_rank];
+            score += weights.passed_pawn_bonus[relative_rank];
             if pawn_is_protected_by_friendly_pawn(color, square, own_pawns) {
-                score += PROTECTED_PASSED_PAWN_BONUS[relative_rank];
+                score += weights.protected_passed_pawn_bonus[relative_rank];
             }
         }
     }
@@ -356,15 +417,15 @@ fn passed_pawns(position: &Position, color: Color) -> PhaseScore {
     score
 }
 
-fn bishop_pair(color: Color, position: &Position) -> PhaseScore {
+fn bishop_pair(color: Color, position: &Position, weights: &ClassicalEvalWeights) -> PhaseScore {
     if position.pieces(color, PieceType::Bishop).count_ones() >= 2 {
-        BISHOP_PAIR_BONUS
+        weights.bishop_pair_bonus
     } else {
         PhaseScore::default()
     }
 }
 
-fn rook_placement(position: &Position, color: Color) -> PhaseScore {
+fn rook_placement(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let rooks = position.pieces(color, PieceType::Rook);
     let own_pawns = position.pieces(color, PieceType::Pawn);
     let enemy_pawns = position.pieces(color.opposite(), PieceType::Pawn);
@@ -376,13 +437,13 @@ fn rook_placement(position: &Position, color: Color) -> PhaseScore {
         let own_file_pawns = own_pawns & file_mask(file);
         let enemy_file_pawns = enemy_pawns & file_mask(file);
         if relative_rank(color, square) == 6 && enemy_pawns != 0 {
-            score += ROOK_ON_SEVENTH_BONUS;
+            score += weights.rook_on_seventh_bonus;
         }
         if own_file_pawns == 0 {
             score += if enemy_file_pawns == 0 {
-                OPEN_FILE_ROOK_BONUS
+                weights.open_file_rook_bonus
             } else {
-                SEMI_OPEN_FILE_ROOK_BONUS
+                weights.semi_open_file_rook_bonus
             };
         }
     }
@@ -390,7 +451,7 @@ fn rook_placement(position: &Position, color: Color) -> PhaseScore {
     score
 }
 
-fn threats(position: &Position, color: Color) -> PhaseScore {
+fn threats(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let enemy = color.opposite();
     let enemy_knights = position.pieces(enemy, PieceType::Knight);
     let enemy_bishops = position.pieces(enemy, PieceType::Bishop);
@@ -416,23 +477,23 @@ fn threats(position: &Position, color: Color) -> PhaseScore {
 
     let mut score = PhaseScore::default();
     score += scale_by_count(
-        PAWN_THREAT_MINOR,
+        weights.pawn_threat_minor,
         (pawn_attacks_all & (enemy_knights | enemy_bishops)).count_ones() as i32,
     );
     score += scale_by_count(
-        PAWN_THREAT_ROOK,
+        weights.pawn_threat_rook,
         (pawn_attacks_all & enemy_rooks).count_ones() as i32,
     );
     score += scale_by_count(
-        PAWN_THREAT_QUEEN,
+        weights.pawn_threat_queen,
         (pawn_attacks_all & enemy_queens).count_ones() as i32,
     );
     score += scale_by_count(
-        MINOR_THREAT_ROOK,
+        weights.minor_threat_rook,
         (minor_attacks_all & enemy_rooks).count_ones() as i32,
     );
     score += scale_by_count(
-        MINOR_THREAT_QUEEN,
+        weights.minor_threat_queen,
         (minor_attacks_all & enemy_queens).count_ones() as i32,
     );
     score

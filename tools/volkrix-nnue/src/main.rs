@@ -1,10 +1,14 @@
 use std::path::Path;
 
 mod bullet_trainer;
+mod classical_match;
 mod engine_match;
+mod texel_tuning;
 
 use bullet_trainer::{BulletTrainingConfig, train_bullet, train_bullet_with_config};
+use classical_match::{ClassicalMatchConfig, compare_classical_weights};
 use engine_match::compare_external_engines;
+use texel_tuning::{TexelTuningConfig, tune_from_examples};
 use volkrix::nnue_training::{
     CorpusExpansionConfig, LabelGenerationConfig, LabelMode, MatchConfig, MatchMode,
     PositionFilter, SelfPlayCorpusConfig, compare_candidate_vs_fallback, expand_fen_corpus,
@@ -321,6 +325,94 @@ fn run() -> Result<(), String> {
             }
             Ok(())
         }
+        Some("compare-classical-weights") => {
+            let mut flags = parse_flag_map(args)?;
+            let openings = take_required_flag(&mut flags, "--openings")?;
+            let candidate_weights = take_required_flag(&mut flags, "--candidate-weights")?;
+            let baseline_weights =
+                parse_optional_flag::<String>(&mut flags, "--baseline-weights")?;
+            let depth = parse_optional_flag(&mut flags, "--depth")?.unwrap_or(4);
+            let max_plies = parse_optional_flag(&mut flags, "--max-plies")?.unwrap_or(120usize);
+            let max_openings = parse_optional_flag(&mut flags, "--max-openings")?;
+            ensure_no_unknown_flags(flags)?;
+            let summary = compare_classical_weights(
+                Path::new(&openings),
+                baseline_weights.as_deref().map(Path::new),
+                Path::new(&candidate_weights),
+                ClassicalMatchConfig {
+                    depth,
+                    max_plies,
+                    max_openings,
+                },
+            )?;
+            let score = candidate_score_fraction(&summary);
+            println!(
+                "candidate vs baseline weights: {} games over {} openings => {}W {}D {}L score {:.1}%",
+                summary.games,
+                summary.openings,
+                summary.candidate_wins,
+                summary.draws,
+                summary.fallback_wins,
+                score * 100.0
+            );
+            if let Some(elo) = approximate_elo_from_score(score) {
+                println!("approximate Elo difference from score rate: {elo:+.1}");
+            }
+            for game in summary.game_summaries.iter().take(4) {
+                println!(
+                    "game candidate {:?} opening '{}' outcome {:?} plies {} candidate_score {:?} baseline_score {:?}",
+                    game.candidate_color,
+                    game.opening_fen,
+                    game.outcome,
+                    game.plies_played,
+                    game.first_candidate_score_cp,
+                    game.first_fallback_score_cp
+                );
+                if let Some(info) = &game.first_candidate_info_line {
+                    println!("candidate info {}", info);
+                }
+                if let Some(info) = &game.first_fallback_info_line {
+                    println!("baseline info {}", info);
+                }
+            }
+            Ok(())
+        }
+        Some("texel-tune") => {
+            let mut flags = parse_flag_map(args)?;
+            let examples = take_required_flag(&mut flags, "--examples")?;
+            let output = take_required_flag(&mut flags, "--output")?;
+            let config = TexelTuningConfig {
+                iterations: parse_optional_flag(&mut flags, "--iterations")?.unwrap_or(6),
+                initial_step: parse_optional_flag(&mut flags, "--step")?.unwrap_or(8),
+                sigmoid_scale: parse_optional_flag(&mut flags, "--sigmoid-scale")?
+                    .unwrap_or(400.0),
+                regularization: parse_optional_flag(&mut flags, "--regularization")?
+                    .unwrap_or(1e-6),
+                max_examples: parse_optional_flag(&mut flags, "--max-examples")?,
+            };
+            ensure_no_unknown_flags(flags)?;
+            let summary = tune_from_examples(Path::new(&examples), Path::new(&output), config)?;
+            println!(
+                "texel tuned {} train / {} validation examples in {} iterations with {} accepted updates",
+                summary.train_examples,
+                summary.validation_examples,
+                summary.iterations_run,
+                summary.accepted_updates
+            );
+            println!(
+                "train log-loss {:.6} -> {:.6}",
+                summary.initial_train_loss,
+                summary.final_train_loss
+            );
+            if let (Some(initial), Some(final_)) = (
+                summary.initial_validation_loss,
+                summary.final_validation_loss,
+            ) {
+                println!("validation log-loss {:.6} -> {:.6}", initial, final_);
+            }
+            println!("wrote tuned weights '{}'", summary.output_path.display());
+            Ok(())
+        }
         Some("validate-volknnue") => {
             let mut flags = parse_flag_map(args)?;
             let evalfile = take_required_flag(&mut flags, "--evalfile")?;
@@ -459,6 +551,8 @@ fn usage() -> String {
         "  cargo run -p volkrix-nnue -- pack-volknnue --checkpoint-dir <dir> --output <net.volknnue>",
         "  cargo run -p volkrix-nnue -- compare-fallback --openings <fens.txt> --candidate <net.volknnue> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N]",
         "  cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N] [--max-openings N]",
+        "  cargo run -p volkrix-nnue -- compare-classical-weights --openings <fens.txt> --candidate-weights <weights.json> [--baseline-weights <weights.json>] [--depth N] [--max-plies N] [--max-openings N]",
+        "  cargo run -p volkrix-nnue -- texel-tune --examples <examples.txt> --output <weights.json> [--iterations N] [--step N] [--sigmoid-scale F] [--regularization F] [--max-examples N]",
         "  cargo run -p volkrix-nnue -- validate-volknnue --evalfile <net.volknnue>",
     ]
     .join("\n")
@@ -580,7 +674,7 @@ mod tests {
                 depth: 4,
                 tt_enabled: true,
                 hash_mb: 32,
-                mode: LabelMode::Search,
+                mode: LabelMode::StaticEval,
                 workers: 1,
                 position_filter: PositionFilter::Any,
                 label_timeout_ms: Some(10_000),
@@ -591,7 +685,7 @@ mod tests {
         assert_eq!(manifest.label_depth, 4);
         assert!(manifest.tt_enabled);
         assert_eq!(manifest.hash_mb, 32);
-        assert_eq!(manifest.label_mode, LabelMode::Search);
+        assert_eq!(manifest.label_mode, LabelMode::StaticEval);
         assert_eq!(manifest.export_workers, 1);
         assert_eq!(manifest.position_filter, PositionFilter::Any);
         assert_eq!(manifest.label_timeout_ms, Some(10_000));
