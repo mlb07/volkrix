@@ -109,6 +109,11 @@ pub(crate) struct SearchContext {
 struct SearchDebugCounters {
     lmr_reductions: u32,
     lmr_researches: u32,
+    pvs_scout_searches: u32,
+    pvs_full_researches: u32,
+    reverse_futility_prunes: u32,
+    futility_prunes: u32,
+    late_move_prunes: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,7 +175,15 @@ pub(crate) struct MoveOrderHints {
 }
 
 pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
-    search_with_control(position, limits, None, None, None, None, SearchControl::default())
+    search_with_control(
+        position,
+        limits,
+        None,
+        None,
+        None,
+        None,
+        SearchControl::default(),
+    )
 }
 
 pub(crate) fn search_with_control(
@@ -216,7 +229,9 @@ impl SearchContext {
             previous_moves: [Move::NONE; MAX_PLY],
             killer_moves: [[Move::NONE; 2]; MAX_PLY],
             quiet_history: [[[0; 64]; 64]; 2],
-            continuation_history: Box::new([[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2]),
+            continuation_history: Box::new(
+                [[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2],
+            ),
             classical_weights,
             heuristics: limits.heuristics,
             control,
@@ -468,20 +483,56 @@ impl SearchContext {
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("root move must be legal during search");
-            let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
-                position,
-                depth.saturating_sub(1),
-                1,
-                -beta,
-                -alpha,
-                SearchNodeState::new(child_is_pv),
-            ) else {
+            self.set_previous_move(1, mv);
+            let score_result = if best_move.is_none() {
+                self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth.saturating_sub(1),
+                    1,
+                    -beta,
+                    -alpha,
+                    SearchNodeState::new(true),
+                )
+                .map(|score| -score)
+            } else {
+                self.debug_counters.pvs_scout_searches += 1;
+                let scout_beta = -alpha;
+                let scout_alpha = scout_beta.saturating_sub(1);
+                let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth.saturating_sub(1),
+                    1,
+                    scout_alpha,
+                    scout_beta,
+                    SearchNodeState::new(false),
+                ) else {
+                    self.set_previous_move(1, Move::NONE);
+                    self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                    return RootSearchOutcome::Aborted(best_move);
+                };
+                let score = -score;
+                if score > alpha {
+                    self.debug_counters.pvs_full_researches += 1;
+                    self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                        position,
+                        depth.saturating_sub(1),
+                        1,
+                        -beta,
+                        -alpha,
+                        SearchNodeState::new(true),
+                    )
+                    .map(|score| -score)
+                } else {
+                    Some(score)
+                }
+            };
+            let Some(score) = score_result else {
+                self.set_previous_move(1, Move::NONE);
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
             };
+            self.set_previous_move(1, Move::NONE);
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
-            let score = -score;
 
             if score > alpha || best_move.is_none() {
                 alpha = score;
@@ -510,20 +561,56 @@ impl SearchContext {
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("helper root move must be legal during search");
-            let child_is_pv = best_move.is_none();
-            let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
-                position,
-                depth.saturating_sub(1),
-                1,
-                -beta,
-                -alpha,
-                SearchNodeState::new(child_is_pv),
-            ) else {
+            self.set_previous_move(1, mv);
+            let score_result = if best_move.is_none() {
+                self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth.saturating_sub(1),
+                    1,
+                    -beta,
+                    -alpha,
+                    SearchNodeState::new(true),
+                )
+                .map(|score| -score)
+            } else {
+                self.debug_counters.pvs_scout_searches += 1;
+                let scout_beta = -alpha;
+                let scout_alpha = scout_beta.saturating_sub(1);
+                let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth.saturating_sub(1),
+                    1,
+                    scout_alpha,
+                    scout_beta,
+                    SearchNodeState::new(false),
+                ) else {
+                    self.set_previous_move(1, Move::NONE);
+                    self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                    return RootSearchOutcome::Aborted(best_move);
+                };
+                let score = -score;
+                if score > alpha {
+                    self.debug_counters.pvs_full_researches += 1;
+                    self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                        position,
+                        depth.saturating_sub(1),
+                        1,
+                        -beta,
+                        -alpha,
+                        SearchNodeState::new(true),
+                    )
+                    .map(|score| -score)
+                } else {
+                    Some(score)
+                }
+            };
+            let Some(score) = score_result else {
+                self.set_previous_move(1, Move::NONE);
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return RootSearchOutcome::Aborted(best_move);
             };
+            self.set_previous_move(1, Move::NONE);
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
-            let score = -score;
 
             if score > alpha || best_move.is_none() {
                 alpha = score;
@@ -625,6 +712,7 @@ impl SearchContext {
             tt_move: tt_move_hint,
         };
         let mut best_move = Move::NONE;
+        let mut searched_moves = 0usize;
         let mut quiets_searched = 0usize;
 
         if null_move_is_eligible(
@@ -669,6 +757,28 @@ impl SearchContext {
             }
         }
 
+        if reverse_futility_is_eligible(
+            self.heuristics,
+            position,
+            node_state,
+            depth,
+            beta,
+            static_eval,
+            in_check,
+        ) {
+            self.debug_counters.reverse_futility_prunes += 1;
+            self.store_tt(TtStoreInput {
+                key: tt_key,
+                depth: depth.min(u8::MAX as usize) as u8,
+                ply,
+                best_move: Move::NONE,
+                static_eval: static_eval.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+                score: beta,
+                bound: Bound::Lower,
+            });
+            return Some(beta);
+        }
+
         for mv in MovePicker::new(self, position, &legal_moves, ordering_hints).ordered() {
             let is_quiet = !mv.is_capture() && !mv.is_promotion();
             if is_quiet {
@@ -682,6 +792,44 @@ impl SearchContext {
             let gives_check = position.is_in_check(position.side_to_move());
             let child_is_pv = node_state.is_pv && best_move.is_none();
             let is_hash_move = tt_move_hint == Some(mv);
+            let has_searched_move = searched_moves > 0;
+
+            if futility_pruning_is_eligible(
+                self.heuristics,
+                node_state,
+                depth,
+                alpha,
+                static_eval,
+                in_check,
+                mv,
+                gives_check,
+                is_hash_move,
+                has_searched_move,
+            ) {
+                self.debug_counters.futility_prunes += 1;
+                self.previous_moves[ply + 1] = Move::NONE;
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                continue;
+            }
+
+            if late_move_pruning_is_eligible(
+                self.heuristics,
+                node_state,
+                depth,
+                alpha,
+                static_eval,
+                in_check,
+                mv,
+                gives_check,
+                is_hash_move,
+                has_searched_move,
+                quiets_searched,
+            ) {
+                self.debug_counters.late_move_prunes += 1;
+                self.previous_moves[ply + 1] = Move::NONE;
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                continue;
+            }
 
             let score_result = if lmr_is_eligible(
                 self.heuristics,
@@ -722,7 +870,7 @@ impl SearchContext {
                 } else {
                     Some(reduced_score)
                 }
-            } else {
+            } else if best_move.is_none() {
                 self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth - 1,
@@ -732,6 +880,37 @@ impl SearchContext {
                     SearchNodeState::new(child_is_pv),
                 )
                 .map(|score| -score)
+            } else {
+                self.debug_counters.pvs_scout_searches += 1;
+                let scout_beta = -alpha;
+                let scout_alpha = scout_beta.saturating_sub(1);
+                let Some(score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth - 1,
+                    ply + 1,
+                    scout_alpha,
+                    scout_beta,
+                    SearchNodeState::new(false),
+                ) else {
+                    self.previous_moves[ply + 1] = Move::NONE;
+                    self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                    return None;
+                };
+                let score = -score;
+                if score > alpha {
+                    self.debug_counters.pvs_full_researches += 1;
+                    self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                        position,
+                        depth - 1,
+                        ply + 1,
+                        -beta,
+                        -alpha,
+                        SearchNodeState::new(node_state.is_pv),
+                    )
+                    .map(|score| -score)
+                } else {
+                    Some(score)
+                }
             };
 
             let Some(score) = score_result else {
@@ -739,6 +918,7 @@ impl SearchContext {
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return None;
             };
+            searched_moves += 1;
             self.previous_moves[ply + 1] = Move::NONE;
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
 
@@ -821,9 +1001,14 @@ impl SearchContext {
     }
 
     pub(crate) fn previous_pv_move(&self, ply: usize) -> Option<Move> {
-        if !self.heuristics.pv_move_ordering || ply != 0 || ply >= self.previous_iteration_pv_length
-        {
+        if !self.heuristics.pv_move_ordering || ply >= self.previous_iteration_pv_length {
             return None;
+        }
+
+        for index in 0..ply {
+            if self.previous_moves[index + 1] != self.previous_iteration_pv[index] {
+                return None;
+            }
         }
 
         let mv = self.previous_iteration_pv[ply];
@@ -1003,11 +1188,10 @@ impl SearchContext {
                 .evaluate(position)
                 .0
         } else {
-            self.classical_weights
-                .as_ref()
-                .map_or_else(|| eval::evaluate(position).0, |weights| {
-                    eval::evaluate_with_weights(position, weights).0
-                })
+            self.classical_weights.as_ref().map_or_else(
+                || eval::evaluate(position).0,
+                |weights| eval::evaluate_with_weights(position, weights).0,
+            )
         }
     }
 
@@ -1089,6 +1273,87 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
 
 fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
     reduced_score > alpha
+}
+
+fn reverse_futility_is_eligible(
+    heuristics: SearchHeuristics,
+    position: &Position,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+) -> bool {
+    heuristics.reverse_futility_pruning
+        && !node_state.is_pv
+        && !in_check
+        && depth <= 2
+        && beta > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD
+        && static_eval >= beta + reverse_futility_margin(depth)
+        && position.has_non_pawn_material(position.side_to_move())
+}
+
+fn reverse_futility_margin(depth: usize) -> i32 {
+    120 * depth as i32
+}
+
+fn futility_pruning_is_eligible(
+    heuristics: SearchHeuristics,
+    node_state: SearchNodeState,
+    depth: usize,
+    alpha: i32,
+    static_eval: i32,
+    in_check: bool,
+    mv: Move,
+    gives_check: bool,
+    is_hash_move: bool,
+    has_searched_move: bool,
+) -> bool {
+    heuristics.futility_pruning
+        && !node_state.is_pv
+        && !in_check
+        && depth <= 2
+        && !mv.is_capture()
+        && !mv.is_promotion()
+        && !gives_check
+        && !is_hash_move
+        && has_searched_move
+        && static_eval + futility_margin(depth) <= alpha
+}
+
+fn late_move_pruning_is_eligible(
+    heuristics: SearchHeuristics,
+    node_state: SearchNodeState,
+    depth: usize,
+    alpha: i32,
+    static_eval: i32,
+    in_check: bool,
+    mv: Move,
+    gives_check: bool,
+    is_hash_move: bool,
+    has_searched_move: bool,
+    quiets_searched: usize,
+) -> bool {
+    heuristics.late_move_pruning
+        && !node_state.is_pv
+        && !in_check
+        && depth <= 3
+        && !mv.is_capture()
+        && !mv.is_promotion()
+        && !gives_check
+        && !is_hash_move
+        && has_searched_move
+        && static_eval + futility_margin(depth) <= alpha
+        && quiets_searched > late_move_pruning_threshold(depth)
+}
+
+fn futility_margin(depth: usize) -> i32 {
+    120 * depth as i32
+}
+
+fn late_move_pruning_threshold(depth: usize) -> usize {
+    6 + depth * 3
 }
 
 fn null_move_is_eligible(
@@ -1258,9 +1523,10 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 mod tests {
     use super::{
         Bound, LmrCandidate, Move, MoveList, MoveOrderHints, Position, SearchContext,
-        SearchHeuristics, SearchLimits, SearchNodeState, lmr_is_eligible,
-        lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
-        tt_cutoff_score, validated_tt_move_hint,
+        SearchHeuristics, SearchLimits, SearchNodeState, futility_pruning_is_eligible,
+        late_move_pruning_is_eligible, lmr_is_eligible, lmr_requires_full_research,
+        null_move_is_eligible, null_move_reduction, reverse_futility_is_eligible, tt_cutoff_score,
+        validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -1467,6 +1733,80 @@ mod tests {
     }
 
     #[test]
+    fn previous_iteration_pv_hint_extends_below_root_when_prefix_matches() {
+        let mut root = Position::startpos();
+        let mut root_moves = MoveList::new();
+        root.generate_legal_moves(&mut root_moves);
+        let e2e4 = root_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("e2e4").expect("parse must succeed")))
+            .expect("e2e4 must exist");
+
+        root.make_move(e2e4).expect("e2e4 must be legal");
+        let mut after_e4_moves = MoveList::new();
+        root.generate_legal_moves(&mut after_e4_moves);
+        let e7e5 = after_e4_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("e7e5").expect("parse must succeed")))
+            .expect("e7e5 must exist");
+
+        root.make_move(e7e5).expect("e7e5 must be legal");
+        let mut after_e4e5_moves = MoveList::new();
+        root.generate_legal_moves(&mut after_e4e5_moves);
+        let g1f3 = after_e4e5_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("g1f3").expect("parse must succeed")))
+            .expect("g1f3 must exist");
+
+        let mut context = SearchContext::new(SearchLimits::new(4));
+        context.previous_iteration_pv[0] = e2e4;
+        context.previous_iteration_pv[1] = e7e5;
+        context.previous_iteration_pv[2] = g1f3;
+        context.previous_iteration_pv_length = 3;
+
+        assert_eq!(context.previous_pv_move(0), Some(e2e4));
+
+        context.previous_moves[1] = e2e4;
+        assert_eq!(context.previous_pv_move(1), Some(e7e5));
+
+        context.previous_moves[2] = e7e5;
+        assert_eq!(context.previous_pv_move(2), Some(g1f3));
+    }
+
+    #[test]
+    fn previous_iteration_pv_hint_is_withheld_on_prefix_mismatch() {
+        let mut position = Position::startpos();
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let e2e4 = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("e2e4").expect("parse must succeed")))
+            .expect("e2e4 must exist");
+        let d2d4 = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("d2d4").expect("parse must succeed")))
+            .expect("d2d4 must exist");
+        let e2e3 = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("e2e3").expect("parse must succeed")))
+            .expect("placeholder move must exist");
+
+        let mut context = SearchContext::new(SearchLimits::new(4));
+        context.previous_iteration_pv[0] = e2e4;
+        context.previous_iteration_pv[1] = e2e3;
+        context.previous_iteration_pv_length = 2;
+        context.previous_moves[1] = d2d4;
+
+        assert_eq!(context.previous_pv_move(1), None);
+    }
+
+    #[test]
     fn capture_buckets_prefer_non_losing_captures() {
         let position = Position::from_fen("4k3/8/8/5r1q/3N4/8/4p3/4K3 w - - 0 1")
             .expect("FEN parse must succeed");
@@ -1605,14 +1945,7 @@ mod tests {
         let mut context = SearchContext::new(limits);
 
         let _ = context
-            .alpha_beta(
-                &mut position,
-                4,
-                1,
-                -20,
-                20,
-                SearchNodeState::new(false),
-            )
+            .alpha_beta(&mut position, 4, 1, -20, 20, SearchNodeState::new(false))
             .expect("search must complete");
 
         assert!(context.debug_counters().lmr_reductions > 0);
@@ -1620,9 +1953,214 @@ mod tests {
     }
 
     #[test]
+    fn pvs_uses_scout_windows_and_full_researches() {
+        let mut position = Position::startpos();
+        let mut context = SearchContext::new(SearchLimits::new(5));
+
+        let _ = context
+            .alpha_beta(&mut position, 4, 1, -20, 20, SearchNodeState::new(true))
+            .expect("search must complete");
+
+        assert!(context.debug_counters().pvs_scout_searches > 0);
+        assert!(context.debug_counters().pvs_full_researches > 0);
+    }
+
+    #[test]
     fn lmr_alpha_raise_requires_full_research() {
         assert!(!lmr_requires_full_research(20, 20));
         assert!(lmr_requires_full_research(21, 20));
+    }
+
+    #[test]
+    fn reverse_futility_pruning_respects_core_guards() {
+        let position = Position::startpos();
+        let heuristics = SearchHeuristics::phase8_baseline().with_reverse_futility_pruning(true);
+
+        assert!(reverse_futility_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            2,
+            32,
+            300,
+            false,
+        ));
+        assert!(!reverse_futility_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(true),
+            2,
+            32,
+            256,
+            false,
+        ));
+        assert!(!reverse_futility_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            4,
+            32,
+            256,
+            false,
+        ));
+        assert!(!reverse_futility_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            2,
+            32,
+            100,
+            false,
+        ));
+        assert!(!reverse_futility_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(false),
+            2,
+            32,
+            256,
+            true,
+        ));
+    }
+
+    #[test]
+    fn futility_pruning_respects_core_guards() {
+        let heuristics = SearchHeuristics::phase8_baseline().with_futility_pruning(true);
+        let quiet = Move::new(square("a2"), square("a3"));
+        let capture = quiet.with_flags(FLAG_CAPTURE);
+
+        assert!(futility_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            2,
+            300,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+        ));
+        assert!(!futility_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(true),
+            2,
+            300,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+        ));
+        assert!(!futility_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            300,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+        ));
+        assert!(!futility_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            2,
+            300,
+            0,
+            false,
+            capture,
+            false,
+            false,
+            true,
+        ));
+        assert!(!futility_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            2,
+            300,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn late_move_pruning_respects_core_guards() {
+        let heuristics = SearchHeuristics::phase8_baseline().with_late_move_pruning(true);
+        let quiet = Move::new(square("a2"), square("a3"));
+
+        assert!(late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            400,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+            16,
+        ));
+        assert!(!late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(true),
+            3,
+            400,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+            16,
+        ));
+        assert!(!late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            4,
+            400,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+            16,
+        ));
+        assert!(!late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            300,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+            8,
+        ));
+        assert!(!late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            400,
+            0,
+            false,
+            quiet,
+            false,
+            true,
+            true,
+            16,
+        ));
     }
 
     #[test]
@@ -1677,8 +2215,8 @@ mod tests {
             false,
         ));
 
-        position = Position::from_fen("8/8/8/8/3k4/8/4p3/3K4 b - - 0 1")
-            .expect("FEN parse must succeed");
+        position =
+            Position::from_fen("8/8/8/8/3k4/8/4p3/3K4 b - - 0 1").expect("FEN parse must succeed");
         assert!(!null_move_is_eligible(
             heuristics,
             &position,
@@ -1695,6 +2233,50 @@ mod tests {
         assert_eq!(null_move_reduction(3), 2);
         assert_eq!(null_move_reduction(6), 2);
         assert_eq!(null_move_reduction(7), 3);
+    }
+
+    #[test]
+    fn reverse_futility_pruning_triggers_in_search() {
+        let mut position =
+            Position::from_fen("4k3/8/8/8/8/8/8/R3K3 w - - 0 1").expect("FEN parse must succeed");
+        let limits = SearchLimits::new(3).with_heuristics(
+            SearchHeuristics::phase8_baseline().with_reverse_futility_pruning(true),
+        );
+        let mut context = SearchContext::new(limits);
+
+        let _ = context
+            .alpha_beta(&mut position, 2, 1, -50, 50, SearchNodeState::new(false))
+            .expect("search must complete");
+
+        assert!(context.debug_counters().reverse_futility_prunes > 0);
+    }
+
+    #[test]
+    fn futility_pruning_triggers_in_search() {
+        let mut position = Position::startpos();
+        let limits = SearchLimits::new(3)
+            .with_heuristics(SearchHeuristics::phase8_baseline().with_futility_pruning(true));
+        let mut context = SearchContext::new(limits);
+
+        let _ = context
+            .alpha_beta(&mut position, 2, 1, 300, 320, SearchNodeState::new(false))
+            .expect("search must complete");
+
+        assert!(context.debug_counters().futility_prunes > 0);
+    }
+
+    #[test]
+    fn late_move_pruning_triggers_in_search() {
+        let mut position = Position::startpos();
+        let limits = SearchLimits::new(4)
+            .with_heuristics(SearchHeuristics::phase8_baseline().with_late_move_pruning(true));
+        let mut context = SearchContext::new(limits);
+
+        let _ = context
+            .alpha_beta(&mut position, 3, 1, 400, 420, SearchNodeState::new(false))
+            .expect("search must complete");
+
+        assert!(context.debug_counters().late_move_prunes > 0);
     }
 
     #[test]

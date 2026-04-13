@@ -26,6 +26,7 @@ Current project priority:
 - only changes with evidence-backed Elo improvement matter
 - before returning to broader NNUE work, priority is to maximize the retained classical engine path first
 - that means classical eval, classical search, and their validation workflow take precedence over new NNUE feature work
+- when repository docs and engine behavior disagree, trust the code first and then fix the docs to match it
 
 What is intentionally not here yet:
 

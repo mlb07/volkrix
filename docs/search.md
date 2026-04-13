@@ -16,6 +16,7 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 - stronger move ordering through root PV hints, SEE-informed capture buckets, killer moves, and quiet history
 - aspiration windows around iterative deepening
 - basic quiet-only late move reductions at eligible later quiet moves only
+- conservative non-PV selective pruning through null move, a tightened shallow reverse futility guard, shallow futility, and shallow late-move pruning
 - a conservative Lazy SMP Layer I when `Threads > 1`
 - an optional tablebase boundary controlled by `SyzygyPath`
 - cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
@@ -28,8 +29,13 @@ The current committed search bundle reintroduced a staged move picker and select
 Current search-specific changes in the committed tree include:
 
 - staged move picking in `src/search/movepicker.rs`
+- principal variation search with scout-window re-search at root and in the main alpha-beta path
+- previous-iteration PV reuse below the root when the current search prefix still matches
 - continuation-history scoring for quiet replies
 - null-move pruning backed by reversible null moves in `Position`
+- reverse futility pruning for shallow non-PV nodes
+- shallow futility pruning for quiet non-check moves
+- shallow late-move pruning for very late quiet non-check moves
 - qsearch and root search refactors to consume the staged picker
 - an external-engine comparison tool in `tools/volkrix-nnue` for same-machine A/B match testing
 
@@ -45,6 +51,16 @@ What is not yet proved:
 
 - no Elo gain is established yet
 - quick same-machine matches versus `e9a5a06` were fully neutral in the first samples
+- a later local PVS/PV-reuse refresh versus the immediate pre-change binary was small and mixed:
+- `24` games over `12` expanded openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
+- `48` games over `24` expanded openings at `--movetime-ms 10 --max-plies 60`: `0W 48D 0L`, score `50.0%`
+- `16` games over `8` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 15D 0L`, score `53.1%`, approximate Elo `+21.7`
+- a later local selective-pruning refresh versus the immediate pre-pruning binary was also small and mixed:
+- `24` games over `12` expanded openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
+- `16` games over `8` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 14D 1L`, score `50.0%`
+- a later tuned selective-pruning refresh with a more conservative reverse-futility guard was positive in the next local samples:
+- `96` games over `48` expanded openings at `--movetime-ms 10 --max-plies 60`: `3W 93D 0L`, score `51.6%`, approximate Elo `+10.9`
+- `48` games over `24` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 47D 0L`, score `51.0%`, approximate Elo `+7.2`
 - `4` games over `2` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 4D 0L`
 - `16` games over `8` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 16D 0L`
 - `8` games over `4` expanded openings at `--movetime-ms 50 --max-plies 60`: `0W 8D 0L`
@@ -53,6 +69,8 @@ Current interpretation:
 
 - the search bundle clearly changes node counts, checksums, and wall time
 - the search bundle is not currently justified as an Elo improvement
+- the newer PVS/PV-reuse refresh looks promising in very small samples but remains far too small to treat as a proved strength gain
+- the newer selective-pruning refresh looked mixed at first, but the tightened reverse-futility variant was positive in both follow-up samples and is the first `#2` form worth keeping for broader validation
 - until a longer match produces a real score edge, treat this as a performance-positive but strength-unproven candidate
 
 Future-agent guidance:
