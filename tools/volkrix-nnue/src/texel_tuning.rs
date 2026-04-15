@@ -374,6 +374,8 @@ fn parameter_specs() -> Vec<ParameterSpec> {
         phase_score_param("doubled_pawn_penalty_eg", |w| &w.doubled_pawn_penalty, |w| &mut w.doubled_pawn_penalty, false),
         phase_score_param("isolated_pawn_penalty_mg", |w| &w.isolated_pawn_penalty, |w| &mut w.isolated_pawn_penalty, true),
         phase_score_param("isolated_pawn_penalty_eg", |w| &w.isolated_pawn_penalty, |w| &mut w.isolated_pawn_penalty, false),
+        phase_score_param("backward_pawn_penalty_mg", |w| &w.backward_pawn_penalty, |w| &mut w.backward_pawn_penalty, true),
+        phase_score_param("backward_pawn_penalty_eg", |w| &w.backward_pawn_penalty, |w| &mut w.backward_pawn_penalty, false),
         phase_score_param("pawn_island_penalty_mg", |w| &w.pawn_island_penalty, |w| &mut w.pawn_island_penalty, true),
         phase_score_param("pawn_island_penalty_eg", |w| &w.pawn_island_penalty, |w| &mut w.pawn_island_penalty, false),
         phase_score_param("phalanx_pawn_bonus_mg", |w| &w.phalanx_pawn_bonus, |w| &mut w.phalanx_pawn_bonus, true),

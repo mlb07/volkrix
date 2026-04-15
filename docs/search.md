@@ -89,6 +89,7 @@ Recent classical-eval additions on top of the existing tapered material / piece-
 
 - pawn-island penalties
 - pawn-phalanx bonuses
+- backward-pawn penalties
 - protected passed-pawn bonuses
 - rook-on-seventh bonuses
 - supported knight-outpost bonuses
@@ -117,10 +118,19 @@ What is currently proved:
 - pawn-threat-vs-minor `12 -> 13`
 - that candidate produced the first positive same-machine match score against the frozen pre-tuning baseline binary:
 - `64` games over `32` expanded curated openings at `--movetime-ms 10 --max-plies 60`: `4W 58D 2L`, score `51.6%`, approximate Elo `+10.9`
+- a later conservative backward-pawn penalty was added to the default evaluator with targeted eval coverage:
+- `cargo test --quiet --test eval`
+- `cargo test --quiet --test search`
+- `cargo test --quiet --test uci`
+- `cargo test --quiet -p volkrix-nnue parameter_specs_are_unique`
+- same-machine engine evidence against the frozen pre-backward-pawn binary is mildly positive but still small:
+- `24` games over `12` self-play openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
+- `16` games over `8` self-play openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`, score `50.0%`
 
 What is not yet proved:
 
 - the current positive match result is still a small same-machine sample, not a statistically solid Elo claim
+- the backward-pawn term also remains strength-unproven beyond small local samples
 - the current tuner is a score-target logistic tuning pass over retained examples data, not yet a large-scale game-result Texel workflow with proven Elo gains
 - the first tuned candidate was neutral in a same-machine engine match and was not kept as the default evaluator:
 - `16` games over `8` openings at `--movetime-ms 50 --max-plies 60`: `0W 16D 0L`

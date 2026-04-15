@@ -71,6 +71,7 @@ fn default_classical_weights_are_pinned_and_wired_into_evaluate() {
         bishop_pair_bonus: volkrix::search::eval::PhaseScore { mg: 28, eg: 42 },
         doubled_pawn_penalty: volkrix::search::eval::PhaseScore { mg: 10, eg: 14 },
         isolated_pawn_penalty: volkrix::search::eval::PhaseScore { mg: 12, eg: 10 },
+        backward_pawn_penalty: volkrix::search::eval::PhaseScore { mg: 10, eg: 8 },
         pawn_island_penalty: volkrix::search::eval::PhaseScore { mg: 8, eg: 10 },
         phalanx_pawn_bonus: volkrix::search::eval::PhaseScore { mg: 12, eg: 12 },
         open_file_rook_bonus: volkrix::search::eval::PhaseScore { mg: 18, eg: 12 },
@@ -185,6 +186,32 @@ fn isolated_and_doubled_pawns_are_penalized() {
     let damaged_breakdown = debug_evaluate_breakdown(&damaged);
 
     assert!(healthy_breakdown.pawn_structure > damaged_breakdown.pawn_structure);
+}
+
+#[test]
+fn backward_pawn_is_penalized_against_supported_chain() {
+    let backward =
+        Position::from_fen("4k3/8/8/4p3/2P5/3P4/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let supported =
+        Position::from_fen("4k3/8/8/4p3/3P4/2P5/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    let backward_breakdown = debug_evaluate_breakdown(&backward);
+    let supported_breakdown = debug_evaluate_breakdown(&supported);
+
+    assert!(supported_breakdown.pawn_structure > backward_breakdown.pawn_structure);
+}
+
+#[test]
+fn enemy_pawn_control_is_required_for_backward_pawn_penalty() {
+    let backward =
+        Position::from_fen("4k3/8/8/4p3/2P5/3P4/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+    let free =
+        Position::from_fen("4k3/8/8/7p/2P5/3P4/8/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+    let backward_breakdown = debug_evaluate_breakdown(&backward);
+    let free_breakdown = debug_evaluate_breakdown(&free);
+
+    assert!(free_breakdown.pawn_structure > backward_breakdown.pawn_structure);
 }
 
 #[test]

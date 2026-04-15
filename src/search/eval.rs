@@ -50,6 +50,7 @@ pub struct ClassicalEvalWeights {
     pub bishop_pair_bonus: PhaseScore,
     pub doubled_pawn_penalty: PhaseScore,
     pub isolated_pawn_penalty: PhaseScore,
+    pub backward_pawn_penalty: PhaseScore,
     pub pawn_island_penalty: PhaseScore,
     pub phalanx_pawn_bonus: PhaseScore,
     pub open_file_rook_bonus: PhaseScore,
@@ -77,6 +78,7 @@ impl Default for ClassicalEvalWeights {
             bishop_pair_bonus: PhaseScore::new(28, 42),
             doubled_pawn_penalty: PhaseScore::new(10, 14),
             isolated_pawn_penalty: PhaseScore::new(12, 10),
+            backward_pawn_penalty: PhaseScore::new(10, 8),
             pawn_island_penalty: PhaseScore::new(8, 10),
             phalanx_pawn_bonus: PhaseScore::new(12, 12),
             open_file_rook_bonus: PhaseScore::new(18, 12),
@@ -363,6 +365,8 @@ fn pawn_shield(color: Color, king_square: Square, pawns: u64) -> PhaseScore {
 
 fn pawn_structure(position: &Position, color: Color, weights: &ClassicalEvalWeights) -> PhaseScore {
     let pawns = position.pieces(color, PieceType::Pawn);
+    let enemy_pawns = position.pieces(color.opposite(), PieceType::Pawn);
+    let occupied = position.occupancy();
     let mut score = PhaseScore::default();
     let mut islands = 0i32;
     let mut previous_file_occupied = false;
@@ -385,6 +389,13 @@ fn pawn_structure(position: &Position, color: Color, weights: &ClassicalEvalWeig
         let right = if file < 7 { file_mask(file + 1) } else { 0 };
         if pawns & (left | right) == 0 {
             score += scale_by_count(weights.isolated_pawn_penalty, -pawns_on_file);
+        }
+    }
+
+    let mut remaining = pawns;
+    while let Some(square) = pop_lsb(&mut remaining) {
+        if is_backward_pawn(color, square, pawns, enemy_pawns, occupied) {
+            score += scale_by_count(weights.backward_pawn_penalty, -1);
         }
     }
 
@@ -562,6 +573,57 @@ fn knight_is_supported_outpost(
     let attacked_by_enemy_pawn =
         attacks::pawn_attackers_to(square, color.opposite()) & enemy_pawns != 0;
     supported_by_pawn && !attacked_by_enemy_pawn
+}
+
+fn is_backward_pawn(
+    color: Color,
+    square: Square,
+    own_pawns: u64,
+    enemy_pawns: u64,
+    occupied: u64,
+) -> bool {
+    let relative = relative_rank(color, square);
+    if !(2..=5).contains(&relative) {
+        return false;
+    }
+
+    let file = square.file() as i8;
+    let direction = color.pawn_direction();
+    let front = match square.offset(0, direction) {
+        Some(front) if occupied & front.bit() == 0 => front,
+        _ => return false,
+    };
+
+    if attacks::pawn_attackers_to(square, color) & own_pawns != 0 {
+        return false;
+    }
+    if attacks::pawn_attackers_to(front, color) & own_pawns != 0 {
+        return false;
+    }
+    if attacks::pawn_attackers_to(front, color.opposite()) & enemy_pawns == 0 {
+        return false;
+    }
+
+    let mut has_adjacent_pawn_ahead = false;
+    for file_delta in [-1, 1] {
+        let adjacent_file = file + file_delta;
+        if !(0..=7).contains(&adjacent_file) {
+            continue;
+        }
+
+        let mut adjacent = own_pawns & file_mask(adjacent_file as u8);
+        while let Some(adjacent_square) = pop_lsb(&mut adjacent) {
+            if relative_rank(color, adjacent_square) > relative {
+                has_adjacent_pawn_ahead = true;
+                break;
+            }
+        }
+        if has_adjacent_pawn_ahead {
+            break;
+        }
+    }
+
+    has_adjacent_pawn_ahead
 }
 
 fn pawn_is_protected_by_friendly_pawn(color: Color, square: Square, own_pawns: u64) -> bool {
