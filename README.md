@@ -28,6 +28,32 @@ Current project priority:
 - that means classical eval, classical search, and their validation workflow take precedence over new NNUE feature work
 - when repository docs and engine behavior disagree, trust the code first and then fix the docs to match it
 
+## Plan Of Attack
+
+Path to `3000+` from the current Volkrix baseline:
+
+1. finish the retained classical search path first
+   - improve selective search, move ordering, and tactical stability
+   - keep every search change evidence-backed with direct engine matches
+2. keep strengthening the classical eval while NNUE is not yet the best path
+   - add only low-risk eval terms that survive tests and same-machine matches
+   - keep the eval surface tunable so offline fitting can support later promotion decisions
+3. treat NNUE as a long-term ceiling lift, not a short-term distraction
+   - build better search-labeled data
+   - do not promote new nets until they beat the classical fallback path
+4. tighten the tuning and validation loop
+   - keep curated openings, baseline binaries, and repeatable local gauntlets
+   - prefer match evidence over offline loss or checksum-only reasoning
+5. scale evidence before claiming strength
+   - positive local samples are enough to keep promising changes
+   - large claims require broader multi-sample validation
+
+Near-term execution order:
+
+- search first
+- then low-risk classical eval improvements
+- then stronger NNUE data / training once the classical path is harder to improve
+
 What is intentionally not here yet:
 
 - split-point or work-stealing SMP
