@@ -80,6 +80,73 @@ Future-agent guidance:
 - prefer the external-engine match workflow over checksum-only reasoning
 - `cargo run -p volkrix-nnue -- expand-fens --input tests/data/nnue/phase13-fixture.fens --output /tmp/volkrix-openings.fens --max-plies 4 --branching 3 --max-positions 96`
 - `cargo run -p volkrix-nnue -- compare-engines --openings /tmp/volkrix-openings.fens --baseline <baseline-bin> --candidate <candidate-bin> --movetime-ms <n> --max-plies <n> --max-openings <n>`
+- when the handoff notes and the code disagree, trust the code and re-document from the tree instead of inheriting the old note
+
+## Recent Rejected Search Experiments
+
+These local search experiments were tested directly against the committed `ef06683` baseline and were not kept:
+
+- conservative check extension:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 15D 1L`, approximate Elo `-21.7`
+- quiet-history maluses for failed quiets:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`
+- root fail-high beta-cut inside root aspiration windows:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 15D 0L`, approximate Elo `+21.7`
+- larger follow-up `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 89D 5L`, approximate Elo `-10.9`
+- more aggressive depth-scaled late-move reduction:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
+
+Current interpretation for these rejected passes:
+
+- none of the four changes above showed a durable strength gain against the immediate committed baseline
+- node savings alone were not a sufficient promotion signal
+- the root fail-high experiment looked promising in a tiny slower bucket and then failed the larger fast follow-up
+- treat all four as explored-and-rejected unless a materially different variant is tested
+
+## Current Local Search Keep Candidate
+
+The current in-tree search candidate is a more conservative late-move-pruning threshold:
+
+- `late_move_pruning_threshold(depth)` changed from `6 + depth * 3` to `8 + depth * 4`
+- intent: keep shallow LMP active, but delay it so later quiet moves get searched a bit more often before pruning turns on
+- targeted validation stayed clean:
+- `cargo test --quiet --lib search::root`
+- `cargo test --quiet --test search`
+- `cargo test --quiet --test uci`
+- same-machine engine evidence against the committed `ef06683` baseline is the strongest search evidence from this round so far:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `9W 81D 6L`, score `51.6%`, approximate Elo `+10.9`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
+- `48` games over `24` openings at `--movetime-ms 50 --max-plies 80`: `3W 43D 2L`, score `51.0%`, approximate Elo `+7.2`
+
+Current interpretation for this keep candidate:
+
+- this is still local same-machine evidence, not a large statistically hardened Elo claim
+- unlike the earlier rejected experiments, it is positive in the larger fast follow-up and also positive in the larger slower follow-up
+- if search work pauses here, this is the search-side change worth keeping from the current round
+
+Additional rejected search experiments from the same round:
+
+- exact countermove ordering for quiet replies:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
+- countermove ordering plus qsearch TT exact reuse / depth-0 stores:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`
+- root TT stores without changing the root beta-cut behavior:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `6W 84D 6L`, score `50.0%`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
+- root TT stores plus root fail-high beta-cuts:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
+- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `2W 14D 0L`, score `56.2%`
+- `48` games over `24` openings at `--movetime-ms 50 --max-plies 80`: `3W 41D 4L`, score `49.0%`
+- PV-only internal iterative deepening on missing move hints:
+- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 23D 1L`, score `47.9%`, approximate Elo `-14.5`
 
 ## Current Classical Eval Status
 

@@ -1353,7 +1353,7 @@ fn futility_margin(depth: usize) -> i32 {
 }
 
 fn late_move_pruning_threshold(depth: usize) -> usize {
-    6 + depth * 3
+    8 + depth * 4
 }
 
 fn null_move_is_eligible(
@@ -2107,7 +2107,7 @@ mod tests {
             false,
             false,
             true,
-            16,
+            21,
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
