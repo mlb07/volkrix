@@ -8,6 +8,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - no classical-eval edits
 - no NNUE runtime edits
 - no UCI-surface edits beyond what existing search paths already consume
+- for new tuning work, promote changes only if they beat current `HEAD`
 
 ## Accepted Search Changes
 
@@ -26,6 +27,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - reverse futility pruning is enabled for shallow non-PV nodes
 - shallow futility pruning is enabled for quiet non-check moves
 - shallow late-move pruning is enabled for very late quiet non-check moves
+- null-move pruning now uses the deeper `R=3` reduction from depth `6` upward instead of depth `7`
 
 ## Supporting Engine Changes
 
@@ -41,6 +43,19 @@ Accepted search changes were kept only when they passed:
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
+
+## Current Evidence
+
+- current `HEAD` keep candidate: `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
+- targeted validation stayed clean:
+- `cargo test --quiet --lib search::root`
+- `cargo test --quiet --test search`
+- `cargo test --quiet --test uci`
+- `cargo run --quiet --release -- bench`
+- direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 
 ## Current Caveat
 

@@ -26,6 +26,11 @@ Phase 13 does not widen the engine runtime surface. The retained runtime shape d
 
 The current committed search bundle reintroduced a staged move picker and selective-search work on top of the older stronger classical baseline.
 
+Current tuning rule:
+
+- for new search work, compare candidate builds directly against current `HEAD`
+- older baseline comparisons below are historical context, not promotion targets
+
 Current search-specific changes in the committed tree include:
 
 - staged move picking in `src/search/movepicker.rs`
@@ -33,6 +38,7 @@ Current search-specific changes in the committed tree include:
 - previous-iteration PV reuse below the root when the current search prefix still matches
 - continuation-history scoring for quiet replies
 - null-move pruning backed by reversible null moves in `Position`
+- a slightly more aggressive null-move reduction step from depth `6` upward
 - reverse futility pruning for shallow non-PV nodes
 - shallow futility pruning for quiet non-check moves
 - shallow late-move pruning for very late quiet non-check moves
@@ -109,25 +115,24 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate is a more conservative late-move-pruning threshold:
+The current in-tree search candidate is a more aggressive null-move reduction boundary:
 
-- `late_move_pruning_threshold(depth)` changed from `6 + depth * 3` to `8 + depth * 4`
-- intent: keep shallow LMP active, but delay it so later quiet moves get searched a bit more often before pruning turns on
+- `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
+- intent: let null move take the deeper reduction one ply earlier so the latest engine saves work in the shallow-to-mid depth band without changing the rest of the null-move guards
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
-- same-machine engine evidence against the committed `ef06683` baseline is the strongest search evidence from this round so far:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `9W 81D 6L`, score `51.6%`, approximate Elo `+10.9`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
-- `48` games over `24` openings at `--movetime-ms 50 --max-plies 80`: `3W 43D 2L`, score `51.0%`, approximate Elo `+7.2`
+- same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 
 Current interpretation for this keep candidate:
 
 - this is still local same-machine evidence, not a large statistically hardened Elo claim
-- unlike the earlier rejected experiments, it is positive in the larger fast follow-up and also positive in the larger slower follow-up
-- if search work pauses here, this is the search-side change worth keeping from the current round
+- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and also positive in the slower confirmation bucket
+- if search work pauses here, this is the current search-side change worth keeping from this round
 
 Additional rejected search experiments from the same round:
 

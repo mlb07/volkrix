@@ -1377,7 +1377,7 @@ fn null_move_is_eligible(
 }
 
 fn null_move_reduction(depth: usize) -> usize {
-    if depth >= 7 { 3 } else { 2 }
+    if depth >= 6 { 3 } else { 2 }
 }
 
 impl SearchContext {
@@ -2231,7 +2231,7 @@ mod tests {
     #[test]
     fn null_move_reduction_grows_with_depth() {
         assert_eq!(null_move_reduction(3), 2);
-        assert_eq!(null_move_reduction(6), 2);
+        assert_eq!(null_move_reduction(6), 3);
         assert_eq!(null_move_reduction(7), 3);
     }
 
