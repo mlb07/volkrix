@@ -412,12 +412,12 @@ impl SearchContext {
         guess: i32,
     ) -> RootSearchOutcome {
         let mut delta = ASPIRATION_DELTA;
+        let mut alpha = (guess - delta).max(-INF);
+        let mut beta = (guess + delta).min(INF);
         loop {
             if self.hard_stop_requested() {
                 return RootSearchOutcome::Aborted(None);
             }
-            let alpha = (guess - delta).max(-INF);
-            let beta = (guess + delta).min(INF);
             let RootSearchOutcome::Complete(best_move, score) =
                 self.search_root_core::<USE_TABLEBASES, USE_NNUE>(position, depth, alpha, beta)
             else {
@@ -425,10 +425,12 @@ impl SearchContext {
             };
             if score <= alpha && alpha > -INF {
                 delta = (delta * 2).min(INF / 2);
+                alpha = (alpha - delta).max(-INF);
                 continue;
             }
             if score >= beta && beta < INF {
                 delta = (delta * 2).min(INF / 2);
+                beta = (beta + delta).min(INF);
                 continue;
             }
             return RootSearchOutcome::Complete(best_move, score);

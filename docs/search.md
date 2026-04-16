@@ -115,24 +115,32 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate is a more aggressive null-move reduction boundary:
+The current in-tree search candidate is a root aspiration-window widening change:
 
-- `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
-- intent: let null move take the deeper reduction one ply earlier so the latest engine saves work in the shallow-to-mid depth band without changing the rest of the null-move guards
+- `search_root_with_aspiration_core` now preserves the non-failing side of the window and widens only the side that failed instead of rebuilding a symmetric window around the original guess on every retry
+- intent: reduce avoidable root re-search churn after one-sided aspiration misses without changing the underlying root search or selective-pruning guards
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 181D 1L`, score `52.3%`, approximate Elo `+16.3`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 82D 5L`, score `52.1%`, approximate Elo `+14.5`
 
 Current interpretation for this keep candidate:
 
 - this is still local same-machine evidence, not a large statistically hardened Elo claim
 - unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and also positive in the slower confirmation bucket
 - if search work pauses here, this is the current search-side change worth keeping from this round
+
+Previous retained change from the same `HEAD`-only round:
+
+- `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 
 Additional rejected search experiments from the same round:
 
