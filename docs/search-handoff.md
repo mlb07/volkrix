@@ -20,15 +20,13 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - quiet alpha-improving best moves feed back into quiet-history ordering
 - capture ordering uses SEE buckets plus a light victim/aggressor tie-break
 - late move reductions scale with move lateness instead of always reducing by one ply
-- qsearch prunes clearly losing captures with SEE
-- qsearch probes/stores depth-0 TT entries and honors TT move hints
-- qsearch uses delta pruning for low-gain capture and promotion candidates
 - null-move pruning is enabled with a real reversible null move in `Position`
 - reverse futility pruning is enabled for shallow non-PV nodes
 - shallow futility pruning is enabled for quiet non-check moves
 - shallow late-move pruning is enabled for very late quiet non-check moves
 - null-move pruning now uses the deeper `R=3` reduction from depth `6` upward instead of depth `7`
 - root aspiration re-search now widens only the side that failed instead of rebuilding a symmetric window around the original guess
+- qsearch now skips clearly losing non-promotion captures by SEE when not in check
 
 ## Supporting Engine Changes
 
@@ -47,19 +45,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: `search_root_with_aspiration_core` now keeps the non-failing side of the window fixed and widens only the side that missed
+- current `HEAD` keep candidate: qsearch now skips clearly losing non-promotion captures by SEE when not in check
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 181D 1L`, score `52.3%`, approximate Elo `+16.3`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 82D 5L`, score `52.1%`, approximate Elo `+14.5`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 87D 1L`, score `53.6%`, approximate Elo `+25.4`
 
 Previous retained search evidence from the same round:
 
+- `search_root_with_aspiration_core` now keeps the non-failing side of the window fixed and widens only the side that missed
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 181D 1L`, score `52.3%`, approximate Elo `+16.3`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 82D 5L`, score `52.1%`, approximate Elo `+14.5`
 - `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
 - `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
