@@ -115,27 +115,32 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate is a qsearch SEE-pruning change:
+The current in-tree search candidate is a more aggressive qsearch SEE-pruning change:
 
-- qsearch now skips clearly losing non-promotion captures by SEE when the side to move is not in check
-- intent: cut noisy tactical tails in quiescence without touching in-check qsearch behavior or main-search pruning guards
+- qsearch now skips non-promotion captures with `SEE <= 0` when the side to move is not in check
+- intent: cut an additional layer of neutral tactical noise in quiescence without touching in-check qsearch behavior or main-search pruning guards
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 87D 1L`, score `53.6%`, approximate Elo `+25.4`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 
 Current interpretation for this keep candidate:
 
 - this is still local same-machine evidence, not a large statistically hardened Elo claim
-- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and then broke further positive in the slower confirmation bucket
+- unlike the recent rejected `HEAD`-only experiments, it stayed narrowly positive in the larger fast follow-up and stayed positive again in the slower confirmation bucket
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
 
+- qsearch now skips clearly losing non-promotion captures by SEE when the side to move is not in check
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 87D 1L`, score `53.6%`, approximate Elo `+25.4`
 - `search_root_with_aspiration_core` now preserves the non-failing side of the window and widens only the side that failed instead of rebuilding a symmetric window around the original guess on every retry
 - evidence at promotion time:
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
