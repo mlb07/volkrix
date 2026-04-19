@@ -1298,7 +1298,7 @@ fn reverse_futility_is_eligible(
 }
 
 fn reverse_futility_margin(depth: usize) -> i32 {
-    120 * depth as i32
+    140 * depth as i32
 }
 
 fn futility_pruning_is_eligible(
@@ -1985,7 +1985,7 @@ mod tests {
             SearchNodeState::new(false),
             2,
             32,
-            300,
+            320,
             false,
         ));
         assert!(!reverse_futility_is_eligible(

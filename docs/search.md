@@ -116,28 +116,33 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate is a stricter null-move eligibility guard:
+The current in-tree search candidate is a more conservative reverse-futility margin:
 
-- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
-- intent: reduce low-margin null cutoffs that look safe by raw eval parity but are not robust enough to justify skipping the real move search
+- `reverse_futility_margin(depth)` is now `140 * depth` instead of `120 * depth`
+- intent: cut a few more shallow reverse-futility false positives without disturbing the broader selective-pruning stack
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 175D 8L`, score `50.3%`, approximate Elo `+1.8`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 176D 7L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `11W 78D 7L`, score `52.1%`, approximate Elo `+14.5`
 
 Current interpretation for this keep candidate:
 
 - this is still local same-machine evidence, not a large statistically hardened Elo claim
-- unlike the recent rejected `HEAD`-only experiments, it stayed at least slightly positive in the larger fast follow-up and then separated clearly in the slower confirmation bucket
+- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and then stayed positive again in the slower confirmation bucket
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
 
+- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 175D 8L`, score `50.3%`, approximate Elo `+1.8`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
 - qsearch now skips non-promotion captures with `SEE <= 0` when the side to move is not in check
 - evidence at promotion time:
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
