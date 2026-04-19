@@ -25,6 +25,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - shallow futility pruning is enabled for quiet non-check moves
 - shallow late-move pruning is enabled for very late quiet non-check moves
 - null-move pruning now uses the deeper `R=3` reduction from depth `6` upward instead of depth `7`
+- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
 - root aspiration re-search now widens only the side that failed instead of rebuilding a symmetric window around the original guess
 - qsearch now skips non-promotion captures with `SEE <= 0` when not in check
 
@@ -45,19 +46,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: qsearch now skips non-promotion captures with `SEE <= 0` when not in check
+- current `HEAD` keep candidate: null-move pruning now requires `static_eval >= beta + 32` before it is eligible
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 175D 8L`, score `50.3%`, approximate Elo `+1.8`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
 
 Previous retained search evidence from the same round:
 
+- qsearch now skips non-promotion captures with `SEE <= 0` when not in check
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 - qsearch now skips clearly losing non-promotion captures by SEE when not in check
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
 - `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`

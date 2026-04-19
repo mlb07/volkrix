@@ -23,6 +23,7 @@ pub(crate) const INF: i32 = 32_000;
 pub(crate) const MATE_SCORE: i32 = 30_000;
 const MATE_THRESHOLD: i32 = MATE_SCORE - MAX_PLY as i32;
 const ASPIRATION_DELTA: i32 = 32;
+const NULL_MOVE_STATIC_MARGIN: i32 = 32;
 const HISTORY_MAX: i32 = 16_384;
 const PIECE_TYPE_COUNT: usize = 6;
 
@@ -1374,7 +1375,7 @@ fn null_move_is_eligible(
         && depth >= 3
         && beta > -MATE_THRESHOLD
         && beta < MATE_THRESHOLD
-        && static_eval >= beta
+        && static_eval >= beta + NULL_MOVE_STATIC_MARGIN
         && position.has_non_pawn_material(position.side_to_move())
 }
 
