@@ -1341,7 +1341,7 @@ fn late_move_pruning_is_eligible(
     heuristics.late_move_pruning
         && !node_state.is_pv
         && !in_check
-        && depth <= 3
+        && depth <= 2
         && !mv.is_capture()
         && !mv.is_promotion()
         && !gives_check
@@ -2102,7 +2102,7 @@ mod tests {
         assert!(late_move_pruning_is_eligible(
             heuristics,
             SearchNodeState::new(false),
-            3,
+            2,
             400,
             0,
             false,
@@ -2110,25 +2110,12 @@ mod tests {
             false,
             false,
             true,
-            21,
+            17,
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
             SearchNodeState::new(true),
-            3,
-            400,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
-            16,
-        ));
-        assert!(!late_move_pruning_is_eligible(
-            heuristics,
-            SearchNodeState::new(false),
-            4,
+            2,
             400,
             0,
             false,
@@ -2142,6 +2129,19 @@ mod tests {
             heuristics,
             SearchNodeState::new(false),
             3,
+            400,
+            0,
+            false,
+            quiet,
+            false,
+            false,
+            true,
+            16,
+        ));
+        assert!(!late_move_pruning_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            2,
             300,
             0,
             false,
@@ -2154,7 +2154,7 @@ mod tests {
         assert!(!late_move_pruning_is_eligible(
             heuristics,
             SearchNodeState::new(false),
-            3,
+            2,
             400,
             0,
             false,
