@@ -1266,7 +1266,7 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
     heuristics.late_move_reductions
         && !candidate.is_pv
         && !candidate.in_check
-        && candidate.depth >= 4
+        && candidate.depth >= 5
         && !candidate.mv.is_capture()
         && !candidate.mv.is_promotion()
         && !candidate.gives_check
@@ -1833,7 +1833,7 @@ mod tests {
         assert!(lmr_is_eligible(
             SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
             LmrCandidate {
-                depth: 4,
+                depth: 5,
                 is_pv: false,
                 in_check: false,
                 mv: quiet,
@@ -1845,7 +1845,7 @@ mod tests {
         assert!(!lmr_is_eligible(
             SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
             LmrCandidate {
-                depth: 3,
+                depth: 4,
                 is_pv: false,
                 in_check: false,
                 mv: quiet,
@@ -1943,12 +1943,12 @@ mod tests {
     #[test]
     fn lmr_reduces_late_quiets_and_researches_on_alpha_improvement() {
         let mut position = Position::startpos();
-        let limits = SearchLimits::new(5)
+        let limits = SearchLimits::new(7)
             .with_heuristics(SearchHeuristics::phase8_baseline().with_late_move_reductions(true));
         let mut context = SearchContext::new(limits);
 
         let _ = context
-            .alpha_beta(&mut position, 4, 1, -20, 20, SearchNodeState::new(false))
+            .alpha_beta(&mut position, 6, 1, -20, 20, SearchNodeState::new(false))
             .expect("search must complete");
 
         assert!(context.debug_counters().lmr_reductions > 0);
