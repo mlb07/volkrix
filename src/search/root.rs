@@ -1372,7 +1372,7 @@ fn null_move_is_eligible(
         && node_state.null_move_allowed
         && !node_state.is_pv
         && !in_check
-        && depth >= 3
+        && depth >= 4
         && beta > -MATE_THRESHOLD
         && beta < MATE_THRESHOLD
         && static_eval >= beta + NULL_MOVE_STATIC_MARGIN

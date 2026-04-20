@@ -116,19 +116,19 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate is a more conservative reverse-futility margin:
+The current in-tree search candidate raises the null-move depth floor:
 
-- `reverse_futility_margin(depth)` is now `140 * depth` instead of `120 * depth`
-- intent: cut a few more shallow reverse-futility false positives without disturbing the broader selective-pruning stack
+- null-move pruning is now disabled at depth `3` and only allowed from depth `4` upward
+- intent: avoid the shallowest null-move false positives while preserving the stronger deeper null-move path
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 176D 7L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `11W 78D 7L`, score `52.1%`, approximate Elo `+14.5`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 89D 2L`, score `51.6%`, approximate Elo `+10.9`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
 
 Current interpretation for this keep candidate:
 
