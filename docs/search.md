@@ -41,7 +41,7 @@ Current search-specific changes in the committed tree include:
 - a slightly more aggressive null-move reduction step from depth `6` upward
 - null-move pruning now requires a small static-eval cushion over `beta` before it is eligible
 - reverse futility pruning for shallow non-PV nodes
-- shallow futility pruning for quiet non-check moves
+- shallow futility pruning is no longer enabled in the current phase-9 default
 - shallow late-move pruning for very late quiet non-check moves
 - shallow late-move pruning now stops at depth `2` instead of depth `3`
 - qsearch and root search refactors to consume the staged picker
@@ -117,19 +117,19 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate tightens the late-move pruning depth floor:
+The current in-tree search candidate disables quiet futility pruning in the phase-9 default stack:
 
-- late-move pruning now only fires through depth `2` instead of depth `3`
-- intent: keep the shallow quiet-pruning path while removing its most aggressive edge case
+- `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
+- intent: keep the rest of the selective-pruning stack while removing a shallow quiet prune that now appears redundant
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
 
 Current interpretation for this keep candidate:
 
@@ -139,6 +139,11 @@ Current interpretation for this keep candidate:
 
 Previous retained change from the same `HEAD`-only round:
 
+- late-move pruning now only fires through depth `2` instead of depth `3`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
 - late move reductions now start at depth `5` instead of depth `4`
 - evidence at promotion time:
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`

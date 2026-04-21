@@ -22,7 +22,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - late move reductions scale with move lateness instead of always reducing by one ply
 - null-move pruning is enabled with a real reversible null move in `Position`
 - reverse futility pruning is enabled for shallow non-PV nodes
-- shallow futility pruning is enabled for quiet non-check moves
+- shallow futility pruning is no longer enabled in the current phase-9 default
 - shallow late-move pruning is enabled for very late quiet non-check moves
 - shallow late-move pruning now stops at depth `2` instead of depth `3`
 - late move reductions now start at depth `5` instead of depth `4`
@@ -50,19 +50,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: late-move pruning now only fires through depth `2` instead of depth `3`
+- current `HEAD` keep candidate: `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
 
 Previous retained search evidence from the same round:
 
+- late-move pruning now only fires through depth `2` instead of depth `3`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
 - late move reductions now start at depth `5` instead of depth `4`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
 - `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 179D 4L`, score `51.3%`, approximate Elo `+9.0`

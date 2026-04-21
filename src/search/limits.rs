@@ -41,7 +41,7 @@ impl SearchHeuristics {
             late_move_reductions: true,
             null_move_pruning: true,
             reverse_futility_pruning: true,
-            futility_pruning: true,
+            futility_pruning: false,
             late_move_pruning: true,
         }
     }
