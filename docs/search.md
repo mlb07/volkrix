@@ -36,6 +36,7 @@ Current search-specific changes in the committed tree include:
 - staged move picking in `src/search/movepicker.rs`
 - principal variation search with scout-window re-search at root and in the main alpha-beta path
 - previous-iteration PV reuse below the root when the current search prefix still matches
+- previous-iteration PV hints below the root are now only reused on PV nodes
 - continuation-history scoring for quiet replies
 - null-move pruning backed by reversible null moves in `Position`
 - a slightly more aggressive null-move reduction step from depth `6` upward
@@ -117,19 +118,19 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate disables quiet futility pruning in the phase-9 default stack:
+The current in-tree search candidate restricts below-root previous-iteration PV hints to PV nodes only:
 
-- `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
-- intent: keep the rest of the selective-pruning stack while removing a shallow quiet prune that now appears redundant
+- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
+- intent: keep PV-hint reuse on the principal variation while avoiding stale PV ordering bias in non-PV nodes
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
 
 Current interpretation for this keep candidate:
 
@@ -138,6 +139,12 @@ Current interpretation for this keep candidate:
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
+
+- `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
 
 - late-move pruning now only fires through depth `2` instead of depth `3`
 - evidence at promotion time:

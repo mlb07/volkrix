@@ -696,7 +696,7 @@ impl SearchContext {
 
         let in_check = position.is_in_check(position.side_to_move());
         self.pv_length[ply] = 0;
-        let pv_move_hint = self.previous_pv_move(ply);
+        let pv_move_hint = node_state.is_pv.then(|| self.previous_pv_move(ply)).flatten();
         let tt_move_hint =
             tt_hit.and_then(|hit| (!hit.best_move.is_none()).then_some(hit.best_move));
 
