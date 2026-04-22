@@ -49,7 +49,7 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
     };
 
     for mv in MovePicker::new(context, position, &legal_moves, ordering_hints).ordered() {
-        if !in_check && mv.is_capture() && !mv.is_promotion() && position.see(mv).0 <= 0 {
+        if !in_check && mv.is_capture() && !mv.is_promotion() && position.see(mv).0 < 0 {
             continue;
         }
 

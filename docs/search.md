@@ -118,19 +118,19 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate restricts below-root previous-iteration PV hints to PV nodes only:
+The current in-tree search candidate relaxes qsearch SEE pruning slightly:
 
-- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
-- intent: keep PV-hint reuse on the principal variation while avoiding stale PV ordering bias in non-PV nodes
+- qsearch now skips non-promotion captures only when `SEE < 0` instead of `SEE <= 0`
+- intent: keep clearly losing captures out of qsearch while preserving neutral exchanges that may still stabilize tactical lines
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
 
 Current interpretation for this keep candidate:
 
@@ -139,6 +139,12 @@ Current interpretation for this keep candidate:
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
+
+- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
 
 - `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
 - evidence at promotion time:

@@ -51,18 +51,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
+- current `HEAD` keep candidate: qsearch now skips non-promotion captures only when `SEE < 0`
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
+
+Previous retained search evidence from the same round:
+
+- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
 - `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
 - `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
-
-Previous retained search evidence from the same round:
 
 - `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
