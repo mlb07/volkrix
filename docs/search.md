@@ -119,19 +119,19 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate widens the initial aspiration window slightly:
+The current in-tree search candidate removes the fixed quiet-shape ordering bias:
 
-- `ASPIRATION_DELTA` is now `36` instead of `32`
-- intent: reduce narrow-window re-search churn without disabling aspiration windows outright
+- `quiet_shape_bonus` now returns `0`
+- intent: let learned quiet-history and continuation-history signals drive quiet ordering without an added hand-written shape bias
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
-- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
+- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `40W 314D 30L`, score `51.3%`, approximate Elo `+9.0`
+- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `13W 168D 11L`, score `50.5%`, approximate Elo `+3.6`
 
 Current interpretation for this keep candidate:
 
@@ -140,6 +140,12 @@ Current interpretation for this keep candidate:
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
+
+- `ASPIRATION_DELTA` is now `36` instead of `32`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
+- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
 
 - qsearch now skips non-promotion captures only when `SEE < 0` instead of `SEE <= 0`
 - evidence at promotion time:

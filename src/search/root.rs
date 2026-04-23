@@ -1429,37 +1429,13 @@ pub(crate) fn is_quiescence_move(mv: Move, position: &Position) -> bool {
 }
 
 fn quiet_shape_bonus(position: &Position, mv: Move) -> i32 {
-    let Some(piece) = position.piece_at(mv.from()) else {
-        return 0;
-    };
-
-    let quiet_bonus = match piece.piece_type() {
-        crate::core::PieceType::Pawn => 5,
-        crate::core::PieceType::Knight => 10,
-        crate::core::PieceType::Bishop => 9,
-        crate::core::PieceType::Rook => 4,
-        crate::core::PieceType::Queen => 2,
-        crate::core::PieceType::King => {
-            if mv.is_castle() {
-                30
-            } else {
-                0
-            }
-        }
-    };
-
-    quiet_bonus + square_progress_bonus(piece.color(), mv.to())
+    let _ = position;
+    let _ = mv;
+    0
 }
 
 fn promotion_score(piece_type: crate::core::PieceType) -> i32 {
     see::promotion_gain(piece_type).0 as i32
-}
-
-fn square_progress_bonus(color: crate::core::Color, square: crate::core::Square) -> i32 {
-    match color {
-        crate::core::Color::White => square.rank() as i32,
-        crate::core::Color::Black => 7 - square.rank() as i32,
-    }
 }
 
 fn format_info_line(

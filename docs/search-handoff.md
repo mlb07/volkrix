@@ -52,18 +52,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: `ASPIRATION_DELTA` is now `36` instead of `32`
+- current `HEAD` keep candidate: `quiet_shape_bonus` now returns `0`
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
+- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `40W 314D 30L`, score `51.3%`, approximate Elo `+9.0`
+- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `13W 168D 11L`, score `50.5%`, approximate Elo `+3.6`
+
+Previous retained search evidence from the same round:
+
+- `ASPIRATION_DELTA` is now `36` instead of `32`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
 - `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
 - `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
-
-Previous retained search evidence from the same round:
 
 - qsearch now skips non-promotion captures only when `SEE < 0`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
