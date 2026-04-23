@@ -52,18 +52,23 @@ Accepted search changes were kept only when they passed:
 
 ## Current Evidence
 
-- current `HEAD` keep candidate: qsearch now skips non-promotion captures only when `SEE < 0`
+- current `HEAD` keep candidate: `ASPIRATION_DELTA` is now `36` instead of `32`
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
+- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
+
+Previous retained search evidence from the same round:
+
+- qsearch now skips non-promotion captures only when `SEE < 0`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
 - `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
 - `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
-
-Previous retained search evidence from the same round:
 
 - `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
 - `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`

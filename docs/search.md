@@ -119,27 +119,33 @@ Current interpretation for these rejected passes:
 
 ## Current Local Search Keep Candidate
 
-The current in-tree search candidate relaxes qsearch SEE pruning slightly:
+The current in-tree search candidate widens the initial aspiration window slightly:
 
-- qsearch now skips non-promotion captures only when `SEE < 0` instead of `SEE <= 0`
-- intent: keep clearly losing captures out of qsearch while preserving neutral exchanges that may still stabilize tactical lines
+- `ASPIRATION_DELTA` is now `36` instead of `32`
+- intent: reduce narrow-window re-search churn without disabling aspiration windows outright
 - targeted validation stayed clean:
 - `cargo test --quiet --lib search::root`
 - `cargo test --quiet --test search`
 - `cargo test --quiet --test uci`
 - `cargo run --quiet --release -- bench`
 - same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
+- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
+- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
 
 Current interpretation for this keep candidate:
 
 - this is still local same-machine evidence, not a large statistically hardened Elo claim
-- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and then stayed positive again in the slower confirmation bucket
+- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and then stayed positive again in the larger slower confirmation bucket
 - if search work pauses here, this is the current search-side change worth keeping from this round
 
 Previous retained change from the same `HEAD`-only round:
+
+- qsearch now skips non-promotion captures only when `SEE < 0` instead of `SEE <= 0`
+- evidence at promotion time:
+- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
+- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
+- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
 
 - `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
 - evidence at promotion time:
