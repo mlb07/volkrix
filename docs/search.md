@@ -29,6 +29,7 @@ The current committed search bundle reintroduced a staged move picker and select
 Current tuning rule:
 
 - for new search work, compare candidate builds directly against current `HEAD`
+- if an initial result is close, do not promote it from the small screen alone; require a larger bucket before keeping it
 - older baseline comparisons below are historical context, not promotion targets
 
 Current search-specific changes in the committed tree include:

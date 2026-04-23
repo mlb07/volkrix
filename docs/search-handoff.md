@@ -9,6 +9,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - no NNUE runtime edits
 - no UCI-surface edits beyond what existing search paths already consume
 - for new tuning work, promote changes only if they beat current `HEAD`
+- if an initial result is close, require a larger follow-up bucket before promotion
 
 ## Accepted Search Changes
 
