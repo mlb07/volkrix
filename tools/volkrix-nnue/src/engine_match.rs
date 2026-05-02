@@ -7,7 +7,9 @@ use std::{
 
 use volkrix::{
     core::{Color, Position, PositionStatus},
-    nnue_training::{MatchConfig, MatchGameSummary, MatchMode, MatchOutcome, MatchSummary, normalize_fen},
+    nnue_training::{
+        MatchConfig, MatchGameSummary, MatchMode, MatchOutcome, MatchSummary, normalize_fen,
+    },
 };
 
 pub fn compare_external_engines(
@@ -61,8 +63,9 @@ fn load_openings(openings_path: &Path, max_openings: Option<usize>) -> Result<Ve
             break;
         }
 
-        let line = line
-            .map_err(|error| format!("failed to read openings line {}: {error}", line_number + 1))?;
+        let line = line.map_err(|error| {
+            format!("failed to read openings line {}: {error}", line_number + 1)
+        })?;
         let fen = line.trim();
         if fen.is_empty() {
             continue;
@@ -109,7 +112,11 @@ fn play_match_game(
             return Ok(MatchGameSummary {
                 opening_fen: opening_fen.to_owned(),
                 candidate_color,
-                outcome: match_outcome_from_status(status, position.side_to_move(), candidate_color),
+                outcome: match_outcome_from_status(
+                    status,
+                    position.side_to_move(),
+                    candidate_color,
+                ),
                 terminal_status: status,
                 plies_played,
                 first_candidate_score_cp,
@@ -147,13 +154,15 @@ fn play_match_game(
             first_fallback_info_line = result.last_info_line;
         }
 
-        position.apply_uci_move(&result.best_move).map_err(|error| {
-            format!(
-                "engine move '{}' was not legal from '{}': {error}",
-                result.best_move,
-                position.to_fen()
-            )
-        })?;
+        position
+            .apply_uci_move(&result.best_move)
+            .map_err(|error| {
+                format!(
+                    "engine move '{}' was not legal from '{}': {error}",
+                    result.best_move,
+                    position.to_fen()
+                )
+            })?;
         plies_played += 1;
     }
 }
@@ -201,18 +210,14 @@ impl ExternalEngine {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| format!("failed to launch engine '{}': {error}", path.display()))?;
-        let stdin = child.stdin.take().ok_or_else(|| {
-            format!(
-                "failed to acquire stdin for engine '{}'",
-                path.display()
-            )
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            format!(
-                "failed to acquire stdout for engine '{}'",
-                path.display()
-            )
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("failed to acquire stdin for engine '{}'", path.display()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| format!("failed to acquire stdout for engine '{}'", path.display()))?;
 
         let mut engine = Self {
             path: path.display().to_string(),
@@ -307,10 +312,7 @@ impl ExternalEngine {
             .read_line(&mut line)
             .map_err(|error| format!("failed to read response from '{}': {error}", self.path))?;
         if read == 0 {
-            return Err(format!(
-                "engine '{}' closed stdout unexpectedly",
-                self.path
-            ));
+            return Err(format!("engine '{}' closed stdout unexpectedly", self.path));
         }
         Ok(line)
     }

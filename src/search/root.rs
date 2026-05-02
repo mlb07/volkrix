@@ -156,6 +156,38 @@ struct LmrCandidate {
     quiets_searched: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ForwardPruneCandidate {
+    node_state: SearchNodeState,
+    depth: usize,
+    alpha: i32,
+    static_eval: i32,
+    in_check: bool,
+    mv: Move,
+    gives_check: bool,
+    is_hash_move: bool,
+    has_searched_move: bool,
+    quiets_searched: usize,
+}
+
+#[cfg(test)]
+impl ForwardPruneCandidate {
+    fn quiet(depth: usize, alpha: i32, static_eval: i32, mv: Move) -> Self {
+        Self {
+            node_state: SearchNodeState::new(false),
+            depth,
+            alpha,
+            static_eval,
+            in_check: false,
+            mv,
+            gives_check: false,
+            is_hash_move: false,
+            has_searched_move: true,
+            quiets_searched: 0,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct TtStoreInput {
     key: u64,
@@ -696,7 +728,10 @@ impl SearchContext {
 
         let in_check = position.is_in_check(position.side_to_move());
         self.pv_length[ply] = 0;
-        let pv_move_hint = node_state.is_pv.then(|| self.previous_pv_move(ply)).flatten();
+        let pv_move_hint = node_state
+            .is_pv
+            .then(|| self.previous_pv_move(ply))
+            .flatten();
         let tt_move_hint =
             tt_hit.and_then(|hit| (!hit.best_move.is_none()).then_some(hit.best_move));
 
@@ -796,27 +831,7 @@ impl SearchContext {
             let child_is_pv = node_state.is_pv && best_move.is_none();
             let is_hash_move = tt_move_hint == Some(mv);
             let has_searched_move = searched_moves > 0;
-
-            if futility_pruning_is_eligible(
-                self.heuristics,
-                node_state,
-                depth,
-                alpha,
-                static_eval,
-                in_check,
-                mv,
-                gives_check,
-                is_hash_move,
-                has_searched_move,
-            ) {
-                self.debug_counters.futility_prunes += 1;
-                self.previous_moves[ply + 1] = Move::NONE;
-                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
-                continue;
-            }
-
-            if late_move_pruning_is_eligible(
-                self.heuristics,
+            let forward_prune_candidate = ForwardPruneCandidate {
                 node_state,
                 depth,
                 alpha,
@@ -827,7 +842,16 @@ impl SearchContext {
                 is_hash_move,
                 has_searched_move,
                 quiets_searched,
-            ) {
+            };
+
+            if futility_pruning_is_eligible(self.heuristics, forward_prune_candidate) {
+                self.debug_counters.futility_prunes += 1;
+                self.previous_moves[ply + 1] = Move::NONE;
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                continue;
+            }
+
+            if late_move_pruning_is_eligible(self.heuristics, forward_prune_candidate) {
                 self.debug_counters.late_move_prunes += 1;
                 self.previous_moves[ply + 1] = Move::NONE;
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
@@ -1303,52 +1327,35 @@ fn reverse_futility_margin(depth: usize) -> i32 {
 
 fn futility_pruning_is_eligible(
     heuristics: SearchHeuristics,
-    node_state: SearchNodeState,
-    depth: usize,
-    alpha: i32,
-    static_eval: i32,
-    in_check: bool,
-    mv: Move,
-    gives_check: bool,
-    is_hash_move: bool,
-    has_searched_move: bool,
+    candidate: ForwardPruneCandidate,
 ) -> bool {
     heuristics.futility_pruning
-        && !node_state.is_pv
-        && !in_check
-        && depth <= 2
-        && !mv.is_capture()
-        && !mv.is_promotion()
-        && !gives_check
-        && !is_hash_move
-        && has_searched_move
-        && static_eval + futility_margin(depth) <= alpha
+        && !candidate.node_state.is_pv
+        && !candidate.in_check
+        && candidate.depth <= 2
+        && !candidate.mv.is_capture()
+        && !candidate.mv.is_promotion()
+        && !candidate.gives_check
+        && !candidate.is_hash_move
+        && candidate.has_searched_move
+        && candidate.static_eval + futility_margin(candidate.depth) <= candidate.alpha
 }
 
 fn late_move_pruning_is_eligible(
     heuristics: SearchHeuristics,
-    node_state: SearchNodeState,
-    depth: usize,
-    alpha: i32,
-    static_eval: i32,
-    in_check: bool,
-    mv: Move,
-    gives_check: bool,
-    is_hash_move: bool,
-    has_searched_move: bool,
-    quiets_searched: usize,
+    candidate: ForwardPruneCandidate,
 ) -> bool {
     heuristics.late_move_pruning
-        && !node_state.is_pv
-        && !in_check
-        && depth <= 2
-        && !mv.is_capture()
-        && !mv.is_promotion()
-        && !gives_check
-        && !is_hash_move
-        && has_searched_move
-        && static_eval + futility_margin(depth) <= alpha
-        && quiets_searched > late_move_pruning_threshold(depth)
+        && !candidate.node_state.is_pv
+        && !candidate.in_check
+        && candidate.depth <= 2
+        && !candidate.mv.is_capture()
+        && !candidate.mv.is_promotion()
+        && !candidate.gives_check
+        && !candidate.is_hash_move
+        && candidate.has_searched_move
+        && candidate.static_eval + futility_margin(candidate.depth) <= candidate.alpha
+        && candidate.quiets_searched > late_move_pruning_threshold(candidate.depth)
 }
 
 fn futility_margin(depth: usize) -> i32 {
@@ -1501,11 +1508,11 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Bound, LmrCandidate, Move, MoveList, MoveOrderHints, Position, SearchContext,
-        SearchHeuristics, SearchLimits, SearchNodeState, futility_pruning_is_eligible,
-        late_move_pruning_is_eligible, lmr_is_eligible, lmr_requires_full_research,
-        null_move_is_eligible, null_move_reduction, reverse_futility_is_eligible, tt_cutoff_score,
-        validated_tt_move_hint,
+        Bound, ForwardPruneCandidate, LmrCandidate, Move, MoveList, MoveOrderHints, Position,
+        SearchContext, SearchHeuristics, SearchLimits, SearchNodeState,
+        futility_pruning_is_eligible, late_move_pruning_is_eligible, lmr_is_eligible,
+        lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
+        reverse_futility_is_eligible, tt_cutoff_score, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -2010,63 +2017,29 @@ mod tests {
 
         assert!(futility_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            300,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
+            ForwardPruneCandidate::quiet(2, 300, 0, quiet),
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(true),
-            2,
-            300,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
+            ForwardPruneCandidate {
+                node_state: SearchNodeState::new(true),
+                ..ForwardPruneCandidate::quiet(2, 300, 0, quiet)
+            },
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            3,
-            300,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
+            ForwardPruneCandidate::quiet(3, 300, 0, quiet),
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            300,
-            0,
-            false,
-            capture,
-            false,
-            false,
-            true,
+            ForwardPruneCandidate::quiet(2, 300, 0, capture),
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            300,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            false,
+            ForwardPruneCandidate {
+                has_searched_move: false,
+                ..ForwardPruneCandidate::quiet(2, 300, 0, quiet)
+            },
         ));
     }
 
@@ -2077,68 +2050,40 @@ mod tests {
 
         assert!(late_move_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            400,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
-            17,
+            ForwardPruneCandidate {
+                quiets_searched: 17,
+                ..ForwardPruneCandidate::quiet(2, 400, 0, quiet)
+            },
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(true),
-            2,
-            400,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
-            16,
+            ForwardPruneCandidate {
+                node_state: SearchNodeState::new(true),
+                quiets_searched: 16,
+                ..ForwardPruneCandidate::quiet(2, 400, 0, quiet)
+            },
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            3,
-            400,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
-            16,
+            ForwardPruneCandidate {
+                quiets_searched: 16,
+                ..ForwardPruneCandidate::quiet(3, 400, 0, quiet)
+            },
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            300,
-            0,
-            false,
-            quiet,
-            false,
-            false,
-            true,
-            8,
+            ForwardPruneCandidate {
+                quiets_searched: 8,
+                ..ForwardPruneCandidate::quiet(2, 300, 0, quiet)
+            },
         ));
         assert!(!late_move_pruning_is_eligible(
             heuristics,
-            SearchNodeState::new(false),
-            2,
-            400,
-            0,
-            false,
-            quiet,
-            false,
-            true,
-            true,
-            16,
+            ForwardPruneCandidate {
+                is_hash_move: true,
+                quiets_searched: 16,
+                ..ForwardPruneCandidate::quiet(2, 400, 0, quiet)
+            },
         ));
     }
 

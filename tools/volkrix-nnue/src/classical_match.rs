@@ -1,9 +1,16 @@
-use std::{fs::File, io::{BufRead, BufReader}, path::Path};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    path::Path,
+};
 
 use volkrix::{
     core::{Color, Position, PositionStatus},
     nnue_training::{MatchGameSummary, MatchOutcome, MatchSummary, normalize_fen},
-    search::{SearchLimits, service::{SearchRequest, UciSearchService}},
+    search::{
+        SearchLimits,
+        service::{SearchRequest, UciSearchService},
+    },
 };
 
 use crate::texel_tuning::read_classical_weights;
@@ -74,8 +81,9 @@ fn load_openings(openings_path: &Path, max_openings: Option<usize>) -> Result<Ve
         if max_openings.is_some_and(|limit| openings.len() >= limit) {
             break;
         }
-        let line = line
-            .map_err(|error| format!("failed to read openings line {}: {error}", line_number + 1))?;
+        let line = line.map_err(|error| {
+            format!("failed to read openings line {}: {error}", line_number + 1)
+        })?;
         let fen = line.trim();
         if fen.is_empty() {
             continue;
@@ -121,7 +129,11 @@ fn play_match_game(
             return Ok(MatchGameSummary {
                 opening_fen: opening_fen.to_owned(),
                 candidate_color,
-                outcome: match_outcome_from_status(status, position.side_to_move(), candidate_color),
+                outcome: match_outcome_from_status(
+                    status,
+                    position.side_to_move(),
+                    candidate_color,
+                ),
                 terminal_status: status,
                 plies_played,
                 first_candidate_score_cp,
@@ -182,13 +194,15 @@ fn play_match_game(
                 position.to_fen()
             )
         })?;
-        position.apply_uci_move(&best_move.to_string()).map_err(|error| {
-            format!(
-                "engine move '{}' was not legal from '{}': {error}",
-                best_move,
-                position.to_fen()
-            )
-        })?;
+        position
+            .apply_uci_move(&best_move.to_string())
+            .map_err(|error| {
+                format!(
+                    "engine move '{}' was not legal from '{}': {error}",
+                    best_move,
+                    position.to_fen()
+                )
+            })?;
         plies_played += 1;
     }
 }

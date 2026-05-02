@@ -6,7 +6,10 @@ const RANK_CENTRALITY: [i32; 8] = [0, 4, 8, 12, 12, 8, 4, 0];
 const PHASE_WEIGHTS: [i32; 6] = [0, 1, 1, 2, 4, 0];
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(feature = "offline-tools", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "offline-tools",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct PhaseScore {
     pub mg: i32,
     pub eg: i32,
@@ -38,7 +41,10 @@ impl std::ops::Sub for PhaseScore {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(feature = "offline-tools", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(
+    feature = "offline-tools",
+    derive(serde::Serialize, serde::Deserialize)
+)]
 pub struct ClassicalEvalWeights {
     pub mg_values: [i32; 6],
     pub eg_values: [i32; 6],
@@ -188,7 +194,10 @@ pub fn debug_evaluate_breakdown_with_weights(
     evaluate_breakdown_with_weights(position, weights)
 }
 
-fn evaluate_breakdown_with_weights(position: &Position, weights: &ClassicalEvalWeights) -> EvalBreakdown {
+fn evaluate_breakdown_with_weights(
+    position: &Position,
+    weights: &ClassicalEvalWeights,
+) -> EvalBreakdown {
     let phase = game_phase(position);
     let white = evaluate_color(position, Color::White, weights);
     let black = evaluate_color(position, Color::Black, weights);
@@ -241,7 +250,8 @@ fn material_and_piece_square(
                 weights.eg_values[piece_type.index()],
             );
             score += piece_square_term(piece_type, color, square);
-            score += piece_positional_term(piece_type, color, square, own_pawns, enemy_pawns, weights);
+            score +=
+                piece_positional_term(piece_type, color, square, own_pawns, enemy_pawns, weights);
         }
     }
     score

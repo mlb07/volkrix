@@ -3,8 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde_json::Value;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use volkrix::{
     SOURCE_COMMIT,
     core::Position,
@@ -140,12 +140,7 @@ pub fn tune_from_examples(
         return Err("texel tuning requires at least one training example".to_owned());
     }
 
-    let run = run_coordinate_descent(
-        &train,
-        &validation,
-        ClassicalEvalWeights::default(),
-        config,
-    );
+    let run = run_coordinate_descent(&train, &validation, ClassicalEvalWeights::default(), config);
     let weights_file = TexelWeightsFile {
         magic: TEXEL_WEIGHTS_MAGIC.to_owned(),
         version: TEXEL_WEIGHTS_VERSION,
@@ -198,10 +193,18 @@ pub fn tune_from_examples(
 }
 
 pub fn read_classical_weights(path: &Path) -> Result<ClassicalEvalWeights, String> {
-    let text = fs::read_to_string(path)
-        .map_err(|error| format!("failed to read classical weights '{}': {error}", path.display()))?;
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|error| format!("failed to parse classical weights JSON '{}': {error}", path.display()))?;
+    let text = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "failed to read classical weights '{}': {error}",
+            path.display()
+        )
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| {
+        format!(
+            "failed to parse classical weights JSON '{}': {error}",
+            path.display()
+        )
+    })?;
 
     if let Some(tuned_weights) = value.get("tuned_weights") {
         serde_json::from_value::<ClassicalEvalWeights>(tuned_weights.clone()).map_err(|error| {
@@ -311,9 +314,14 @@ fn average_log_loss(
     Some(total / samples.len() as f64)
 }
 
-fn sample_log_loss(sample: &TuningSample, weights: &ClassicalEvalWeights, sigmoid_scale: f64) -> f64 {
+fn sample_log_loss(
+    sample: &TuningSample,
+    weights: &ClassicalEvalWeights,
+    sigmoid_scale: f64,
+) -> f64 {
     let predicted_score = evaluate_with_weights(&sample.position, weights).0 as f64;
-    let predicted_probability = score_to_probability(predicted_score, sigmoid_scale).clamp(1e-12, 1.0 - 1e-12);
+    let predicted_probability =
+        score_to_probability(predicted_score, sigmoid_scale).clamp(1e-12, 1.0 - 1e-12);
     let target_probability = sample.target_probability.clamp(1e-12, 1.0 - 1e-12);
     -(target_probability * predicted_probability.ln()
         + (1.0 - target_probability) * (1.0 - predicted_probability).ln())
@@ -348,72 +356,410 @@ fn temporary_output_path(path: &Path) -> PathBuf {
 
 fn parameter_specs() -> Vec<ParameterSpec> {
     vec![
-        ParameterSpec { name: "mg_pawn", get: Box::new(|w| w.mg_values[0]), set: Box::new(|w, v| w.mg_values[0] = v) },
-        ParameterSpec { name: "mg_knight", get: Box::new(|w| w.mg_values[1]), set: Box::new(|w, v| w.mg_values[1] = v) },
-        ParameterSpec { name: "mg_bishop", get: Box::new(|w| w.mg_values[2]), set: Box::new(|w, v| w.mg_values[2] = v) },
-        ParameterSpec { name: "mg_rook", get: Box::new(|w| w.mg_values[3]), set: Box::new(|w, v| w.mg_values[3] = v) },
-        ParameterSpec { name: "mg_queen", get: Box::new(|w| w.mg_values[4]), set: Box::new(|w, v| w.mg_values[4] = v) },
-        ParameterSpec { name: "eg_pawn", get: Box::new(|w| w.eg_values[0]), set: Box::new(|w, v| w.eg_values[0] = v) },
-        ParameterSpec { name: "eg_knight", get: Box::new(|w| w.eg_values[1]), set: Box::new(|w, v| w.eg_values[1] = v) },
-        ParameterSpec { name: "eg_bishop", get: Box::new(|w| w.eg_values[2]), set: Box::new(|w, v| w.eg_values[2] = v) },
-        ParameterSpec { name: "eg_rook", get: Box::new(|w| w.eg_values[3]), set: Box::new(|w, v| w.eg_values[3] = v) },
-        ParameterSpec { name: "eg_queen", get: Box::new(|w| w.eg_values[4]), set: Box::new(|w, v| w.eg_values[4] = v) },
-        phase_score_param("knight_mobility_mg", |w| &w.knight_mobility, |w| &mut w.knight_mobility, true),
-        phase_score_param("knight_mobility_eg", |w| &w.knight_mobility, |w| &mut w.knight_mobility, false),
-        phase_score_param("bishop_mobility_mg", |w| &w.bishop_mobility, |w| &mut w.bishop_mobility, true),
-        phase_score_param("bishop_mobility_eg", |w| &w.bishop_mobility, |w| &mut w.bishop_mobility, false),
-        phase_score_param("rook_mobility_mg", |w| &w.rook_mobility, |w| &mut w.rook_mobility, true),
-        phase_score_param("rook_mobility_eg", |w| &w.rook_mobility, |w| &mut w.rook_mobility, false),
-        phase_score_param("queen_mobility_mg", |w| &w.queen_mobility, |w| &mut w.queen_mobility, true),
-        phase_score_param("queen_mobility_eg", |w| &w.queen_mobility, |w| &mut w.queen_mobility, false),
-        phase_score_param("knight_outpost_bonus_mg", |w| &w.knight_outpost_bonus, |w| &mut w.knight_outpost_bonus, true),
-        phase_score_param("knight_outpost_bonus_eg", |w| &w.knight_outpost_bonus, |w| &mut w.knight_outpost_bonus, false),
-        phase_score_param("bishop_pair_bonus_mg", |w| &w.bishop_pair_bonus, |w| &mut w.bishop_pair_bonus, true),
-        phase_score_param("bishop_pair_bonus_eg", |w| &w.bishop_pair_bonus, |w| &mut w.bishop_pair_bonus, false),
-        phase_score_param("doubled_pawn_penalty_mg", |w| &w.doubled_pawn_penalty, |w| &mut w.doubled_pawn_penalty, true),
-        phase_score_param("doubled_pawn_penalty_eg", |w| &w.doubled_pawn_penalty, |w| &mut w.doubled_pawn_penalty, false),
-        phase_score_param("isolated_pawn_penalty_mg", |w| &w.isolated_pawn_penalty, |w| &mut w.isolated_pawn_penalty, true),
-        phase_score_param("isolated_pawn_penalty_eg", |w| &w.isolated_pawn_penalty, |w| &mut w.isolated_pawn_penalty, false),
-        phase_score_param("backward_pawn_penalty_mg", |w| &w.backward_pawn_penalty, |w| &mut w.backward_pawn_penalty, true),
-        phase_score_param("backward_pawn_penalty_eg", |w| &w.backward_pawn_penalty, |w| &mut w.backward_pawn_penalty, false),
-        phase_score_param("pawn_island_penalty_mg", |w| &w.pawn_island_penalty, |w| &mut w.pawn_island_penalty, true),
-        phase_score_param("pawn_island_penalty_eg", |w| &w.pawn_island_penalty, |w| &mut w.pawn_island_penalty, false),
-        phase_score_param("phalanx_pawn_bonus_mg", |w| &w.phalanx_pawn_bonus, |w| &mut w.phalanx_pawn_bonus, true),
-        phase_score_param("phalanx_pawn_bonus_eg", |w| &w.phalanx_pawn_bonus, |w| &mut w.phalanx_pawn_bonus, false),
-        phase_score_param("open_file_rook_bonus_mg", |w| &w.open_file_rook_bonus, |w| &mut w.open_file_rook_bonus, true),
-        phase_score_param("open_file_rook_bonus_eg", |w| &w.open_file_rook_bonus, |w| &mut w.open_file_rook_bonus, false),
-        phase_score_param("semi_open_file_rook_bonus_mg", |w| &w.semi_open_file_rook_bonus, |w| &mut w.semi_open_file_rook_bonus, true),
-        phase_score_param("semi_open_file_rook_bonus_eg", |w| &w.semi_open_file_rook_bonus, |w| &mut w.semi_open_file_rook_bonus, false),
-        phase_score_param("rook_on_seventh_bonus_mg", |w| &w.rook_on_seventh_bonus, |w| &mut w.rook_on_seventh_bonus, true),
-        phase_score_param("rook_on_seventh_bonus_eg", |w| &w.rook_on_seventh_bonus, |w| &mut w.rook_on_seventh_bonus, false),
-        phase_array_param("passed_pawn_bonus_r2_mg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 1, true),
-        phase_array_param("passed_pawn_bonus_r2_eg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 1, false),
-        phase_array_param("passed_pawn_bonus_r3_mg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 2, true),
-        phase_array_param("passed_pawn_bonus_r3_eg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 2, false),
-        phase_array_param("passed_pawn_bonus_r4_mg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 3, true),
-        phase_array_param("passed_pawn_bonus_r4_eg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 3, false),
-        phase_array_param("passed_pawn_bonus_r5_mg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 4, true),
-        phase_array_param("passed_pawn_bonus_r5_eg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 4, false),
-        phase_array_param("passed_pawn_bonus_r6_mg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 5, true),
-        phase_array_param("passed_pawn_bonus_r6_eg", |w| &w.passed_pawn_bonus, |w| &mut w.passed_pawn_bonus, 5, false),
-        phase_array_param("protected_passed_pawn_bonus_r3_mg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 2, true),
-        phase_array_param("protected_passed_pawn_bonus_r3_eg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 2, false),
-        phase_array_param("protected_passed_pawn_bonus_r4_mg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 3, true),
-        phase_array_param("protected_passed_pawn_bonus_r4_eg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 3, false),
-        phase_array_param("protected_passed_pawn_bonus_r5_mg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 4, true),
-        phase_array_param("protected_passed_pawn_bonus_r5_eg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 4, false),
-        phase_array_param("protected_passed_pawn_bonus_r6_mg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 5, true),
-        phase_array_param("protected_passed_pawn_bonus_r6_eg", |w| &w.protected_passed_pawn_bonus, |w| &mut w.protected_passed_pawn_bonus, 5, false),
-        phase_score_param("pawn_threat_minor_mg", |w| &w.pawn_threat_minor, |w| &mut w.pawn_threat_minor, true),
-        phase_score_param("pawn_threat_minor_eg", |w| &w.pawn_threat_minor, |w| &mut w.pawn_threat_minor, false),
-        phase_score_param("pawn_threat_rook_mg", |w| &w.pawn_threat_rook, |w| &mut w.pawn_threat_rook, true),
-        phase_score_param("pawn_threat_rook_eg", |w| &w.pawn_threat_rook, |w| &mut w.pawn_threat_rook, false),
-        phase_score_param("pawn_threat_queen_mg", |w| &w.pawn_threat_queen, |w| &mut w.pawn_threat_queen, true),
-        phase_score_param("pawn_threat_queen_eg", |w| &w.pawn_threat_queen, |w| &mut w.pawn_threat_queen, false),
-        phase_score_param("minor_threat_rook_mg", |w| &w.minor_threat_rook, |w| &mut w.minor_threat_rook, true),
-        phase_score_param("minor_threat_rook_eg", |w| &w.minor_threat_rook, |w| &mut w.minor_threat_rook, false),
-        phase_score_param("minor_threat_queen_mg", |w| &w.minor_threat_queen, |w| &mut w.minor_threat_queen, true),
-        phase_score_param("minor_threat_queen_eg", |w| &w.minor_threat_queen, |w| &mut w.minor_threat_queen, false),
+        ParameterSpec {
+            name: "mg_pawn",
+            get: Box::new(|w| w.mg_values[0]),
+            set: Box::new(|w, v| w.mg_values[0] = v),
+        },
+        ParameterSpec {
+            name: "mg_knight",
+            get: Box::new(|w| w.mg_values[1]),
+            set: Box::new(|w, v| w.mg_values[1] = v),
+        },
+        ParameterSpec {
+            name: "mg_bishop",
+            get: Box::new(|w| w.mg_values[2]),
+            set: Box::new(|w, v| w.mg_values[2] = v),
+        },
+        ParameterSpec {
+            name: "mg_rook",
+            get: Box::new(|w| w.mg_values[3]),
+            set: Box::new(|w, v| w.mg_values[3] = v),
+        },
+        ParameterSpec {
+            name: "mg_queen",
+            get: Box::new(|w| w.mg_values[4]),
+            set: Box::new(|w, v| w.mg_values[4] = v),
+        },
+        ParameterSpec {
+            name: "eg_pawn",
+            get: Box::new(|w| w.eg_values[0]),
+            set: Box::new(|w, v| w.eg_values[0] = v),
+        },
+        ParameterSpec {
+            name: "eg_knight",
+            get: Box::new(|w| w.eg_values[1]),
+            set: Box::new(|w, v| w.eg_values[1] = v),
+        },
+        ParameterSpec {
+            name: "eg_bishop",
+            get: Box::new(|w| w.eg_values[2]),
+            set: Box::new(|w, v| w.eg_values[2] = v),
+        },
+        ParameterSpec {
+            name: "eg_rook",
+            get: Box::new(|w| w.eg_values[3]),
+            set: Box::new(|w, v| w.eg_values[3] = v),
+        },
+        ParameterSpec {
+            name: "eg_queen",
+            get: Box::new(|w| w.eg_values[4]),
+            set: Box::new(|w, v| w.eg_values[4] = v),
+        },
+        phase_score_param(
+            "knight_mobility_mg",
+            |w| &w.knight_mobility,
+            |w| &mut w.knight_mobility,
+            true,
+        ),
+        phase_score_param(
+            "knight_mobility_eg",
+            |w| &w.knight_mobility,
+            |w| &mut w.knight_mobility,
+            false,
+        ),
+        phase_score_param(
+            "bishop_mobility_mg",
+            |w| &w.bishop_mobility,
+            |w| &mut w.bishop_mobility,
+            true,
+        ),
+        phase_score_param(
+            "bishop_mobility_eg",
+            |w| &w.bishop_mobility,
+            |w| &mut w.bishop_mobility,
+            false,
+        ),
+        phase_score_param(
+            "rook_mobility_mg",
+            |w| &w.rook_mobility,
+            |w| &mut w.rook_mobility,
+            true,
+        ),
+        phase_score_param(
+            "rook_mobility_eg",
+            |w| &w.rook_mobility,
+            |w| &mut w.rook_mobility,
+            false,
+        ),
+        phase_score_param(
+            "queen_mobility_mg",
+            |w| &w.queen_mobility,
+            |w| &mut w.queen_mobility,
+            true,
+        ),
+        phase_score_param(
+            "queen_mobility_eg",
+            |w| &w.queen_mobility,
+            |w| &mut w.queen_mobility,
+            false,
+        ),
+        phase_score_param(
+            "knight_outpost_bonus_mg",
+            |w| &w.knight_outpost_bonus,
+            |w| &mut w.knight_outpost_bonus,
+            true,
+        ),
+        phase_score_param(
+            "knight_outpost_bonus_eg",
+            |w| &w.knight_outpost_bonus,
+            |w| &mut w.knight_outpost_bonus,
+            false,
+        ),
+        phase_score_param(
+            "bishop_pair_bonus_mg",
+            |w| &w.bishop_pair_bonus,
+            |w| &mut w.bishop_pair_bonus,
+            true,
+        ),
+        phase_score_param(
+            "bishop_pair_bonus_eg",
+            |w| &w.bishop_pair_bonus,
+            |w| &mut w.bishop_pair_bonus,
+            false,
+        ),
+        phase_score_param(
+            "doubled_pawn_penalty_mg",
+            |w| &w.doubled_pawn_penalty,
+            |w| &mut w.doubled_pawn_penalty,
+            true,
+        ),
+        phase_score_param(
+            "doubled_pawn_penalty_eg",
+            |w| &w.doubled_pawn_penalty,
+            |w| &mut w.doubled_pawn_penalty,
+            false,
+        ),
+        phase_score_param(
+            "isolated_pawn_penalty_mg",
+            |w| &w.isolated_pawn_penalty,
+            |w| &mut w.isolated_pawn_penalty,
+            true,
+        ),
+        phase_score_param(
+            "isolated_pawn_penalty_eg",
+            |w| &w.isolated_pawn_penalty,
+            |w| &mut w.isolated_pawn_penalty,
+            false,
+        ),
+        phase_score_param(
+            "backward_pawn_penalty_mg",
+            |w| &w.backward_pawn_penalty,
+            |w| &mut w.backward_pawn_penalty,
+            true,
+        ),
+        phase_score_param(
+            "backward_pawn_penalty_eg",
+            |w| &w.backward_pawn_penalty,
+            |w| &mut w.backward_pawn_penalty,
+            false,
+        ),
+        phase_score_param(
+            "pawn_island_penalty_mg",
+            |w| &w.pawn_island_penalty,
+            |w| &mut w.pawn_island_penalty,
+            true,
+        ),
+        phase_score_param(
+            "pawn_island_penalty_eg",
+            |w| &w.pawn_island_penalty,
+            |w| &mut w.pawn_island_penalty,
+            false,
+        ),
+        phase_score_param(
+            "phalanx_pawn_bonus_mg",
+            |w| &w.phalanx_pawn_bonus,
+            |w| &mut w.phalanx_pawn_bonus,
+            true,
+        ),
+        phase_score_param(
+            "phalanx_pawn_bonus_eg",
+            |w| &w.phalanx_pawn_bonus,
+            |w| &mut w.phalanx_pawn_bonus,
+            false,
+        ),
+        phase_score_param(
+            "open_file_rook_bonus_mg",
+            |w| &w.open_file_rook_bonus,
+            |w| &mut w.open_file_rook_bonus,
+            true,
+        ),
+        phase_score_param(
+            "open_file_rook_bonus_eg",
+            |w| &w.open_file_rook_bonus,
+            |w| &mut w.open_file_rook_bonus,
+            false,
+        ),
+        phase_score_param(
+            "semi_open_file_rook_bonus_mg",
+            |w| &w.semi_open_file_rook_bonus,
+            |w| &mut w.semi_open_file_rook_bonus,
+            true,
+        ),
+        phase_score_param(
+            "semi_open_file_rook_bonus_eg",
+            |w| &w.semi_open_file_rook_bonus,
+            |w| &mut w.semi_open_file_rook_bonus,
+            false,
+        ),
+        phase_score_param(
+            "rook_on_seventh_bonus_mg",
+            |w| &w.rook_on_seventh_bonus,
+            |w| &mut w.rook_on_seventh_bonus,
+            true,
+        ),
+        phase_score_param(
+            "rook_on_seventh_bonus_eg",
+            |w| &w.rook_on_seventh_bonus,
+            |w| &mut w.rook_on_seventh_bonus,
+            false,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r2_mg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            1,
+            true,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r2_eg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            1,
+            false,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r3_mg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            2,
+            true,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r3_eg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            2,
+            false,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r4_mg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            3,
+            true,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r4_eg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            3,
+            false,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r5_mg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            4,
+            true,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r5_eg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            4,
+            false,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r6_mg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            5,
+            true,
+        ),
+        phase_array_param(
+            "passed_pawn_bonus_r6_eg",
+            |w| &w.passed_pawn_bonus,
+            |w| &mut w.passed_pawn_bonus,
+            5,
+            false,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r3_mg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            2,
+            true,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r3_eg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            2,
+            false,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r4_mg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            3,
+            true,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r4_eg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            3,
+            false,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r5_mg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            4,
+            true,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r5_eg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            4,
+            false,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r6_mg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            5,
+            true,
+        ),
+        phase_array_param(
+            "protected_passed_pawn_bonus_r6_eg",
+            |w| &w.protected_passed_pawn_bonus,
+            |w| &mut w.protected_passed_pawn_bonus,
+            5,
+            false,
+        ),
+        phase_score_param(
+            "pawn_threat_minor_mg",
+            |w| &w.pawn_threat_minor,
+            |w| &mut w.pawn_threat_minor,
+            true,
+        ),
+        phase_score_param(
+            "pawn_threat_minor_eg",
+            |w| &w.pawn_threat_minor,
+            |w| &mut w.pawn_threat_minor,
+            false,
+        ),
+        phase_score_param(
+            "pawn_threat_rook_mg",
+            |w| &w.pawn_threat_rook,
+            |w| &mut w.pawn_threat_rook,
+            true,
+        ),
+        phase_score_param(
+            "pawn_threat_rook_eg",
+            |w| &w.pawn_threat_rook,
+            |w| &mut w.pawn_threat_rook,
+            false,
+        ),
+        phase_score_param(
+            "pawn_threat_queen_mg",
+            |w| &w.pawn_threat_queen,
+            |w| &mut w.pawn_threat_queen,
+            true,
+        ),
+        phase_score_param(
+            "pawn_threat_queen_eg",
+            |w| &w.pawn_threat_queen,
+            |w| &mut w.pawn_threat_queen,
+            false,
+        ),
+        phase_score_param(
+            "minor_threat_rook_mg",
+            |w| &w.minor_threat_rook,
+            |w| &mut w.minor_threat_rook,
+            true,
+        ),
+        phase_score_param(
+            "minor_threat_rook_eg",
+            |w| &w.minor_threat_rook,
+            |w| &mut w.minor_threat_rook,
+            false,
+        ),
+        phase_score_param(
+            "minor_threat_queen_mg",
+            |w| &w.minor_threat_queen,
+            |w| &mut w.minor_threat_queen,
+            true,
+        ),
+        phase_score_param(
+            "minor_threat_queen_eg",
+            |w| &w.minor_threat_queen,
+            |w| &mut w.minor_threat_queen,
+            false,
+        ),
     ]
 }
 
@@ -498,15 +844,34 @@ mod tests {
             max_examples: None,
         };
         let train = vec![
-            sample_from_target_weights("4k3/8/8/8/8/3P4/2P1P3/4K3 w - - 0 1", &target, config.sigmoid_scale),
-            sample_from_target_weights("4k3/8/8/8/8/2P5/P1P5/4K3 w - - 0 1", &target, config.sigmoid_scale),
-            sample_from_target_weights("4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1", &target, config.sigmoid_scale),
-            sample_from_target_weights("4k3/8/8/8/8/8/2P1P3/4K3 w - - 0 1", &target, config.sigmoid_scale),
+            sample_from_target_weights(
+                "4k3/8/8/8/8/3P4/2P1P3/4K3 w - - 0 1",
+                &target,
+                config.sigmoid_scale,
+            ),
+            sample_from_target_weights(
+                "4k3/8/8/8/8/2P5/P1P5/4K3 w - - 0 1",
+                &target,
+                config.sigmoid_scale,
+            ),
+            sample_from_target_weights(
+                "4k3/8/8/8/8/8/3PP3/4K3 w - - 0 1",
+                &target,
+                config.sigmoid_scale,
+            ),
+            sample_from_target_weights(
+                "4k3/8/8/8/8/8/2P1P3/4K3 w - - 0 1",
+                &target,
+                config.sigmoid_scale,
+            ),
         ];
         let result = run_coordinate_descent(&train, &[], ClassicalEvalWeights::default(), config);
 
         assert!(result.final_train_loss < result.initial_train_loss);
-        assert!(result.weights.doubled_pawn_penalty.mg >= ClassicalEvalWeights::default().doubled_pawn_penalty.mg);
+        assert!(
+            result.weights.doubled_pawn_penalty.mg
+                >= ClassicalEvalWeights::default().doubled_pawn_penalty.mg
+        );
         assert!(result.accepted_updates > 0);
     }
 

@@ -1,7 +1,7 @@
 use crate::core::{MoveList, Position};
 
-use super::root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, terminal_score};
 use super::movepicker::MovePicker;
+use super::root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, terminal_score};
 
 pub(crate) fn qsearch<const USE_NNUE: bool>(
     context: &mut SearchContext,

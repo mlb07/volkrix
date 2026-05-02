@@ -56,8 +56,7 @@ fn default_classical_weights_are_pinned_and_wired_into_evaluate() {
         Position::startpos(),
         Position::from_fen("r2q1rk1/ppp2ppp/2npbn2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8")
             .expect("FEN parse must succeed"),
-        Position::from_fen("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1")
-            .expect("FEN parse must succeed"),
+        Position::from_fen("4k3/8/8/3P4/8/8/8/4K3 w - - 0 1").expect("FEN parse must succeed"),
     ];
     let weights = ClassicalEvalWeights::default();
     let expected = ClassicalEvalWeights {
@@ -107,7 +106,10 @@ fn default_classical_weights_are_pinned_and_wired_into_evaluate() {
     assert_eq!(weights, expected);
 
     for position in positions {
-        assert_eq!(evaluate(&position), evaluate_with_weights(&position, &weights));
+        assert_eq!(
+            evaluate(&position),
+            evaluate_with_weights(&position, &weights)
+        );
         assert_eq!(
             debug_evaluate_breakdown(&position),
             debug_evaluate_breakdown_with_weights(&position, &weights)

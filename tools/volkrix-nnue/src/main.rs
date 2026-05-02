@@ -329,8 +329,7 @@ fn run() -> Result<(), String> {
             let mut flags = parse_flag_map(args)?;
             let openings = take_required_flag(&mut flags, "--openings")?;
             let candidate_weights = take_required_flag(&mut flags, "--candidate-weights")?;
-            let baseline_weights =
-                parse_optional_flag::<String>(&mut flags, "--baseline-weights")?;
+            let baseline_weights = parse_optional_flag::<String>(&mut flags, "--baseline-weights")?;
             let depth = parse_optional_flag(&mut flags, "--depth")?.unwrap_or(4);
             let max_plies = parse_optional_flag(&mut flags, "--max-plies")?.unwrap_or(120usize);
             let max_openings = parse_optional_flag(&mut flags, "--max-openings")?;
@@ -384,8 +383,7 @@ fn run() -> Result<(), String> {
             let config = TexelTuningConfig {
                 iterations: parse_optional_flag(&mut flags, "--iterations")?.unwrap_or(6),
                 initial_step: parse_optional_flag(&mut flags, "--step")?.unwrap_or(8),
-                sigmoid_scale: parse_optional_flag(&mut flags, "--sigmoid-scale")?
-                    .unwrap_or(400.0),
+                sigmoid_scale: parse_optional_flag(&mut flags, "--sigmoid-scale")?.unwrap_or(400.0),
                 regularization: parse_optional_flag(&mut flags, "--regularization")?
                     .unwrap_or(1e-6),
                 max_examples: parse_optional_flag(&mut flags, "--max-examples")?,
@@ -401,8 +399,7 @@ fn run() -> Result<(), String> {
             );
             println!(
                 "train log-loss {:.6} -> {:.6}",
-                summary.initial_train_loss,
-                summary.final_train_loss
+                summary.initial_train_loss, summary.final_train_loss
             );
             if let (Some(initial), Some(final_)) = (
                 summary.initial_validation_loss,

@@ -11,8 +11,7 @@ use std::{
 use crate::core::Position;
 
 use super::{
-    SearchLimits, SearchResult,
-    eval,
+    SearchLimits, SearchResult, eval,
     nnue::NnueService,
     root::{self, SearchControl, SearchThreadRole},
     tablebase::TablebaseService,
@@ -253,11 +252,7 @@ impl UciSearchService {
         self.tt.clear();
     }
 
-    pub fn search(
-        &mut self,
-        position: &mut Position,
-        request: SearchRequest,
-    ) -> SearchResult {
+    pub fn search(&mut self, position: &mut Position, request: SearchRequest) -> SearchResult {
         let limits = request.limits.with_hash_mb(self.hash_mb);
         let effective_threads = self.effective_threads(limits.tt_enabled);
         if effective_threads <= 1 {

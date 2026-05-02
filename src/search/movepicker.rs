@@ -138,7 +138,10 @@ mod tests {
     use super::MovePicker;
     use crate::{
         core::{ParsedMove, Position},
-        search::{SearchLimits, root::{MoveOrderHints, SearchContext}},
+        search::{
+            SearchLimits,
+            root::{MoveOrderHints, SearchContext},
+        },
     };
 
     #[test]
