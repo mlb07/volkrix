@@ -76,11 +76,9 @@ pub struct BenchResult {
 
 impl BenchResult {
     pub fn nps(&self) -> u64 {
-        if self.elapsed_ms == 0 {
-            self.total_nodes
-        } else {
-            (self.total_nodes as u128 * 1000 / self.elapsed_ms) as u64
-        }
+        (self.total_nodes as u128 * 1000)
+            .checked_div(self.elapsed_ms)
+            .unwrap_or(self.total_nodes as u128) as u64
     }
 
     pub fn render_lines(&self) -> Vec<String> {
