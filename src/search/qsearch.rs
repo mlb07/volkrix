@@ -16,8 +16,10 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
     }
 
     if ply >= MAX_PLY - 1 {
+        context.clear_pv(ply);
         return Some(context.evaluate_position::<USE_NNUE>(position));
     }
+    context.clear_pv(ply);
 
     if is_draw(position) {
         return Some(0);
@@ -33,8 +35,6 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
             alpha = stand_pat;
         }
     }
-
-    context.pv_length[ply] = 0;
 
     let mut legal_moves = MoveList::new();
     position.generate_legal_moves(&mut legal_moves);

@@ -698,8 +698,10 @@ impl SearchContext {
         }
 
         if ply >= MAX_PLY - 1 {
+            self.clear_pv(ply);
             return Some(self.evaluate_position::<USE_NNUE>(position));
         }
+        self.clear_pv(ply);
 
         if is_draw(position) {
             return Some(0);
@@ -727,7 +729,6 @@ impl SearchContext {
         }
 
         let in_check = position.is_in_check(position.side_to_move());
-        self.pv_length[ply] = 0;
         let pv_move_hint = node_state
             .is_pv
             .then(|| self.previous_pv_move(ply))
@@ -1009,6 +1010,10 @@ impl SearchContext {
             self.pv_table[ply][ply + 1 + index] = self.pv_table[ply + 1][ply + 1 + index];
         }
         self.pv_length[ply] = next_len.max(ply + 1);
+    }
+
+    pub(crate) fn clear_pv(&mut self, ply: usize) {
+        self.pv_length[ply] = ply;
     }
 
     fn collect_pv(&self, ply: usize) -> Vec<Move> {
