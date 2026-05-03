@@ -11,7 +11,7 @@ use std::{
 
 use crate::{
     ENGINE_AUTHOR, ENGINE_NAME,
-    core::{Color, Position},
+    core::{Color, Move, MoveList, ParsedMove, Position},
     search::{
         SearchLimits,
         service::{DEFAULT_THREADS, SearchRequest, UciSearchService},
@@ -30,7 +30,7 @@ pub struct UciResponse {
     pub should_quit: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct GoOptions {
     depth: Option<u8>,
     movetime_ms: Option<u64>,
@@ -40,6 +40,7 @@ struct GoOptions {
     binc_ms: u64,
     movestogo: Option<u32>,
     infinite: bool,
+    searchmoves: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -321,6 +322,7 @@ impl UciEngine {
         stop_flag: Option<Arc<AtomicBool>>,
     ) -> Result<SearchRequest, String> {
         let now = Instant::now();
+        let root_moves = self.resolve_searchmoves(&options.searchmoves)?;
         if options.infinite {
             if stop_flag.is_none() {
                 return Err("go infinite requires the stdio runtime".to_owned());
@@ -331,6 +333,7 @@ impl UciEngine {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag,
+                root_moves,
             });
         }
 
@@ -341,16 +344,18 @@ impl UciEngine {
                 soft_deadline: Some(deadline),
                 hard_deadline: Some(deadline),
                 stop_flag,
+                root_moves,
             });
         }
 
         if options.wtime_ms.is_some() || options.btime_ms.is_some() {
-            let (soft_ms, hard_ms) = self.clock_budget_ms(options)?;
+            let (soft_ms, hard_ms) = self.clock_budget_ms(&options)?;
             return Ok(SearchRequest {
                 limits: SearchLimits::new(MAX_GO_DEPTH),
                 soft_deadline: Some(now + Duration::from_millis(soft_ms)),
                 hard_deadline: Some(now + Duration::from_millis(hard_ms)),
                 stop_flag,
+                root_moves,
             });
         }
 
@@ -359,10 +364,40 @@ impl UciEngine {
             soft_deadline: None,
             hard_deadline: None,
             stop_flag,
+            root_moves,
         })
     }
 
-    fn clock_budget_ms(&self, options: GoOptions) -> Result<(u64, u64), String> {
+    fn resolve_searchmoves(&self, searchmoves: &[String]) -> Result<Option<Vec<Move>>, String> {
+        if searchmoves.is_empty() {
+            return Ok(None);
+        }
+
+        let mut position = self.position.clone();
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+
+        let mut root_moves = Vec::with_capacity(searchmoves.len());
+        for move_text in searchmoves {
+            let parsed = ParsedMove::parse(move_text)
+                .map_err(|_| format!("invalid go searchmoves move '{move_text}'"))?;
+            let Some(mv) = legal_moves
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|mv| mv.matches_parsed(parsed))
+            else {
+                return Err(format!("illegal go searchmoves move '{move_text}'"));
+            };
+            if !root_moves.contains(&mv) {
+                root_moves.push(mv);
+            }
+        }
+
+        Ok(Some(root_moves))
+    }
+
+    fn clock_budget_ms(&self, options: &GoOptions) -> Result<(u64, u64), String> {
         let side = self.position.side_to_move();
         let (remaining, increment) = match side {
             Color::White => (
@@ -456,7 +491,17 @@ fn parse_go(tokens: &[&str]) -> Result<GoOptions, String> {
                 options.infinite = true;
                 index += 1;
             }
-            "ponder" | "ponderhit" | "searchmoves" | "nodes" | "mate" => {
+            "searchmoves" => {
+                index += 1;
+                while index < tokens.len() && !is_go_option_token(tokens[index]) {
+                    options.searchmoves.push(tokens[index].to_owned());
+                    index += 1;
+                }
+                if options.searchmoves.is_empty() {
+                    return Err("go searchmoves requires at least one move".to_owned());
+                }
+            }
+            "ponder" | "ponderhit" | "nodes" | "mate" => {
                 return Err(format!("unsupported go argument '{}'", tokens[index]));
             }
             other => {
@@ -481,6 +526,25 @@ fn parse_go(tokens: &[&str]) -> Result<GoOptions, String> {
     }
 
     Ok(options)
+}
+
+fn is_go_option_token(token: &str) -> bool {
+    matches!(
+        token,
+        "depth"
+            | "movetime"
+            | "wtime"
+            | "btime"
+            | "winc"
+            | "binc"
+            | "movestogo"
+            | "infinite"
+            | "searchmoves"
+            | "ponder"
+            | "ponderhit"
+            | "nodes"
+            | "mate"
+    )
 }
 
 fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, String> {
@@ -1510,7 +1574,7 @@ mod tests {
     fn clock_budget_uses_sudden_death_defaults() {
         let engine = UciEngine::new();
         let (soft, hard) = engine
-            .clock_budget_ms(GoOptions {
+            .clock_budget_ms(&GoOptions {
                 wtime_ms: Some(1_000),
                 btime_ms: Some(1_000),
                 ..GoOptions::default()
@@ -1525,7 +1589,7 @@ mod tests {
     fn clock_budget_honors_movestogo_and_increment() {
         let engine = UciEngine::new();
         let (soft, hard) = engine
-            .clock_budget_ms(GoOptions {
+            .clock_budget_ms(&GoOptions {
                 wtime_ms: Some(5_000),
                 btime_ms: Some(5_000),
                 winc_ms: 1_000,
@@ -1542,7 +1606,7 @@ mod tests {
     fn clock_budget_keeps_low_time_safety_floor() {
         let engine = UciEngine::new();
         let (soft, hard) = engine
-            .clock_budget_ms(GoOptions {
+            .clock_budget_ms(&GoOptions {
                 wtime_ms: Some(20),
                 btime_ms: Some(20),
                 ..GoOptions::default()

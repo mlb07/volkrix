@@ -120,6 +120,48 @@ fn go_depth_reports_only_legal_pv_lines() {
 }
 
 #[test]
+fn go_searchmoves_restricts_root_candidates() {
+    let mut engine = UciEngine::new();
+    let response = engine.handle_line("go searchmoves e2e4 depth 2");
+    assert_info_pvs_are_legal(&response.lines, &Position::startpos());
+    assert!(response.lines.iter().any(|line| line == "bestmove e2e4"));
+}
+
+#[test]
+fn go_searchmoves_accepts_options_after_move_list() {
+    let mut engine = UciEngine::new();
+    let response = engine.handle_line("go searchmoves e2e4 d2d4 depth 1");
+    assert_info_pvs_are_legal(&response.lines, &Position::startpos());
+    let bestmove_line = response
+        .lines
+        .iter()
+        .find(|line| line.starts_with("bestmove "))
+        .expect("bestmove line must exist");
+    let bestmove = bestmove_line
+        .strip_prefix("bestmove ")
+        .expect("bestmove line must contain prefix");
+    assert!(matches!(bestmove, "e2e4" | "d2d4"));
+}
+
+#[test]
+fn go_searchmoves_rejects_illegal_root_moves_without_searching() {
+    let mut engine = UciEngine::new();
+    let response = engine.handle_line("go searchmoves e2e5 depth 1");
+    assert!(
+        response
+            .lines
+            .iter()
+            .any(|line| line.contains("illegal go searchmoves move 'e2e5'"))
+    );
+    assert!(
+        response
+            .lines
+            .iter()
+            .all(|line| !line.starts_with("bestmove "))
+    );
+}
+
+#[test]
 fn setoption_hash_updates_persistent_hash_size() {
     let mut engine = UciEngine::new();
     assert_eq!(engine.debug_hash_mb(), 16);

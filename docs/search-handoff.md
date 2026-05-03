@@ -35,6 +35,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - root aspiration re-search now widens only the side that failed instead of rebuilding a symmetric window around the original guess
 - qsearch now skips non-promotion captures with `SEE <= 0` when not in check
 - alpha-beta and qsearch now clear the active PV row on entry, including TT cutoff, stand-pat, tablebase, draw, and depth-limit exits, so UCI `info ... pv` lines cannot inherit stale continuations from sibling branches
+- UCI `go searchmoves ...` is now supported by resolving the requested moves against the current root legal move list and carrying that root filter through normal, threaded, and root-tablebase search paths
 
 ## Supporting Engine Changes
 
@@ -42,6 +43,7 @@ This note tracks the accepted non-NNUE, non-eval search work that landed after t
 - `Position::has_non_pawn_material` exists to guard selective pruning in low-material cases
 - `SearchHeuristics` now exposes explicit toggles for the accepted selective-search features
 - `tests/uci.rs::go_depth_reports_only_legal_pv_lines` replays every printed PV token from the root position across repeated searches to guard against stale TT/PV output
+- `tests/uci.rs` covers `go searchmoves` constrained best moves, later `depth` arguments, and illegal root-move rejection without starting a search
 
 ## Validation Pattern
 

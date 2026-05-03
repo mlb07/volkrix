@@ -127,6 +127,7 @@ pub fn run_threaded_tiny_nnue_bench(depth: u8, threads: usize) -> BenchResult {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         total_nodes += result.nodes;

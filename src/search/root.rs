@@ -74,6 +74,7 @@ pub(crate) struct SearchControl {
     pub(crate) soft_deadline: Option<Instant>,
     pub(crate) hard_deadline: Option<Instant>,
     pub(crate) role: SearchThreadRole,
+    pub(crate) root_moves: Option<Vec<Move>>,
 }
 
 impl SearchControl {
@@ -405,6 +406,7 @@ impl SearchContext {
         let mut legal_moves = MoveList::new();
         let mut probe_position = position.clone();
         probe_position.generate_legal_moves(&mut legal_moves);
+        self.apply_root_move_filter(&mut legal_moves);
         if legal_moves.is_empty() {
             return None;
         }
@@ -485,6 +487,7 @@ impl SearchContext {
 
         let mut legal_moves = MoveList::new();
         position.generate_legal_moves(&mut legal_moves);
+        self.apply_root_move_filter(&mut legal_moves);
         if legal_moves.is_empty() {
             return RootSearchOutcome::Complete(None, terminal_score(position, 0));
         }
@@ -655,6 +658,20 @@ impl SearchContext {
         }
 
         RootSearchOutcome::Complete(best_move, alpha)
+    }
+
+    fn apply_root_move_filter(&self, legal_moves: &mut MoveList) {
+        let Some(root_moves) = self.control.root_moves.as_deref() else {
+            return;
+        };
+
+        let mut filtered = MoveList::new();
+        for mv in legal_moves.as_slice().iter().copied() {
+            if root_moves.contains(&mv) {
+                filtered.push(mv);
+            }
+        }
+        *legal_moves = filtered;
     }
 
     #[cfg_attr(not(test), allow(dead_code))]

@@ -1106,6 +1106,7 @@ fn generate_search_label(
             soft_deadline: deadline,
             hard_deadline: deadline,
             stop_flag: None,
+            root_moves: None,
         },
     );
     debug_assert_eq!(label_position.to_fen(), before);
@@ -1540,6 +1541,7 @@ fn build_match_request(config: MatchConfig) -> SearchRequest {
             soft_deadline: None,
             hard_deadline: None,
             stop_flag: None,
+            root_moves: None,
         },
         MatchMode::MoveTimeMs(movetime_ms) => {
             let deadline = Instant::now() + Duration::from_millis(movetime_ms);
@@ -1548,6 +1550,7 @@ fn build_match_request(config: MatchConfig) -> SearchRequest {
                 soft_deadline: Some(deadline),
                 hard_deadline: Some(deadline),
                 stop_flag: None,
+                root_moves: None,
             }
         }
     }
