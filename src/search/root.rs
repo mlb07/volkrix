@@ -28,6 +28,7 @@ const HISTORY_MAX: i32 = 16_384;
 const PIECE_TYPE_COUNT: usize = 6;
 
 type ContinuationHistory = [[[[[i16; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
+pub(crate) type InfoReporter<'a> = Option<Box<dyn FnMut(&str) + 'a>>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SearchStats {
@@ -104,7 +105,7 @@ pub(crate) struct SearchContext<'a> {
     tt: Option<Arc<tt::TranspositionTable>>,
     nnue: Option<NnueSearchState>,
     tablebases: Option<Arc<TablebaseService>>,
-    info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
+    info_reporter: InfoReporter<'a>,
     debug_counters: SearchDebugCounters,
 }
 
@@ -222,6 +223,7 @@ pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_with_control<'a>(
     position: &mut Position,
     limits: SearchLimits,
@@ -230,7 +232,7 @@ pub(crate) fn search_with_control<'a>(
     tablebases: Option<Arc<TablebaseService>>,
     classical_weights: Option<eval::ClassicalEvalWeights>,
     control: SearchControl,
-    info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
+    info_reporter: InfoReporter<'a>,
 ) -> SearchResult {
     SearchContext::with_tt(
         limits,
@@ -270,7 +272,7 @@ impl<'a> SearchContext<'a> {
         tablebases: Option<Arc<TablebaseService>>,
         classical_weights: Option<eval::ClassicalEvalWeights>,
         control: SearchControl,
-        info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
+        info_reporter: InfoReporter<'a>,
     ) -> Self {
         Self {
             started: Instant::now(),
@@ -923,9 +925,10 @@ impl<'a> SearchContext<'a> {
                 },
             ) {
                 self.debug_counters.lmr_reductions += 1;
+                let reduction = lmr_reduction(depth, quiets_searched);
                 let Some(reduced_score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
-                    depth - 2,
+                    depth - 1 - reduction,
                     ply + 1,
                     -beta,
                     -alpha,
@@ -1346,12 +1349,23 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
     heuristics.late_move_reductions
         && !candidate.is_pv
         && !candidate.in_check
-        && candidate.depth >= 5
+        && candidate.depth >= 4
         && !candidate.mv.is_capture()
         && !candidate.mv.is_promotion()
         && !candidate.gives_check
         && !candidate.is_hash_move
-        && candidate.quiets_searched > 3
+        && candidate.quiets_searched > 2
+}
+
+fn lmr_reduction(depth: usize, quiets_searched: usize) -> usize {
+    let mut reduction = 1;
+    if depth >= 7 && quiets_searched > 4 {
+        reduction += 1;
+    }
+    if depth >= 10 && quiets_searched > 8 {
+        reduction += 1;
+    }
+    reduction.min(depth.saturating_sub(1))
 }
 
 fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
@@ -1415,11 +1429,11 @@ fn late_move_pruning_is_eligible(
 }
 
 fn futility_margin(depth: usize) -> i32 {
-    120 * depth as i32
+    90 + 120 * depth as i32
 }
 
 fn late_move_pruning_threshold(depth: usize) -> usize {
-    8 + depth * 4
+    3 + depth * 3
 }
 
 fn null_move_is_eligible(
@@ -1574,7 +1588,7 @@ mod tests {
         Bound, ForwardPruneCandidate, LmrCandidate, Move, MoveList, MoveOrderHints, Position,
         SearchContext, SearchHeuristics, SearchLimits, SearchNodeState,
         futility_pruning_is_eligible, late_move_pruning_is_eligible, lmr_is_eligible,
-        lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
+        lmr_reduction, lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
         reverse_futility_is_eligible, tt_cutoff_score, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
@@ -1891,7 +1905,7 @@ mod tests {
         assert!(!lmr_is_eligible(
             SearchHeuristics::phase8_baseline().with_late_move_reductions(true),
             LmrCandidate {
-                depth: 4,
+                depth: 3,
                 is_pv: false,
                 in_check: false,
                 mv: quiet,
@@ -1981,9 +1995,16 @@ mod tests {
                 mv: quiet,
                 gives_check: false,
                 is_hash_move: false,
-                quiets_searched: 3,
+                quiets_searched: 2,
             },
         ));
+    }
+
+    #[test]
+    fn lmr_reduction_scales_for_deeper_late_quiets() {
+        assert_eq!(lmr_reduction(4, 3), 1);
+        assert_eq!(lmr_reduction(7, 5), 2);
+        assert_eq!(lmr_reduction(10, 9), 3);
     }
 
     #[test]
@@ -2080,7 +2101,7 @@ mod tests {
 
         assert!(futility_pruning_is_eligible(
             heuristics,
-            ForwardPruneCandidate::quiet(2, 300, 0, quiet),
+            ForwardPruneCandidate::quiet(2, 400, 0, quiet),
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
@@ -2091,7 +2112,7 @@ mod tests {
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
-            ForwardPruneCandidate::quiet(3, 300, 0, quiet),
+            ForwardPruneCandidate::quiet(4, 600, 0, quiet),
         ));
         assert!(!futility_pruning_is_eligible(
             heuristics,
@@ -2246,7 +2267,7 @@ mod tests {
         let mut context = SearchContext::new(limits);
 
         let _ = context
-            .alpha_beta(&mut position, 2, 1, 300, 320, SearchNodeState::new(false))
+            .alpha_beta(&mut position, 2, 1, 400, 420, SearchNodeState::new(false))
             .expect("search must complete");
 
         assert!(context.debug_counters().futility_prunes > 0);

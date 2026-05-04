@@ -128,8 +128,8 @@ fn phase_eleven_no_tablebase_profile_report() {
 #[test]
 fn phase8_baseline_matches_documented_phase8_bench_signature() {
     let result = run_profile_bench(5, HeuristicProfile::Phase8Baseline);
-    assert_eq!(result.total_nodes, 380_602);
-    assert_eq!(result.checksum, 0x9b93_9caa_2c82_00c9);
+    assert_eq!(result.total_nodes, 354_385);
+    assert_eq!(result.checksum, 0x9b93_9cb3_7fa3_6cc9);
 }
 
 #[test]
@@ -152,23 +152,23 @@ fn phase9_profile_benches_remain_reproducible() {
 fn lmr_only_matches_documented_profile_signature() {
     let result = run_profile_bench(5, HeuristicProfile::LmrOnly);
 
-    assert_eq!(result.total_nodes, 380_602);
-    assert_eq!(result.checksum, 0x9b93_9caa_2c82_00c9);
+    assert_eq!(result.total_nodes, 348_825);
+    assert_eq!(result.checksum, 0x9b93_9c8a_cf9d_e6c3);
 }
 
 #[test]
 fn phase9_default_matches_documented_profile_signature() {
     let phase_nine = run_profile_bench(5, HeuristicProfile::Phase9Default);
 
-    assert_eq!(phase_nine.total_nodes, 147_246);
-    assert_eq!(phase_nine.checksum, 0x9b93_9d2d_b929_84f6);
+    assert_eq!(phase_nine.total_nodes, 117_152);
+    assert_eq!(phase_nine.checksum, 0x9b93_9cb8_dd85_ff5a);
 }
 
 #[test]
 fn phase10_threads_one_matches_retained_phase9_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 147_246);
-    assert_eq!(result.checksum, 0x9b93_9d2d_b929_84f6);
+    assert_eq!(result.total_nodes, 117_152);
+    assert_eq!(result.checksum, 0x9b93_9cb8_dd85_ff5a);
 }
 
 #[test]
@@ -183,8 +183,8 @@ fn phase10_threads_one_remains_reproducible() {
 #[test]
 fn phase11_syzygy_empty_threads_one_matches_retained_phase10_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 147_246);
-    assert_eq!(result.checksum, 0x9b93_9d2d_b929_84f6);
+    assert_eq!(result.total_nodes, 117_152);
+    assert_eq!(result.checksum, 0x9b93_9cb8_dd85_ff5a);
 }
 
 #[test]
@@ -239,8 +239,8 @@ fn phase_twelve_nnue_profile_report() {
 #[test]
 fn phase12_evalfile_empty_threads_one_matches_retained_phase11_signature() {
     let result = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);
-    assert_eq!(result.total_nodes, 147_246);
-    assert_eq!(result.checksum, 0x9b93_9d2d_b929_84f6);
+    assert_eq!(result.total_nodes, 117_152);
+    assert_eq!(result.checksum, 0x9b93_9cb8_dd85_ff5a);
 }
 
 #[test]
