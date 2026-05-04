@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use crate::core::Position;
+use crate::core::{Move, Position};
 
 use super::{
     SearchLimits, SearchResult, eval,
@@ -28,6 +28,7 @@ pub struct SearchRequest {
     pub soft_deadline: Option<Instant>,
     pub hard_deadline: Option<Instant>,
     pub stop_flag: Option<Arc<AtomicBool>>,
+    pub root_moves: Option<Vec<Move>>,
 }
 
 struct WorkerJob {
@@ -53,6 +54,7 @@ struct HelperSearchSpec<'a> {
     helper_stop_flag: Arc<AtomicBool>,
     soft_deadline: Option<Instant>,
     hard_deadline: Option<Instant>,
+    root_moves: Option<Vec<Move>>,
 }
 
 enum WorkerCommand {
@@ -105,6 +107,7 @@ impl WorkerPool {
                     soft_deadline: spec.soft_deadline,
                     hard_deadline: spec.hard_deadline,
                     role: SearchThreadRole::Helper(worker_index + 1),
+                    root_moves: spec.root_moves.clone(),
                 },
                 done_sender: done_sender.clone(),
             }));
@@ -269,6 +272,7 @@ impl UciSearchService {
                     soft_deadline: request.soft_deadline,
                     hard_deadline: request.hard_deadline,
                     role: SearchThreadRole::Main,
+                    root_moves: request.root_moves,
                 },
             );
         }
@@ -287,6 +291,7 @@ impl UciSearchService {
             helper_stop_flag: Arc::clone(&helper_stop_flag),
             soft_deadline: request.soft_deadline,
             hard_deadline: request.hard_deadline,
+            root_moves: request.root_moves.clone(),
         });
 
         let result = root::search_with_control(
@@ -302,6 +307,7 @@ impl UciSearchService {
                 soft_deadline: request.soft_deadline,
                 hard_deadline: request.hard_deadline,
                 role: SearchThreadRole::Main,
+                root_moves: request.root_moves,
             },
         );
 
@@ -452,6 +458,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -472,6 +479,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         let worker_count = service.debug_worker_count();
@@ -484,6 +492,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -510,6 +519,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -538,6 +548,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -566,6 +577,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -619,6 +631,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -651,6 +664,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -679,6 +693,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -706,6 +721,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         assert!(result.best_move.is_some());
@@ -730,6 +746,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         assert!(result.best_move.is_some());
@@ -771,6 +788,7 @@ mod tests {
                     soft_deadline: None,
                     hard_deadline: None,
                     stop_flag: None,
+                    root_moves: None,
                 },
             );
             let candidate_result = candidate.search(
@@ -780,6 +798,7 @@ mod tests {
                     soft_deadline: None,
                     hard_deadline: None,
                     stop_flag: None,
+                    root_moves: None,
                 },
             );
 
@@ -821,6 +840,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         println!(
@@ -844,6 +864,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         println!(
@@ -868,6 +889,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         println!(
@@ -901,6 +923,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 
@@ -931,6 +954,7 @@ mod tests {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
 

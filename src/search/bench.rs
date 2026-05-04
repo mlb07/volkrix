@@ -162,6 +162,7 @@ fn run_threaded_bench(config: BenchConfig) -> BenchResult {
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag: None,
+                root_moves: None,
             },
         );
         total_nodes += result.nodes;
@@ -229,6 +230,7 @@ fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> Timed
                 soft_deadline: Some(Instant::now() + std::time::Duration::from_millis(movetime_ms)),
                 hard_deadline: Some(Instant::now() + std::time::Duration::from_millis(movetime_ms)),
                 role: super::root::SearchThreadRole::Main,
+                root_moves: None,
             },
         );
         total_nodes += result.nodes;
@@ -277,6 +279,7 @@ fn run_threaded_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBench
                 soft_deadline: Some(deadline),
                 hard_deadline: Some(deadline),
                 stop_flag: None,
+                root_moves: None,
             },
         );
         total_nodes += result.nodes;

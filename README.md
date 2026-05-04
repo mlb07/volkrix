@@ -1,81 +1,30 @@
 # Volkrix
 
-Volkrix is a clean-room Rust UCI chess engine built for long-term strength, reproducibility, and public development.
+Volkrix is a UCI chess engine written in Rust. It is a clean-room implementation focused on long-term strength, reproducibility, and open development.
 
-## Status
+## Features
 
-The repository currently includes:
+- Standard chess move generation with perft-verified legality
+- Make/unmake with Zobrist hashing, repetition detection, and SEE
+- Iterative deepening alpha-beta search with quiescence, PV tracking, aspiration windows, and quiet-move LMR
+- Tapered classical evaluation: material, mobility, king safety, pawn structure, passed pawns, bishop pair, rook files, and lightweight threats
+- Persistent transposition table with `Hash` / `Clear Hash` controls
+- Lazy SMP via the `Threads` option
+- Optional Syzygy tablebase probing (`SyzygyPath`)
+- Optional NNUE evaluation (`EvalFile`) using the in-tree `VOLKNNUE` format
+- Reproducible `bench` command tied to the real search
 
-- Phase 0 repo scaffolding, CI, docs, licensing, and developer scripts
-- Phase 1 core chess types, position model, FEN parsing/serialization, legal move application for standard chess, and a minimal UCI shell
-- Phase 2 attack generation, staged legal move generation, canonical perft support, and divide regression artifacts
-- Phase 3 exact make/unmake restoration, Zobrist, repetition, rules/status helpers, and SEE
-- Phase 4 deterministic single-thread search with iterative deepening, alpha-beta, quiescence, PV tracking, and a simple classical evaluation
-- Phase 5 single-thread transposition table integration, deterministic TT-on/TT-off search paths, and a reproducible bench path tied to the real search core
-- Phase 6 search-strength layering with stronger move ordering, aspiration windows, deterministic internal heuristic toggles, and documented Phase 5 baseline comparisons
-- Phase 7 practical UCI usability with timed search, real `stop`, `Hash` / `Clear Hash`, and persistent TT reuse across UCI searches
-- Phase 8 classical eval bridge with tapered middlegame/endgame scoring, mobility, king safety, pawn structure, passed pawns, bishop pair, rook file terms, and compact static threats
-- Phase 9 search depth and selectivity layer II with conservative quiet-only LMR and exact retained baseline preservation
-- Phase 10 SMP / Lazy SMP Layer I with `Threads` and shared-TT-only helpers
-- Phase 11 Tablebases / Probe Layer I with optional `SyzygyPath` and retained Fathom-backed probing
-- Phase 12 NNUE Engine Integration Layer I with optional `EvalFile`, retained VOLKNNUE format, and exact disabled-path preservation
-- Phase 13 Training Pipeline and Net Iteration Layer I with isolated offline export / Bullet training / packing tooling, topology-aware HalfKP runtime support, retained `HalfKP 256x2` production topology, and first real candidate-net validation workflow
+## Building
 
-Current project priority:
+Volkrix builds on stable Rust with no external chess crates in the engine core.
 
-- only changes with evidence-backed Elo improvement matter
-- before returning to broader NNUE work, priority is to maximize the retained classical engine path first
-- that means classical eval, classical search, and their validation workflow take precedence over new NNUE feature work
-- when repository docs and engine behavior disagree, trust the code first and then fix the docs to match it
+```bash
+cargo build --release
+```
 
-## Plan Of Attack
+The release binary is written to `target/release/volkrix`.
 
-Path to `3000+` from the current Volkrix baseline:
-
-1. finish the retained classical search path first
-   - improve selective search, move ordering, and tactical stability
-   - keep every search change evidence-backed with direct engine matches
-2. keep strengthening the classical eval while NNUE is not yet the best path
-   - add only low-risk eval terms that survive tests and same-machine matches
-   - keep the eval surface tunable so offline fitting can support later promotion decisions
-3. treat NNUE as a long-term ceiling lift, not a short-term distraction
-   - build better search-labeled data
-   - do not promote new nets until they beat the classical fallback path
-4. tighten the tuning and validation loop
-   - keep curated openings, baseline binaries, and repeatable local gauntlets
-   - prefer match evidence over offline loss or checksum-only reasoning
-5. scale evidence before claiming strength
-   - positive local samples are enough to keep promising changes
-   - large claims require broader multi-sample validation
-
-Near-term execution order:
-
-- search first
-- then low-risk classical eval improvements
-- then stronger NNUE data / training once the classical path is harder to improve
-
-What is intentionally not here yet:
-
-- split-point or work-stealing SMP
-- broad tablebase redesign or broader tablebase features
-- external `.nnue` compatibility
-- broader NNUE tuning / search / architecture work beyond the retained first offline pipeline
-
-## Clean-Room Provenance
-
-Volkrix is an independent clean-room implementation released under dual MIT/Apache-2.0 licensing. GPL engine code, translated code, or closely paraphrased code must not be copied into this repository unless the project owner explicitly authorizes a licensing change in writing.
-
-Contributors must preserve that boundary. Public concepts, papers, high-level algorithms, and non-code descriptions may inform design, but implementation must be written from scratch.
-
-## Development
-
-Requirements:
-
-- stable Rust
-- no nightly features
-- no external chess crates in the engine core
-
-Common commands:
+A small helper script wraps the common workflows:
 
 ```bash
 python3 scripts/dev.py fmt
@@ -85,62 +34,75 @@ python3 scripts/dev.py bench
 python3 scripts/dev.py release --target aarch64-apple-darwin
 ```
 
-Direct Cargo commands:
+## Usage
+
+Volkrix speaks the [Universal Chess Interface](https://www.shredderchess.com/chess-features/uci-universal-chess-interface.html) and works with any UCI-compatible GUI (Cute Chess, Arena, Banksia, etc.).
+
+From a terminal:
+
+```
+$ volkrix
+uci
+position startpos moves e2e4 e7e5
+go movetime 1000
+```
+
+Run a deterministic search benchmark:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo build
-cargo test
-cargo run --release -- bench
+volkrix bench
 ```
+
+### Supported UCI commands
+
+`uci`, `isready`, `ucinewgame`, `position`, `go`, `stop`, `quit`.
+
+`go` accepts `depth`, `movetime`, `infinite`, and the standard time-control fields (`wtime`, `btime`, `winc`, `binc`, `movestogo`).
+
+### Options
+
+| Option        | Default | Description                                       |
+| ------------- | ------- | ------------------------------------------------- |
+| `Hash`        | 16      | Transposition table size in MB                    |
+| `Clear Hash`  | —       | Button: clear the transposition table             |
+| `Threads`     | 1       | Number of search threads (Lazy SMP)               |
+| `SyzygyPath`  | ""      | Directory containing Syzygy tablebase files       |
+| `EvalFile`    | ""      | Path to a `VOLKNNUE` network; empty uses classical eval |
+
+Malformed FEN strings, illegal moves, and malformed UCI input are rejected without panicking or corrupting engine state.
 
 ## Releases
 
-Publishing a GitHub Release triggers `.github/workflows/release.yml` to build the `volkrix` binary and upload per-platform archives to the release assets list.
+Publishing a GitHub Release triggers `.github/workflows/release.yml`, which builds `volkrix` and uploads per-platform archives to the release.
 
-## Change Tracking
+## Project layout
 
-Any meaningful change made to Volkrix must be written down somewhere in the repository so a future agent can pick up the work without relying on prior chat history.
+```
+src/        engine core (board, movegen, search, eval, UCI)
+tools/      offline tooling, including the NNUE packer
+trainer/    NNUE training pipeline
+benches/    Criterion benches
+tests/      integration and perft tests
+docs/       design notes
+```
 
-Requirements:
+Further reading lives in `docs/`:
 
-- do not leave important implementation state only in conversation history
-- record the current status, decisions, workflow, evidence, or next-step guidance in a durable repo document
-- the note does not have to live in `README.md`; it can live in a more appropriate file such as:
-  - `docs/search.md`
-  - `docs/nnue-training.md`
-  - `docs/roadmap.md`
-  - another dedicated doc if that is the clearest location
-- when a topic already has an authoritative handoff doc, update that doc instead of scattering notes across multiple places
+- [`architecture.md`](docs/architecture.md) — module layout and data flow
+- [`search.md`](docs/search.md) — search algorithm details
+- [`perft.md`](docs/perft.md) — move generation verification
+- [`nnue-training.md`](docs/nnue-training.md) — NNUE training and packing workflow
+- [`roadmap.md`](docs/roadmap.md) — planned work
 
-The goal is simple: if a new agent is asked to work on a feature, it should be able to read the repo and understand what was done, what was proved, and what still remains.
+## Clean-room provenance
 
-## Current UCI Surface
+Volkrix is an independent clean-room implementation. GPL-licensed engine code, machine translations, or close paraphrases of GPL sources must not be copied into this repository. Contributors may study public papers, algorithms, and high-level descriptions, but implementation must be written from scratch.
 
-The engine currently supports:
+## License
 
-- `uci`
-- `isready`
-- `ucinewgame`
-- `position`
-- `setoption name Hash value <mb>`
-- `setoption name Clear Hash`
-- `setoption name Threads value <n>`
-- `setoption name SyzygyPath value <path>`
-- `setoption name EvalFile value <path>`
-- `go depth`
-- `go movetime <ms>`
-- `go wtime <ms> btime <ms> [winc <ms>] [binc <ms>] [movestogo <n>]`
-- `go infinite`
-- `stop`
-- `quit`
+Dual-licensed under either of:
 
-Malformed FEN strings, invalid moves, and malformed UCI commands are handled without panicking or corrupting engine state. The UCI runtime preserves the documented deterministic `Threads=1` / `EvalFile=""` / `SyzygyPath=""` fixed-depth baseline, reuses TT state across UCI searches, and now supports the retained Phase 10/11/12 `Threads`, `SyzygyPath`, and `EvalFile` controls without widening the runtime surface further in Phase 13.
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+- Apache License 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
 
-## Documentation
-
-- `docs/architecture.md`
-- `docs/roadmap.md`
-- `docs/search.md`
-- `docs/nnue-training.md` for the retained NNUE workflow, current status, and future-agent handoff
+at your option.
