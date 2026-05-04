@@ -5,7 +5,7 @@ use crate::core::Position;
 use super::{
     SearchLimits,
     limits::SearchHeuristics,
-    root::{SearchControl, search, search_with_control},
+    root::{SearchControl, SearchResources, search, search_with_control},
     service::{SearchRequest, UciSearchService},
 };
 
@@ -240,10 +240,7 @@ fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> Timed
                 .with_hash_mb(config.hash_mb)
                 .with_tt(config.tt_enabled)
                 .with_heuristics(config.heuristics),
-            None,
-            None,
-            None,
-            None,
+            SearchResources::default(),
             SearchControl {
                 stop_flag: None,
                 helper_stop_flag: None,

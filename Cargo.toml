@@ -3,7 +3,7 @@ members = [".", "tools/volkrix-nnue"]
 
 [package]
 name = "volkrix"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Volkrix, a clean-room Rust UCI chess engine."

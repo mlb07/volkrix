@@ -13,7 +13,7 @@ use crate::core::{Move, Position};
 use super::{
     SearchLimits, SearchResult, eval,
     nnue::NnueService,
-    root::{self, SearchControl, SearchThreadRole},
+    root::{self, SearchControl, SearchResources, SearchThreadRole},
     tablebase::TablebaseService,
     tt::{DEFAULT_HASH_MB, TranspositionTable},
 };
@@ -283,10 +283,12 @@ impl UciSearchService {
             return root::search_with_control(
                 position,
                 limits,
-                limits.tt_enabled.then(|| Arc::clone(&self.tt)),
-                self.nnue.clone(),
-                self.tablebases.clone(),
-                self.classical_weights,
+                SearchResources {
+                    tt: limits.tt_enabled.then(|| Arc::clone(&self.tt)),
+                    nnue: self.nnue.clone(),
+                    tablebases: self.tablebases.clone(),
+                    classical_weights: self.classical_weights,
+                },
                 SearchControl {
                     stop_flag: request.stop_flag,
                     helper_stop_flag: None,
@@ -319,10 +321,12 @@ impl UciSearchService {
         let result = root::search_with_control(
             position,
             limits,
-            Some(Arc::clone(&self.tt)),
-            self.nnue.clone(),
-            self.tablebases.clone(),
-            self.classical_weights,
+            SearchResources {
+                tt: Some(Arc::clone(&self.tt)),
+                nnue: self.nnue.clone(),
+                tablebases: self.tablebases.clone(),
+                classical_weights: self.classical_weights,
+            },
             SearchControl {
                 stop_flag: request.stop_flag,
                 helper_stop_flag: Some(Arc::clone(&helper_stop_flag)),
@@ -426,10 +430,12 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
                 let _ = root::search_with_control(
                     &mut position,
                     job.limits,
-                    Some(job.tt),
-                    job.nnue,
-                    job.tablebases,
-                    job.classical_weights,
+                    SearchResources {
+                        tt: Some(job.tt),
+                        nnue: job.nnue,
+                        tablebases: job.tablebases,
+                        classical_weights: job.classical_weights,
+                    },
                     job.control,
                     None,
                 );

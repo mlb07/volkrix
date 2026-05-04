@@ -78,6 +78,14 @@ pub(crate) struct SearchControl {
     pub(crate) root_moves: Option<Vec<Move>>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct SearchResources {
+    pub(crate) tt: Option<Arc<tt::TranspositionTable>>,
+    pub(crate) nnue: Option<Arc<NnueService>>,
+    pub(crate) tablebases: Option<Arc<TablebaseService>>,
+    pub(crate) classical_weights: Option<eval::ClassicalEvalWeights>,
+}
+
 impl SearchControl {
     fn can_interrupt(&self) -> bool {
         self.stop_flag.is_some()
@@ -214,10 +222,7 @@ pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
     search_with_control(
         position,
         limits,
-        None,
-        None,
-        None,
-        None,
+        SearchResources::default(),
         SearchControl::default(),
         None,
     )
@@ -227,23 +232,11 @@ pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
 pub(crate) fn search_with_control<'a>(
     position: &mut Position,
     limits: SearchLimits,
-    tt: Option<Arc<tt::TranspositionTable>>,
-    nnue: Option<Arc<NnueService>>,
-    tablebases: Option<Arc<TablebaseService>>,
-    classical_weights: Option<eval::ClassicalEvalWeights>,
+    resources: SearchResources,
     control: SearchControl,
     info_reporter: InfoReporter<'a>,
 ) -> SearchResult {
-    SearchContext::with_tt(
-        limits,
-        tt,
-        nnue,
-        tablebases,
-        classical_weights,
-        control,
-        info_reporter,
-    )
-    .run(position, limits)
+    SearchContext::with_tt(limits, resources, control, info_reporter).run(position, limits)
 }
 
 enum RootSearchOutcome {
@@ -256,10 +249,7 @@ impl<'a> SearchContext<'a> {
     pub(crate) fn new(limits: SearchLimits) -> Self {
         Self::with_tt(
             limits,
-            None,
-            None,
-            None,
-            None,
+            SearchResources::default(),
             SearchControl::default(),
             None,
         )
@@ -267,10 +257,7 @@ impl<'a> SearchContext<'a> {
 
     fn with_tt(
         limits: SearchLimits,
-        tt: Option<Arc<tt::TranspositionTable>>,
-        nnue: Option<Arc<NnueService>>,
-        tablebases: Option<Arc<TablebaseService>>,
-        classical_weights: Option<eval::ClassicalEvalWeights>,
+        resources: SearchResources,
         control: SearchControl,
         info_reporter: InfoReporter<'a>,
     ) -> Self {
@@ -288,16 +275,16 @@ impl<'a> SearchContext<'a> {
             continuation_history: Box::new(
                 [[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2],
             ),
-            classical_weights,
+            classical_weights: resources.classical_weights,
             heuristics: limits.heuristics,
             control,
-            tt: tt.or_else(|| {
+            tt: resources.tt.or_else(|| {
                 limits
                     .tt_enabled
                     .then(|| Arc::new(tt::TranspositionTable::new_mb(limits.hash_mb)))
             }),
-            nnue: nnue.map(NnueSearchState::new),
-            tablebases,
+            nnue: resources.nnue.map(NnueSearchState::new),
+            tablebases: resources.tablebases,
             info_reporter,
             debug_counters: SearchDebugCounters::default(),
         }
@@ -1538,11 +1525,9 @@ fn format_info_line(
     } else {
         format!("score cp {score}")
     };
-    let nps = if elapsed_ms == 0 {
-        nodes.saturating_mul(1_000)
-    } else {
-        ((nodes as u128) * 1_000 / elapsed_ms) as u64
-    };
+    let nps = ((nodes as u128) * 1_000)
+        .checked_div(elapsed_ms)
+        .unwrap_or_else(|| nodes.saturating_mul(1_000) as u128) as u64;
 
     if pv_text.is_empty() {
         format!(
@@ -1586,7 +1571,7 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 mod tests {
     use super::{
         Bound, ForwardPruneCandidate, LmrCandidate, Move, MoveList, MoveOrderHints, Position,
-        SearchContext, SearchHeuristics, SearchLimits, SearchNodeState,
+        SearchContext, SearchHeuristics, SearchLimits, SearchNodeState, SearchResources,
         futility_pruning_is_eligible, late_move_pruning_is_eligible, lmr_is_eligible,
         lmr_reduction, lmr_requires_full_research, null_move_is_eligible, null_move_reduction,
         reverse_futility_is_eligible, tt_cutoff_score, validated_tt_move_hint,
@@ -2297,10 +2282,10 @@ mod tests {
         let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
         let mut context = SearchContext::with_tt(
             SearchLimits::new(2),
-            None,
-            None,
-            Some(tablebases),
-            None,
+            SearchResources {
+                tablebases: Some(tablebases),
+                ..SearchResources::default()
+            },
             super::SearchControl::default(),
             None,
         );
@@ -2330,10 +2315,10 @@ mod tests {
         let result = super::search_with_control(
             &mut position,
             SearchLimits::new(2),
-            None,
-            None,
-            Some(tablebases),
-            None,
+            SearchResources {
+                tablebases: Some(tablebases),
+                ..SearchResources::default()
+            },
             super::SearchControl::default(),
             None,
         );
