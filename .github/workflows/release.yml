@@ -20,14 +20,17 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: volkrix-x86_64-unknown-linux-gnu.tar.gz
             binary: volkrix
+            rustflags: ""
           - os: macos-15
             target: aarch64-apple-darwin
             archive: volkrix-aarch64-apple-darwin.tar.gz
             binary: volkrix
+            rustflags: ""
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: volkrix-x86_64-pc-windows-msvc.zip
             binary: volkrix.exe
+            rustflags: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
 
@@ -36,6 +39,8 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
         run: cargo build --locked --release --package volkrix --bin volkrix --target ${{ matrix.target }}
 
       - name: Prepare release bundle

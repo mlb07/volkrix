@@ -187,14 +187,26 @@ impl UciSearchService {
         self.hash_mb
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) fn threads(&self) -> usize {
         self.threads
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) fn syzygy_path(&self) -> &str {
         &self.syzygy_path
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) fn eval_file(&self) -> &str {
         &self.eval_file
     }
@@ -256,6 +268,15 @@ impl UciSearchService {
     }
 
     pub fn search(&mut self, position: &mut Position, request: SearchRequest) -> SearchResult {
+        self.search_with_info(position, request, None)
+    }
+
+    pub fn search_with_info<'a>(
+        &mut self,
+        position: &mut Position,
+        request: SearchRequest,
+        mut info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
+    ) -> SearchResult {
         let limits = request.limits.with_hash_mb(self.hash_mb);
         let effective_threads = self.effective_threads(limits.tt_enabled);
         if effective_threads <= 1 {
@@ -274,6 +295,7 @@ impl UciSearchService {
                     role: SearchThreadRole::Main,
                     root_moves: request.root_moves,
                 },
+                info_reporter.take(),
             );
         }
 
@@ -309,6 +331,7 @@ impl UciSearchService {
                 role: SearchThreadRole::Main,
                 root_moves: request.root_moves,
             },
+            info_reporter.take(),
         );
 
         helper_stop_flag.store(true, Ordering::Relaxed);
@@ -408,6 +431,7 @@ fn worker_loop(receiver: Receiver<WorkerCommand>) {
                     job.tablebases,
                     job.classical_weights,
                     job.control,
+                    None,
                 );
                 let _ = job.done_sender.send(());
             }

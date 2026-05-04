@@ -30,6 +30,12 @@ fn uci_handshake_returns_required_lines() {
         response
             .lines
             .iter()
+            .any(|line| line == "id author Monty Bognar")
+    );
+    assert!(
+        response
+            .lines
+            .iter()
             .any(|line| { line == "option name Hash type spin default 16 min 1 max 512" })
     );
     assert!(
@@ -78,6 +84,12 @@ fn go_depth_returns_a_legal_move() {
     let mut engine = UciEngine::new();
     let response = engine.handle_line("go depth 1");
     assert_info_pvs_are_legal(&response.lines, &Position::startpos());
+    assert!(
+        response
+            .lines
+            .iter()
+            .any(|line| line.starts_with("info depth 1 ") && line.contains(" nps "))
+    );
     let bestmove_line = response
         .lines
         .iter()
@@ -92,6 +104,21 @@ fn go_depth_returns_a_legal_move() {
     position
         .apply_uci_move(bestmove)
         .expect("bestmove must be legal");
+}
+
+#[test]
+fn debug_command_is_accepted_as_uci_noop() {
+    let mut engine = UciEngine::new();
+    assert!(engine.handle_line("debug on").lines.is_empty());
+    assert!(engine.handle_line("debug off").lines.is_empty());
+
+    let response = engine.handle_line("debug maybe");
+    assert!(
+        response
+            .lines
+            .iter()
+            .any(|line| line.contains("unsupported debug argument 'maybe'"))
+    );
 }
 
 #[test]

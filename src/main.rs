@@ -1,4 +1,6 @@
 fn main() -> std::io::Result<()> {
+    eprintln!("{} {}", volkrix::ENGINE_NAME, volkrix::VERSION);
+
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         None => volkrix::uci::run_stdio(),

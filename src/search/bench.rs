@@ -46,11 +46,19 @@ impl BenchConfig {
         self
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn with_heuristics(mut self, heuristics: SearchHeuristics) -> Self {
         self.heuristics = heuristics;
         self
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads;
         self
@@ -188,6 +196,10 @@ fn run_threaded_bench(config: BenchConfig) -> BenchResult {
     }
 }
 
+#[cfg_attr(
+    not(any(test, debug_assertions, feature = "internal-testing")),
+    allow(dead_code)
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TimedBenchResult {
     pub movetime_ms: u64,
@@ -198,6 +210,10 @@ pub struct TimedBenchResult {
     pub elapsed_ms: u128,
 }
 
+#[cfg_attr(
+    not(any(test, debug_assertions, feature = "internal-testing")),
+    allow(dead_code)
+)]
 pub(crate) fn run_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBenchResult {
     if config.threads <= 1 || !config.tt_enabled {
         return run_single_thread_timed_bench(config, movetime_ms);
@@ -206,6 +222,10 @@ pub(crate) fn run_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBen
     run_threaded_timed_bench(config, movetime_ms)
 }
 
+#[cfg_attr(
+    not(any(test, debug_assertions, feature = "internal-testing")),
+    allow(dead_code)
+)]
 fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBenchResult {
     let started = Instant::now();
     let mut total_nodes = 0u64;
@@ -232,6 +252,7 @@ fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> Timed
                 role: super::root::SearchThreadRole::Main,
                 root_moves: None,
             },
+            None,
         );
         total_nodes += result.nodes;
         total_completed_depth += result.depth as u64;
@@ -256,6 +277,10 @@ fn run_single_thread_timed_bench(config: BenchConfig, movetime_ms: u64) -> Timed
     }
 }
 
+#[cfg_attr(
+    not(any(test, debug_assertions, feature = "internal-testing")),
+    allow(dead_code)
+)]
 fn run_threaded_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBenchResult {
     let started = Instant::now();
     let mut total_nodes = 0u64;

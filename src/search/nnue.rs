@@ -1,8 +1,6 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+use std::path::{Path, PathBuf};
+use std::{fs, sync::Arc};
 
 use crate::core::{Color, Move, PieceType, Position, Score, Square, UndoState};
 

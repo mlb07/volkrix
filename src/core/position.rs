@@ -553,6 +553,32 @@ impl Position {
         }
     }
 
+    /// Generates captures and quiet promotions. If the side to move is in check, all legal
+    /// evasions are generated because quiescence must resolve check before standing pat.
+    pub(crate) fn generate_legal_noisy_moves(&mut self, moves: &mut MoveList) {
+        moves.clear();
+
+        let info = self.check_info();
+        let mut pseudo_legal = MoveList::new();
+
+        if info.checkers.count_ones() >= 2 {
+            self.generate_king_moves(MoveGenStage::Captures, ALL_TARGETS, &mut pseudo_legal);
+            self.generate_king_moves(MoveGenStage::Quiets, ALL_TARGETS, &mut pseudo_legal);
+        } else if info.checkers != 0 {
+            self.generate_evasions(&info, &mut pseudo_legal);
+        } else {
+            self.generate_non_king_moves(MoveGenStage::Captures, ALL_TARGETS, &mut pseudo_legal);
+            self.generate_king_moves(MoveGenStage::Captures, ALL_TARGETS, &mut pseudo_legal);
+            self.generate_quiet_promotions(ALL_TARGETS, &mut pseudo_legal);
+        }
+
+        for mv in pseudo_legal.as_slice().iter().copied() {
+            if self.is_legal_fast(mv, &info) {
+                moves.push(mv);
+            }
+        }
+    }
+
     pub fn select_placeholder_bestmove(&mut self) -> Option<Move> {
         let mut legal_moves = MoveList::new();
         self.generate_legal_moves(&mut legal_moves);
@@ -868,6 +894,31 @@ impl Position {
         let mut queens = self.pieces(color, PieceType::Queen);
         while let Some(from) = pop_lsb(&mut queens) {
             self.generate_slider_moves(from, color, PieceType::Queen, stage, target_mask, moves);
+        }
+    }
+
+    fn generate_quiet_promotions(&self, target_mask: u64, moves: &mut MoveList) {
+        let color = self.side_to_move;
+        let occupied = self.occupancies[OCCUPANCY_ALL];
+        let promotion_from_rank = match color {
+            Color::White => 6,
+            Color::Black => 1,
+        };
+
+        let mut pawns = self.pieces(color, PieceType::Pawn);
+        while let Some(from) = pop_lsb(&mut pawns) {
+            if from.rank() != promotion_from_rank {
+                continue;
+            }
+            let Some(to) = from.offset(0, color.pawn_direction()) else {
+                continue;
+            };
+            if occupied & to.bit() != 0 || target_mask & to.bit() == 0 {
+                continue;
+            }
+            for promotion_piece in PieceType::promotion_pieces() {
+                moves.push(Move::new(from, to).with_promotion(promotion_piece));
+            }
         }
     }
 
@@ -1680,6 +1731,52 @@ mod tests {
             path.pop();
             position.unmake_move(mv, undo);
         }
+    }
+
+    fn sorted_uci_moves(moves: &MoveList) -> Vec<String> {
+        let mut values: Vec<_> = moves.as_slice().iter().map(|mv| mv.to_string()).collect();
+        values.sort();
+        values
+    }
+
+    #[test]
+    fn legal_noisy_generation_keeps_only_captures_and_promotions_out_of_check() {
+        let mut position = Position::from_fen("4k2r/6P1/8/3pP3/8/8/8/4K3 w - d6 0 1")
+            .expect("FEN parse must succeed");
+
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let mut expected: Vec<_> = legal_moves
+            .as_slice()
+            .iter()
+            .filter(|mv| mv.is_capture() || mv.is_promotion())
+            .map(|mv| mv.to_string())
+            .collect();
+        expected.sort();
+
+        let mut noisy_moves = MoveList::new();
+        position.generate_legal_noisy_moves(&mut noisy_moves);
+
+        assert_eq!(sorted_uci_moves(&noisy_moves), expected);
+        assert!(expected.contains(&"e5d6".to_owned()));
+        assert!(expected.contains(&"g7g8q".to_owned()));
+        assert!(expected.contains(&"g7h8q".to_owned()));
+    }
+
+    #[test]
+    fn legal_noisy_generation_returns_all_evasions_in_check() {
+        let mut position =
+            Position::from_fen("4k3/8/8/8/8/8/4r3/4K3 w - - 0 1").expect("FEN parse must succeed");
+
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let mut noisy_moves = MoveList::new();
+        position.generate_legal_noisy_moves(&mut noisy_moves);
+
+        assert_eq!(
+            sorted_uci_moves(&noisy_moves),
+            sorted_uci_moves(&legal_moves)
+        );
     }
 
     #[test]
