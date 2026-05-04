@@ -275,7 +275,7 @@ impl UciSearchService {
         &mut self,
         position: &mut Position,
         request: SearchRequest,
-        mut info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
+        mut info_reporter: root::InfoReporter<'a>,
     ) -> SearchResult {
         let limits = request.limits.with_hash_mb(self.hash_mb);
         let effective_threads = self.effective_threads(limits.tt_enabled);
