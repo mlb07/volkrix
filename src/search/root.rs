@@ -86,7 +86,7 @@ impl SearchControl {
     }
 }
 
-pub(crate) struct SearchContext {
+pub(crate) struct SearchContext<'a> {
     started: Instant,
     pub(crate) nodes: u64,
     tt_hits: u64,
@@ -104,6 +104,7 @@ pub(crate) struct SearchContext {
     tt: Option<Arc<tt::TranspositionTable>>,
     nnue: Option<NnueSearchState>,
     tablebases: Option<Arc<TablebaseService>>,
+    info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
     debug_counters: SearchDebugCounters,
 }
 
@@ -217,10 +218,11 @@ pub fn search(position: &mut Position, limits: SearchLimits) -> SearchResult {
         None,
         None,
         SearchControl::default(),
+        None,
     )
 }
 
-pub(crate) fn search_with_control(
+pub(crate) fn search_with_control<'a>(
     position: &mut Position,
     limits: SearchLimits,
     tt: Option<Arc<tt::TranspositionTable>>,
@@ -228,9 +230,18 @@ pub(crate) fn search_with_control(
     tablebases: Option<Arc<TablebaseService>>,
     classical_weights: Option<eval::ClassicalEvalWeights>,
     control: SearchControl,
+    info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
 ) -> SearchResult {
-    SearchContext::with_tt(limits, tt, nnue, tablebases, classical_weights, control)
-        .run(position, limits)
+    SearchContext::with_tt(
+        limits,
+        tt,
+        nnue,
+        tablebases,
+        classical_weights,
+        control,
+        info_reporter,
+    )
+    .run(position, limits)
 }
 
 enum RootSearchOutcome {
@@ -238,10 +249,18 @@ enum RootSearchOutcome {
     Aborted(Option<Move>),
 }
 
-impl SearchContext {
+impl<'a> SearchContext<'a> {
     #[cfg(test)]
     pub(crate) fn new(limits: SearchLimits) -> Self {
-        Self::with_tt(limits, None, None, None, None, SearchControl::default())
+        Self::with_tt(
+            limits,
+            None,
+            None,
+            None,
+            None,
+            SearchControl::default(),
+            None,
+        )
     }
 
     fn with_tt(
@@ -251,6 +270,7 @@ impl SearchContext {
         tablebases: Option<Arc<TablebaseService>>,
         classical_weights: Option<eval::ClassicalEvalWeights>,
         control: SearchControl,
+        info_reporter: Option<Box<dyn FnMut(&str) + 'a>>,
     ) -> Self {
         Self {
             started: Instant::now(),
@@ -276,6 +296,7 @@ impl SearchContext {
             }),
             nnue: nnue.map(NnueSearchState::new),
             tablebases,
+            info_reporter,
             debug_counters: SearchDebugCounters::default(),
         }
     }
@@ -359,14 +380,16 @@ impl SearchContext {
             best_pv = pv.clone();
             self.capture_completed_pv(&pv);
             if self.control.role.is_main() {
-                info_lines.push(format_info_line(
+                let info_line = format_info_line(
                     depth,
                     depth_score,
                     self.nodes,
                     self.started.elapsed().as_millis(),
                     self.tt_hits,
                     &pv,
-                ));
+                );
+                self.report_info_line(&info_line);
+                info_lines.push(info_line);
             }
         }
 
@@ -417,14 +440,16 @@ impl SearchContext {
         let score = tablebase::score_from_wdl(root_probe.wdl, 0);
         let pv = vec![root_probe.best_move];
         let info_lines = if self.control.role.is_main() {
-            vec![format_info_line(
+            let info_line = format_info_line(
                 0,
                 score,
                 self.nodes,
                 self.started.elapsed().as_millis(),
                 self.tt_hits,
                 &pv,
-            )]
+            );
+            self.report_info_line(&info_line);
+            vec![info_line]
         } else {
             Vec::new()
         };
@@ -438,6 +463,12 @@ impl SearchContext {
             info_lines,
             tt_hits: self.tt_hits,
         })
+    }
+
+    fn report_info_line(&mut self, line: &str) {
+        if let Some(reporter) = self.info_reporter.as_mut() {
+            reporter(line);
+        }
     }
 
     fn search_root_with_aspiration_core<const USE_TABLEBASES: bool, const USE_NNUE: bool>(
@@ -514,7 +545,8 @@ impl SearchContext {
 
         let mut best_move = None;
 
-        for mv in MovePicker::new(self, position, &legal_moves, ordering_hints).ordered() {
+        let mut move_picker = MovePicker::new(self, position, &legal_moves, ordering_hints);
+        while let Some(mv) = move_picker.next() {
             if self.hard_stop_requested() {
                 return RootSearchOutcome::Aborted(best_move);
             }
@@ -732,7 +764,6 @@ impl SearchContext {
 
         let tt_key = position.search_key();
         let alpha_start = alpha;
-        let static_eval = self.evaluate_position::<USE_NNUE>(position);
 
         let tt_hit = self.probe_tt(tt_key);
         if let Some(hit) = tt_hit
@@ -744,6 +775,8 @@ impl SearchContext {
         if depth == 0 {
             return qsearch::qsearch::<USE_NNUE>(self, position, ply, alpha, beta);
         }
+
+        let static_eval = self.evaluate_position::<USE_NNUE>(position);
 
         let in_check = position.is_in_check(position.side_to_move());
         let pv_move_hint = node_state
@@ -835,7 +868,8 @@ impl SearchContext {
             return Some(beta);
         }
 
-        for mv in MovePicker::new(self, position, &legal_moves, ordering_hints).ordered() {
+        let mut move_picker = MovePicker::new(self, position, &legal_moves, ordering_hints);
+        while let Some(mv) = move_picker.next() {
             let is_quiet = !mv.is_capture() && !mv.is_promotion();
             if is_quiet {
                 quiets_searched += 1;
@@ -1412,7 +1446,7 @@ fn null_move_reduction(depth: usize) -> usize {
     if depth >= 6 { 3 } else { 2 }
 }
 
-impl SearchContext {
+impl SearchContext<'_> {
     fn helper_root_order(
         &self,
         position: &Position,
@@ -1490,12 +1524,19 @@ fn format_info_line(
     } else {
         format!("score cp {score}")
     };
+    let nps = if elapsed_ms == 0 {
+        nodes.saturating_mul(1_000)
+    } else {
+        ((nodes as u128) * 1_000 / elapsed_ms) as u64
+    };
 
     if pv_text.is_empty() {
-        format!("info depth {depth} {score_text} nodes {nodes} time {elapsed_ms} tthits {tt_hits}")
+        format!(
+            "info depth {depth} {score_text} nodes {nodes} nps {nps} time {elapsed_ms} tthits {tt_hits}"
+        )
     } else {
         format!(
-            "info depth {depth} {score_text} nodes {nodes} time {elapsed_ms} tthits {tt_hits} pv {pv_text}"
+            "info depth {depth} {score_text} nodes {nodes} nps {nps} time {elapsed_ms} tthits {tt_hits} pv {pv_text}"
         )
     }
 }
@@ -2240,6 +2281,7 @@ mod tests {
             Some(tablebases),
             None,
             super::SearchControl::default(),
+            None,
         );
 
         let score = context
@@ -2272,6 +2314,7 @@ mod tests {
             Some(tablebases),
             None,
             super::SearchControl::default(),
+            None,
         );
 
         assert_eq!(result.score.0, 0);

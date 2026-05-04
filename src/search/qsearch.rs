@@ -37,9 +37,17 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
     }
 
     let mut legal_moves = MoveList::new();
-    position.generate_legal_moves(&mut legal_moves);
+    if in_check {
+        position.generate_legal_moves(&mut legal_moves);
+    } else {
+        position.generate_legal_noisy_moves(&mut legal_moves);
+    }
     if legal_moves.is_empty() {
-        return Some(terminal_score(position, ply));
+        return if in_check {
+            Some(terminal_score(position, ply))
+        } else {
+            Some(alpha)
+        };
     }
     let ordering_hints = MoveOrderHints {
         ply,
@@ -48,7 +56,8 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
         tt_move: None,
     };
 
-    for mv in MovePicker::new(context, position, &legal_moves, ordering_hints).ordered() {
+    let mut move_picker = MovePicker::new(context, position, &legal_moves, ordering_hints);
+    while let Some(mv) = move_picker.next() {
         if !in_check && mv.is_capture() && !mv.is_promotion() && position.see(mv).0 < 0 {
             continue;
         }

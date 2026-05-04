@@ -14,6 +14,10 @@ pub(crate) struct SearchHeuristics {
 }
 
 impl SearchHeuristics {
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn phase8_baseline() -> Self {
         Self {
             pv_move_ordering: true,
@@ -46,11 +50,19 @@ impl SearchHeuristics {
         }
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn with_aspiration_windows(mut self, enabled: bool) -> Self {
         self.aspiration_windows = enabled;
         self
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn with_late_move_reductions(mut self, enabled: bool) -> Self {
         self.late_move_reductions = enabled;
         self
@@ -125,6 +137,10 @@ impl SearchLimits {
         self
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) const fn with_phase8_baseline(mut self) -> Self {
         self.heuristics = SearchHeuristics::phase8_baseline();
         self

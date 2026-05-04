@@ -10,7 +10,7 @@ use std::{
 };
 
 use crate::{
-    ENGINE_AUTHOR, ENGINE_NAME,
+    ENGINE_AUTHOR, ENGINE_NAME, VERSION,
     core::{Color, Move, MoveList, ParsedMove, Position},
     search::{
         SearchLimits,
@@ -54,6 +54,7 @@ enum SetOptionCommand {
 
 enum RuntimeInput {
     Command(String),
+    StopRequested,
     QuitRequested,
 }
 
@@ -117,13 +118,23 @@ impl UciEngine {
     }
 
     pub fn handle_line(&mut self, line: &str) -> UciResponse {
-        self.handle_line_with_stop(line, None)
+        self.handle_line_with_stop_and_info(line, None, None)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn handle_line_with_stop(
         &mut self,
         line: &str,
         stop_flag: Option<Arc<AtomicBool>>,
+    ) -> UciResponse {
+        self.handle_line_with_stop_and_info(line, stop_flag, None)
+    }
+
+    fn handle_line_with_stop_and_info(
+        &mut self,
+        line: &str,
+        stop_flag: Option<Arc<AtomicBool>>,
+        info_reporter: Option<&mut dyn FnMut(&str)>,
     ) -> UciResponse {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -137,7 +148,7 @@ impl UciEngine {
         match tokens[0] {
             "uci" => UciResponse {
                 lines: vec![
-                    format!("id name {ENGINE_NAME}"),
+                    format!("id name {ENGINE_NAME} {VERSION}"),
                     format!("id author {ENGINE_AUTHOR}"),
                     format!(
                         "option name Hash type spin default {} min {} max {}",
@@ -177,7 +188,11 @@ impl UciEngine {
                 should_quit: false,
             },
             "go" => UciResponse {
-                lines: self.handle_go(&tokens, stop_flag),
+                lines: self.handle_go(&tokens, stop_flag, info_reporter),
+                should_quit: false,
+            },
+            "debug" => UciResponse {
+                lines: handle_debug_command(&tokens),
                 should_quit: false,
             },
             "stop" => {
@@ -292,23 +307,37 @@ impl UciEngine {
         }
     }
 
-    fn handle_go(&mut self, tokens: &[&str], stop_flag: Option<Arc<AtomicBool>>) -> Vec<String> {
+    fn handle_go(
+        &mut self,
+        tokens: &[&str],
+        stop_flag: Option<Arc<AtomicBool>>,
+        info_reporter: Option<&mut dyn FnMut(&str)>,
+    ) -> Vec<String> {
         let options = match parse_go(tokens) {
             Ok(options) => options,
             Err(error) => return vec![format!("info string error: {error}")],
         };
-
-        if let Some(stop_flag) = stop_flag.as_ref() {
-            stop_flag.store(false, Ordering::Relaxed);
-        }
 
         let request = match self.build_search_request(options, stop_flag) {
             Ok(request) => request,
             Err(error) => return vec![format!("info string error: {error}")],
         };
 
-        let result = self.search_service.search(&mut self.position, request);
-        let mut lines = result.info_lines;
+        let live_info = info_reporter.is_some();
+        let result = if let Some(reporter) = info_reporter {
+            self.search_service.search_with_info(
+                &mut self.position,
+                request,
+                Some(Box::new(move |line| reporter(line))),
+            )
+        } else {
+            self.search_service.search(&mut self.position, request)
+        };
+        let mut lines = if live_info {
+            Vec::new()
+        } else {
+            result.info_lines
+        };
         let bestmove = result
             .best_move
             .map_or_else(|| "0000".to_owned(), |mv| mv.to_string());
@@ -528,6 +557,17 @@ fn parse_go(tokens: &[&str]) -> Result<GoOptions, String> {
     Ok(options)
 }
 
+fn handle_debug_command(tokens: &[&str]) -> Vec<String> {
+    match tokens {
+        [_, "on"] | [_, "off"] => Vec::new(),
+        [_] => vec!["info string error: debug requires on or off".to_owned()],
+        _ => vec![format!(
+            "info string error: unsupported debug argument '{}'",
+            tokens[1]
+        )],
+    }
+}
+
 fn is_go_option_token(token: &str) -> bool {
     matches!(
         token,
@@ -669,7 +709,28 @@ fn run_runtime_session<W: Write>(
     while let Ok(message) = receiver.recv() {
         match message {
             RuntimeInput::Command(line) => {
-                let response = engine.handle_line_with_stop(&line, Some(Arc::clone(stop_flag)));
+                let (response, live_info_error) = {
+                    let mut live_info_error = None;
+                    let mut live_info = |info_line: &str| {
+                        if live_info_error.is_some() {
+                            return;
+                        }
+                        if let Err(error) =
+                            writeln!(output, "{info_line}").and_then(|_| output.flush())
+                        {
+                            live_info_error = Some(error);
+                        }
+                    };
+                    let response = engine.handle_line_with_stop_and_info(
+                        &line,
+                        Some(Arc::clone(stop_flag)),
+                        Some(&mut live_info),
+                    );
+                    (response, live_info_error)
+                };
+                if let Some(error) = live_info_error {
+                    return Err(error);
+                }
                 let suppress_output =
                     quit_flag.load(Ordering::Relaxed) && line.trim_start().starts_with("go");
                 if !suppress_output {
@@ -679,9 +740,12 @@ fn run_runtime_session<W: Write>(
                     output.flush()?;
                 }
 
-                if response.should_quit || quit_flag.load(Ordering::Relaxed) {
+                if response.should_quit {
                     break;
                 }
+            }
+            RuntimeInput::StopRequested => {
+                stop_flag.store(false, Ordering::Relaxed);
             }
             RuntimeInput::QuitRequested => break,
         }
@@ -699,6 +763,12 @@ fn handle_input_line(
     match line.trim() {
         "stop" => {
             stop_flag.store(true, Ordering::Relaxed);
+            sender.send(RuntimeInput::StopRequested).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    format!("uci runtime send failed: {error}"),
+                )
+            })?;
             Ok(true)
         }
         "quit" => {
@@ -929,7 +999,10 @@ mod tests {
                 .expect("stop handling must succeed")
         );
         assert!(stop_flag.load(Ordering::Relaxed));
-        assert!(receiver.try_recv().is_err());
+        assert!(matches!(
+            receiver.try_recv().expect("stop wakeup must be queued"),
+            RuntimeInput::StopRequested
+        ));
 
         assert!(
             !handle_input_line("quit".to_owned(), &sender, &stop_flag, &quit_flag)
@@ -940,6 +1013,102 @@ mod tests {
             receiver.try_recv().expect("quit wakeup must be queued"),
             RuntimeInput::QuitRequested
         ));
+    }
+
+    #[test]
+    fn queued_quit_does_not_suppress_startup_identification() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        handle_input_line(
+            "uci".to_owned(),
+            &sender,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("uci command must queue");
+        handle_input_line(
+            "isready".to_owned(),
+            &sender,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("isready command must queue");
+        assert!(
+            !handle_input_line(
+                "quit".to_owned(),
+                &sender,
+                stop_flag.as_ref(),
+                quit_flag.as_ref(),
+            )
+            .expect("quit command must queue")
+        );
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        let output = String::from_utf8(output).expect("runtime output must be utf8");
+
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("id name Volkrix"))
+        );
+        assert!(output.contains("id author Monty Bognar\n"));
+        assert!(output.contains("uciok\n"));
+        assert!(output.contains("readyok\n"));
+    }
+
+    #[test]
+    fn runtime_streams_search_info_before_bestmove_without_repeating_it() {
+        let (sender, receiver) = mpsc::channel();
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let quit_flag = Arc::new(AtomicBool::new(false));
+
+        handle_input_line(
+            "go depth 2".to_owned(),
+            &sender,
+            stop_flag.as_ref(),
+            quit_flag.as_ref(),
+        )
+        .expect("go command must queue");
+        drop(sender);
+
+        let mut output = Vec::new();
+        let mut engine = UciEngine::new();
+        run_runtime_session(
+            &mut engine,
+            &receiver,
+            &mut output,
+            &stop_flag,
+            quit_flag.as_ref(),
+        )
+        .expect("runtime must complete");
+        let output = String::from_utf8(output).expect("runtime output must be utf8");
+        let info_count = output
+            .lines()
+            .filter(|line| line.starts_with("info depth "))
+            .count();
+        let first_info = output
+            .find("info depth ")
+            .expect("runtime must stream an info line");
+        let bestmove = output
+            .find("bestmove ")
+            .expect("runtime must emit bestmove");
+
+        assert_eq!(info_count, 2);
+        assert!(first_info < bestmove);
+        assert!(output.contains(" nps "));
+        assert_eq!(output.matches("bestmove ").count(), 1);
     }
 
     #[test]
