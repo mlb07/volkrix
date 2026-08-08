@@ -1,0 +1,33 @@
+name: Deterministic Stress
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  state-and-parser-stress:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        seed:
+          - "0x6a09e667f3bcc909"
+          - "0xbb67ae8584caa73b"
+          - "0x3c6ef372fe94f82b"
+          - "0xa54ff53a5f1d36f1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: deterministic make/unmake, movegen, FEN, and UCI stress
+        run: >-
+          cargo run --locked --release --features internal-testing
+          --bin volkrix-stress --
+          --seed ${{ matrix.seed }}
+          --walks 256
+          --plies 512
+          --parser-cases 50000

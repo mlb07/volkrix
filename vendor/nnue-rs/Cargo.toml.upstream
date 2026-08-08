@@ -1,0 +1,18 @@
+[package]
+name = "nnue-rs"
+version = "0.4.0"
+edition = "2021"
+authors = ["hedgeg0d"]
+description = "Volkrix-pinned fork of nnue-rs with compact deltas and AArch64 SIMD"
+license = "MIT"
+repository = "https://github.com/hedgeg0d/nnue-rs"
+homepage = "https://github.com/hedgeg0d/nnue-rs"
+documentation = "https://docs.rs/nnue-rs"
+readme = "README.md"
+keywords = ["chess", "nnue", "stockfish", "evaluation"]
+categories = ["games", "algorithms"]
+exclude = ["*.nnue"]
+
+[lib]
+name = "nnue_rs"
+path = "src/lib.rs"

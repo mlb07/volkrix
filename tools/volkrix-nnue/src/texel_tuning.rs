@@ -75,11 +75,14 @@ struct TuningSample {
     target_probability: f64,
 }
 
+type WeightGetter = dyn Fn(&ClassicalEvalWeights) -> i32;
+type WeightSetter = dyn Fn(&mut ClassicalEvalWeights, i32);
+
 struct ParameterSpec {
     #[allow(dead_code)]
     name: &'static str,
-    get: Box<dyn Fn(&ClassicalEvalWeights) -> i32>,
-    set: Box<dyn Fn(&mut ClassicalEvalWeights, i32)>,
+    get: Box<WeightGetter>,
+    set: Box<WeightSetter>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

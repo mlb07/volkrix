@@ -1,27 +1,74 @@
 # Perft
 
-## Canonical Totals
+Perft is Volkrix's primary legal move-generation oracle. It recursively counts
+legal leaf positions without evaluation, pruning, TT reuse, or tablebases.
 
-Phase 2 validates the following reference totals:
+## Canonical totals
 
-- Startpos: d1 `20`, d2 `400`, d3 `8902`, d4 `197281`, d5 `4865609`, d6 `119060324`
-- Kiwipete: d1 `48`, d2 `2039`, d3 `97862`, d4 `4085603`, d5 `193690690`
-- Position 3: d1 `14`, d2 `191`, d3 `2812`, d4 `43238`, d5 `674624`, d6 `11030083`
-- Position 4: d1 `6`, d2 `264`, d3 `9467`, d4 `422333`, d5 `15833292`
-- Position 5: d1 `44`, d2 `1486`, d3 `62379`, d4 `2103487`
-- Position 6: d1 `46`, d2 `2079`, d3 `89890`, d4 `3894594`
+The integration suite checks these reference positions:
 
-Position 5 and Position 6 intentionally stop at depth 4 in Phase 2. That is an explicit runtime boundary for the current regression suite, not an omitted fixture.
+| Position | d1 | d2 | d3 | d4 | d5 | d6 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Start position | 20 | 400 | 8,902 | 197,281 | 4,865,609 | 119,060,324 |
+| Kiwipete | 48 | 2,039 | 97,862 | 4,085,603 | 193,690,690 | — |
+| Position 3 | 14 | 191 | 2,812 | 43,238 | 674,624 | 11,030,083 |
+| Position 4 | 6 | 264 | 9,467 | 422,333 | 15,833,292 | — |
+| Position 5 | 44 | 1,486 | 62,379 | 2,103,487 | — | — |
+| Position 6 | 46 | 2,079 | 89,890 | 3,894,594 | — | — |
 
-## Divide Artifacts
+Run the default suite with:
 
-`divide()` is implemented for debugging and regression support.
+```bash
+cargo test --locked --test perft
+```
 
-Checked-in divide outputs are treated as generated or directly verified regression artifacts under `tests/fixtures/divide/`, not hand-maintained prose. Root-move ordering is deterministic because `divide()` sorts output by UCI move text before returning.
+The deepest totals are marked ignored to keep ordinary CI latency reasonable.
+Run them explicitly before a move-generation release:
 
-Phase 2 requires canonical perft totals. Divide artifacts are an additional regression layer for selected positions where the artifact was generated or verified cleanly.
+```bash
+cargo test --locked --release --test perft -- --ignored
+```
 
-## Mutable Move Generation
+## Divide artifacts
 
-`generate_legal_moves(&mut self, ...)` remains mutable in Phase 2 because en passant legality still uses temporary `make_move` / `unmake_move` validation. That edge case can expose a rook, bishop, or queen attack on the king only after both pawns are removed from their original line, and the generator intentionally reuses the authoritative state-transition path for that check.
+`divide()` returns one node count per legal root move and sorts the result by UCI
+move text. Checked-in outputs under `tests/fixtures/divide/` localize a mismatch to
+a specific root branch and are generated or externally verified artifacts, not
+hand-maintained totals.
 
+## Why generation remains mutable
+
+`generate_legal_moves(&mut self, ...)` is mutable because en-passant legality uses
+the authoritative temporary make/unmake path. Removing the capturing pawn and the
+captured pawn simultaneously can expose a rook, bishop, or queen attack that is
+not visible from either pawn's original occupancy alone.
+
+## Deterministic state and parser stress
+
+The feature-gated `volkrix-stress` binary complements fixed perft totals with
+reproducible randomized state-machine walks. It compares the optimized legal
+generator with an independent pseudo-legal plus checked-make oracle, verifies
+that generation is non-mutating, checks every selected move through both direct
+and UCI application, validates incremental Zobrist and repetition state after
+each transition, round-trips FEN, and exactly unwinds every walk.
+
+The mandatory root corpus includes both castling directions, legal and pinned
+en passant, quiet and capture promotions for both colors, an actual threefold
+repetition path, Kiwipete, and an endgame perft position. The same run sends
+bounded deterministic garbage and malformed command families through the FEN and
+UCI parsers and requires errors to leave the current position untouched.
+
+Run the quick property profile through the normal test suite, or invoke a larger
+reproducible job directly:
+
+```bash
+cargo test --locked --all-features deterministic_stress_quick_profile
+cargo run --locked --release --features internal-testing \
+  --bin volkrix-stress -- \
+  --seed 0x6a09e667f3bcc909 --walks 256 --plies 512 --parser-cases 50000
+```
+
+Failures print the seed, corpus name, walk, ply, and move context needed to replay
+the same path. Successful runs print a deterministic trace digest. GitHub's
+`Deterministic Stress` workflow runs the long profile against four fixed seeds
+weekly and can also be started manually.

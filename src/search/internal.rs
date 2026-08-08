@@ -6,7 +6,7 @@ use super::{
     limits::SearchHeuristics,
     nnue::{NnueService, tiny_test_evalfile_path},
     run_bench,
-    service::{SearchRequest, UciSearchService},
+    service::{SearchRequest, SmpStrategy, UciSearchService},
 };
 
 #[doc(hidden)]
@@ -15,6 +15,24 @@ pub enum HeuristicProfile {
     Phase8Baseline,
     LmrOnly,
     Phase9Default,
+    CorrectionHistoryEnabled,
+    SingularExtensionsEnabled,
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SmpProfile {
+    Lazy,
+    RootSplit,
+}
+
+impl SmpProfile {
+    const fn strategy(self) -> SmpStrategy {
+        match self {
+            Self::Lazy => SmpStrategy::Lazy,
+            Self::RootSplit => SmpStrategy::RootSplit,
+        }
+    }
 }
 
 impl HeuristicProfile {
@@ -24,6 +42,12 @@ impl HeuristicProfile {
             Self::Phase8Baseline => baseline,
             Self::LmrOnly => baseline.with_late_move_reductions(true),
             Self::Phase9Default => SearchHeuristics::phase9_default(),
+            Self::CorrectionHistoryEnabled => {
+                SearchHeuristics::phase9_default().with_correction_history(true)
+            }
+            Self::SingularExtensionsEnabled => {
+                SearchHeuristics::phase9_default().with_singular_extensions(true)
+            }
         }
     }
 }
@@ -65,6 +89,37 @@ pub fn run_threaded_profile_bench(
         BenchConfig::new(depth)
             .with_heuristics(profile.heuristics())
             .with_threads(threads),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_smp_profile_bench(
+    depth: u8,
+    profile: HeuristicProfile,
+    threads: usize,
+    smp_profile: SmpProfile,
+) -> BenchResult {
+    run_bench(
+        BenchConfig::new(depth)
+            .with_heuristics(profile.heuristics())
+            .with_threads(threads)
+            .with_smp_strategy(smp_profile.strategy()),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_smp_timed_profile_bench(
+    movetime_ms: u64,
+    profile: HeuristicProfile,
+    threads: usize,
+    smp_profile: SmpProfile,
+) -> TimedBenchResult {
+    super::bench::run_timed_bench(
+        BenchConfig::new(127)
+            .with_heuristics(profile.heuristics())
+            .with_threads(threads)
+            .with_smp_strategy(smp_profile.strategy()),
+        movetime_ms,
     )
 }
 
@@ -155,6 +210,9 @@ pub fn run_threaded_tiny_nnue_bench(depth: u8, threads: usize) -> BenchResult {
         checksum,
         tt_enabled: true,
         hash_mb: super::tt::DEFAULT_HASH_MB,
+        threads,
+        evaluator: phase12_test_evalfile_path(),
+        dual_eval: None,
         elapsed_ms: started.elapsed().as_millis(),
     }
 }

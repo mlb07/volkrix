@@ -3,11 +3,15 @@ use std::path::Path;
 mod bullet_trainer;
 mod classical_match;
 mod engine_match;
+mod match_report;
 mod texel_tuning;
 
 use bullet_trainer::{BulletTrainingConfig, train_bullet, train_bullet_with_config};
 use classical_match::{ClassicalMatchConfig, compare_classical_weights};
-use engine_match::compare_external_engines;
+use engine_match::{
+    EngineOptions, ExternalMatchConfig, ExternalTimeControl, compare_external_engines,
+};
+use match_report::print_match_statistics;
 use texel_tuning::{TexelTuningConfig, tune_from_examples};
 use volkrix::nnue_training::{
     CorpusExpansionConfig, LabelGenerationConfig, LabelMode, MatchConfig, MatchMode,
@@ -243,6 +247,7 @@ fn run() -> Result<(), String> {
                 summary.draws,
                 summary.fallback_wins
             );
+            print_match_statistics(&summary)?;
             for game in summary.game_summaries.iter().take(4) {
                 println!(
                     "game candidate {:?} opening '{}' outcome {:?} plies {} candidate_score {:?} fallback_score {:?}",
@@ -267,62 +272,109 @@ fn run() -> Result<(), String> {
             let openings = take_required_flag(&mut flags, "--openings")?;
             let baseline = take_required_flag(&mut flags, "--baseline")?;
             let candidate = take_required_flag(&mut flags, "--candidate")?;
+            let artifacts = take_required_flag(&mut flags, "--artifacts")?;
+            let baseline_evalfile = take_required_flag(&mut flags, "--baseline-evalfile")?;
+            let candidate_evalfile = take_required_flag(&mut flags, "--candidate-evalfile")?;
             let hash_mb = parse_optional_flag(&mut flags, "--hash-mb")?.unwrap_or(64usize);
+            let threads = parse_optional_flag(&mut flags, "--threads")?.unwrap_or(1usize);
+            let move_overhead_ms =
+                parse_optional_flag(&mut flags, "--move-overhead-ms")?.unwrap_or(10u64);
+            let syzygy_path = parse_optional_flag::<String>(&mut flags, "--syzygy-path")?
+                .unwrap_or_else(|| "none".to_owned());
+            let baseline_small_evalfile =
+                parse_optional_flag::<String>(&mut flags, "--baseline-small-evalfile")?;
+            let candidate_small_evalfile =
+                parse_optional_flag::<String>(&mut flags, "--candidate-small-evalfile")?;
+            let baseline_options = EngineOptions {
+                path: Path::new(&baseline).to_path_buf(),
+                eval_file: baseline_evalfile,
+                small_eval_file: baseline_small_evalfile,
+                dual_eval_policy: parse_optional_flag::<String>(
+                    &mut flags,
+                    "--baseline-dual-policy",
+                )?
+                .unwrap_or_else(|| "off".to_owned()),
+                dual_eval_threshold: parse_optional_flag(&mut flags, "--baseline-dual-threshold")?
+                    .unwrap_or(200),
+                threads: parse_optional_flag(&mut flags, "--baseline-threads")?.unwrap_or(threads),
+                hash_mb: parse_optional_flag(&mut flags, "--baseline-hash-mb")?.unwrap_or(hash_mb),
+                move_overhead_ms: parse_optional_flag(&mut flags, "--baseline-move-overhead-ms")?
+                    .unwrap_or(move_overhead_ms),
+                syzygy_path: parse_optional_flag::<String>(&mut flags, "--baseline-syzygy-path")?
+                    .unwrap_or_else(|| syzygy_path.clone()),
+            };
+            let candidate_options = EngineOptions {
+                path: Path::new(&candidate).to_path_buf(),
+                eval_file: candidate_evalfile,
+                small_eval_file: candidate_small_evalfile,
+                dual_eval_policy: parse_optional_flag::<String>(
+                    &mut flags,
+                    "--candidate-dual-policy",
+                )?
+                .unwrap_or_else(|| "off".to_owned()),
+                dual_eval_threshold: parse_optional_flag(&mut flags, "--candidate-dual-threshold")?
+                    .unwrap_or(200),
+                threads: parse_optional_flag(&mut flags, "--candidate-threads")?.unwrap_or(threads),
+                hash_mb: parse_optional_flag(&mut flags, "--candidate-hash-mb")?.unwrap_or(hash_mb),
+                move_overhead_ms: parse_optional_flag(&mut flags, "--candidate-move-overhead-ms")?
+                    .unwrap_or(move_overhead_ms),
+                syzygy_path: parse_optional_flag::<String>(&mut flags, "--candidate-syzygy-path")?
+                    .unwrap_or(syzygy_path),
+            };
             let max_plies = parse_optional_flag(&mut flags, "--max-plies")?.unwrap_or(160usize);
             let max_openings = parse_optional_flag(&mut flags, "--max-openings")?;
-            let mode = match (
+            let time_control = match (
                 parse_optional_flag::<u8>(&mut flags, "--depth")?,
                 parse_optional_flag::<u64>(&mut flags, "--movetime-ms")?,
+                parse_optional_flag::<u64>(&mut flags, "--clock-ms")?,
             ) {
-                (Some(depth), None) => MatchMode::FixedDepth(depth),
-                (None, Some(movetime_ms)) => MatchMode::MoveTimeMs(movetime_ms),
-                (None, None) => MatchMode::MoveTimeMs(100),
-                (Some(_), Some(_)) => {
-                    return Err("use either --depth or --movetime-ms, not both".to_owned());
+                (Some(depth), None, None) => ExternalTimeControl::FixedDepth { depth },
+                (None, Some(milliseconds), None) => ExternalTimeControl::MoveTime { milliseconds },
+                (None, None, Some(initial_ms)) => ExternalTimeControl::Clock {
+                    initial_ms,
+                    increment_ms: parse_optional_flag(&mut flags, "--increment-ms")?.unwrap_or(0),
+                },
+                (None, None, None) => ExternalTimeControl::MoveTime { milliseconds: 100 },
+                _ => {
+                    return Err(
+                        "use exactly one of --depth, --movetime-ms, or --clock-ms".to_owned()
+                    );
                 }
             };
+            let protocol_timeout_ms =
+                parse_optional_flag(&mut flags, "--protocol-timeout-ms")?.unwrap_or(30_000);
+            let stop_grace_ms = parse_optional_flag(&mut flags, "--stop-grace-ms")?.unwrap_or(100);
+            let resume = parse_optional_bool_flag(&mut flags, "--resume")?.unwrap_or(false);
             ensure_no_unknown_flags(flags)?;
-            let summary = compare_external_engines(
+            let report = compare_external_engines(
                 Path::new(&openings),
-                Path::new(&baseline),
-                Path::new(&candidate),
-                MatchConfig {
-                    hash_mb,
+                ExternalMatchConfig {
+                    baseline: baseline_options,
+                    candidate: candidate_options,
+                    time_control,
                     max_plies,
-                    mode,
+                    max_openings,
+                    protocol_timeout_ms,
+                    stop_grace_ms,
+                    artifacts_dir: Path::new(&artifacts).to_path_buf(),
+                    resume,
                 },
-                max_openings,
             )?;
-            let score = candidate_score_fraction(&summary);
+            let summary = &report.summary;
             println!(
-                "candidate vs baseline: {} games over {} openings => {}W {}D {}L score {:.1}%",
+                "candidate vs baseline: {} games over {} openings => {}W {}D {}L",
                 summary.games,
                 summary.openings,
                 summary.candidate_wins,
                 summary.draws,
-                summary.fallback_wins,
-                score * 100.0
+                summary.fallback_wins
             );
-            if let Some(elo) = approximate_elo_from_score(score) {
-                println!("approximate Elo difference from score rate: {elo:+.1}");
-            }
-            for game in summary.game_summaries.iter().take(4) {
-                println!(
-                    "game candidate {:?} opening '{}' outcome {:?} plies {} candidate_score {:?} baseline_score {:?}",
-                    game.candidate_color,
-                    game.opening_fen,
-                    game.outcome,
-                    game.plies_played,
-                    game.first_candidate_score_cp,
-                    game.first_fallback_score_cp
-                );
-                if let Some(info) = &game.first_candidate_info_line {
-                    println!("candidate info {}", info);
-                }
-                if let Some(info) = &game.first_fallback_info_line {
-                    println!("baseline info {}", info);
-                }
-            }
+            print_match_statistics(summary)?;
+            println!("experiment manifest '{}'", report.manifest_path.display());
+            println!("complete game log '{}'", report.games_path.display());
+            println!("PGN artifact '{}'", report.pgn_path.display());
+            println!("protocol log '{}'", report.protocol_log_path.display());
+            println!("checkpoint '{}'", report.checkpoint_path.display());
             Ok(())
         }
         Some("compare-classical-weights") => {
@@ -344,19 +396,15 @@ fn run() -> Result<(), String> {
                     max_openings,
                 },
             )?;
-            let score = candidate_score_fraction(&summary);
             println!(
-                "candidate vs baseline weights: {} games over {} openings => {}W {}D {}L score {:.1}%",
+                "candidate vs baseline weights: {} games over {} openings => {}W {}D {}L",
                 summary.games,
                 summary.openings,
                 summary.candidate_wins,
                 summary.draws,
-                summary.fallback_wins,
-                score * 100.0
+                summary.fallback_wins
             );
-            if let Some(elo) = approximate_elo_from_score(score) {
-                println!("approximate Elo difference from score rate: {elo:+.1}");
-            }
+            print_match_statistics(&summary)?;
             for game in summary.game_summaries.iter().take(4) {
                 println!(
                     "game candidate {:?} opening '{}' outcome {:?} plies {} candidate_score {:?} baseline_score {:?}",
@@ -522,22 +570,6 @@ fn ensure_no_unknown_flags(
     }
 }
 
-fn candidate_score_fraction(summary: &volkrix::nnue_training::MatchSummary) -> f64 {
-    if summary.games == 0 {
-        return 0.0;
-    }
-
-    (summary.candidate_wins as f64 + 0.5 * summary.draws as f64) / summary.games as f64
-}
-
-fn approximate_elo_from_score(score: f64) -> Option<f64> {
-    if !(0.0..1.0).contains(&score) || score == 0.5 {
-        return None;
-    }
-
-    Some(-400.0 * ((1.0 / score) - 1.0).log10())
-}
-
 fn usage() -> String {
     [
         "usage:",
@@ -547,7 +579,7 @@ fn usage() -> String {
         "  cargo run -p volkrix-nnue -- train-bullet --examples <examples.txt> --checkpoint-dir <dir> [--init-from-checkpoint-dir <prior-dir>] [--batch-size N] [--superbatches N] [--initial-lr F] [--final-lr F]",
         "  cargo run -p volkrix-nnue -- pack-volknnue --checkpoint-dir <dir> --output <net.volknnue>",
         "  cargo run -p volkrix-nnue -- compare-fallback --openings <fens.txt> --candidate <net.volknnue> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N]",
-        "  cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N] [--hash-mb N] [--max-plies N] [--max-openings N]",
+        "  cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> --baseline-evalfile <absolute-net|classical> --candidate-evalfile <absolute-net|classical> --artifacts <new-dir> [--baseline-small-evalfile <absolute-net> --baseline-dual-policy off|small-fallback --baseline-dual-threshold CP] [--candidate-small-evalfile <absolute-net> --candidate-dual-policy off|small-fallback --candidate-dual-threshold CP] [--movetime-ms N | --depth N | --clock-ms N --increment-ms N] [--threads N] [--hash-mb N] [--move-overhead-ms N] [--syzygy-path <absolute-dir|none>] [--baseline-threads N] [--candidate-threads N] [--baseline-hash-mb N] [--candidate-hash-mb N] [--baseline-move-overhead-ms N] [--candidate-move-overhead-ms N] [--baseline-syzygy-path <dir|none>] [--candidate-syzygy-path <dir|none>] [--protocol-timeout-ms N] [--stop-grace-ms N] [--max-plies N] [--max-openings N] [--resume on|off]",
         "  cargo run -p volkrix-nnue -- compare-classical-weights --openings <fens.txt> --candidate-weights <weights.json> [--baseline-weights <weights.json>] [--depth N] [--max-plies N] [--max-openings N]",
         "  cargo run -p volkrix-nnue -- texel-tune --examples <examples.txt> --output <weights.json> [--iterations N] [--step N] [--sigmoid-scale F] [--regularization F] [--max-examples N]",
         "  cargo run -p volkrix-nnue -- validate-volknnue --evalfile <net.volknnue>",
@@ -634,7 +666,7 @@ mod tests {
         assert_eq!(manifest.target_clip_cp, TARGET_CLIP_CP);
         assert_eq!(records.len(), 1);
         assert_eq!(parsed_summary.emitted_examples, 1);
-        assert_eq!(records[0].target_cp.abs() <= TARGET_CLIP_CP, true);
+        assert!(records[0].target_cp.abs() <= TARGET_CLIP_CP);
 
         let _ = fs::remove_file(input_path);
         let _ = fs::remove_file(output_path);

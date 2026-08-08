@@ -1,16 +1,47 @@
 use crate::core::{Move, MoveList, PieceType, Position, see};
 
 use super::movepicker::MovePicker;
-use super::root::{MAX_PLY, MoveOrderHints, SearchContext, is_draw, terminal_score};
+use super::{
+    root::{
+        MAX_PLY, MoveOrderHints, SearchContext, is_draw, mate_distance_bounds, terminal_score,
+        tt_cutoff_score, validated_move_hint,
+    },
+    tt::Bound,
+};
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn qsearch<const USE_NNUE: bool>(
+    context: &mut SearchContext,
+    position: &mut Position,
+    ply: usize,
+    alpha: i32,
+    beta: i32,
+) -> Option<i32> {
+    qsearch_core::<USE_NNUE>(context, position, ply, alpha, beta, true)
+}
+
+pub(crate) fn qsearch_from_main<const USE_NNUE: bool>(
+    context: &mut SearchContext,
+    position: &mut Position,
+    ply: usize,
+    alpha: i32,
+    beta: i32,
+) -> Option<i32> {
+    qsearch_core::<USE_NNUE>(context, position, ply, alpha, beta, false)
+}
+
+fn qsearch_core<const USE_NNUE: bool>(
     context: &mut SearchContext,
     position: &mut Position,
     ply: usize,
     mut alpha: i32,
     beta: i32,
+    count_entry: bool,
 ) -> Option<i32> {
-    context.nodes += 1;
+    if count_entry && !context.count_node() {
+        return None;
+    }
+    context.seldepth = context.seldepth.max(ply);
     if context.nodes & 1023 == 0 && context.hard_stop_requested() {
         return None;
     }
@@ -25,16 +56,50 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
         return Some(0);
     }
 
+    let (mate_alpha, mate_beta) = mate_distance_bounds(ply);
+    alpha = alpha.max(mate_alpha);
+    let beta = beta.min(mate_beta);
+    if alpha >= beta {
+        return Some(alpha);
+    }
+
+    let alpha_start = alpha;
+    let tt_key = position.search_key();
+    let tt_hit = if context.qsearch_tt_enabled() {
+        context.probe_tt(tt_key)
+    } else {
+        None
+    };
+    if let Some(hit) = tt_hit
+        && let Some(cutoff) = tt_cutoff_score(hit, 0, ply, alpha, beta)
+    {
+        return Some(cutoff);
+    }
+
     let in_check = position.is_in_check(position.side_to_move());
+    let static_eval = if in_check {
+        0
+    } else {
+        tt_hit
+            .map(|hit| hit.eval as i32)
+            .unwrap_or_else(|| context.evaluate_position::<USE_NNUE>(position))
+    };
     let mut stand_pat = None;
     if !in_check {
-        let eval = context.evaluate_position::<USE_NNUE>(position);
-        stand_pat = Some(eval);
-        if eval >= beta {
-            return Some(beta);
+        stand_pat = Some(static_eval);
+        if static_eval >= beta {
+            context.store_qsearch_tt(
+                tt_key,
+                ply,
+                Move::NONE,
+                static_eval,
+                static_eval,
+                Bound::Lower,
+            );
+            return Some(static_eval);
         }
-        if eval > alpha {
-            alpha = eval;
+        if static_eval > alpha {
+            alpha = static_eval;
         }
     }
 
@@ -51,13 +116,19 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
             Some(alpha)
         };
     }
+    let tt_move = validated_move_hint(
+        &legal_moves,
+        tt_hit.and_then(|hit| (!hit.best_move.is_none()).then_some(hit.best_move)),
+    );
     let ordering_hints = MoveOrderHints {
         ply,
         quiescence_only: !in_check,
         pv_move: None,
-        tt_move: None,
+        tt_move,
     };
 
+    let mut best_move = Move::NONE;
+    let mut best_score = alpha;
     let mut move_picker = MovePicker::new(context, position, &legal_moves, ordering_hints);
     while let Some(mv) = move_picker.next() {
         if !in_check && delta_pruning_is_eligible(position, mv, stand_pat.unwrap_or(alpha), alpha) {
@@ -72,7 +143,8 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
             .make_search_move::<USE_NNUE>(position, mv)
             .expect("quiescence move must be legal");
         context.set_previous_move(ply + 1, mv);
-        let Some(score) = qsearch::<USE_NNUE>(context, position, ply + 1, -beta, -alpha) else {
+        let Some(score) = qsearch_core::<USE_NNUE>(context, position, ply + 1, -beta, -alpha, true)
+        else {
             context.set_previous_move(ply + 1, crate::core::Move::NONE);
             context.unmake_search_move::<USE_NNUE>(position, mv, undo);
             return None;
@@ -83,6 +155,8 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
 
         if score > alpha {
             alpha = score;
+            best_score = score;
+            best_move = mv;
             context.update_pv(ply, mv);
             if alpha >= beta {
                 break;
@@ -90,7 +164,15 @@ pub(crate) fn qsearch<const USE_NNUE: bool>(
         }
     }
 
-    Some(alpha)
+    let bound = if best_score <= alpha_start {
+        Bound::Upper
+    } else if best_score >= beta {
+        Bound::Lower
+    } else {
+        Bound::Exact
+    };
+    context.store_qsearch_tt(tt_key, ply, best_move, static_eval, best_score, bound);
+    Some(best_score)
 }
 
 fn delta_pruning_is_eligible(position: &Position, mv: Move, stand_pat: i32, alpha: i32) -> bool {
@@ -116,4 +198,28 @@ fn piece_value(piece_type: PieceType) -> i32 {
 
 fn delta_pruning_margin() -> i32 {
     180
+}
+
+#[cfg(test)]
+mod tests {
+    use super::qsearch;
+    use crate::{
+        core::Position,
+        search::{SearchLimits, root::SearchContext},
+    };
+
+    #[test]
+    fn recursive_quiescence_reuses_an_exact_tt_result() {
+        let mut position = Position::startpos();
+        let mut context = SearchContext::new(SearchLimits::new(1));
+        let first = qsearch::<false>(&mut context, &mut position, 1, -100, 100)
+            .expect("first quiescence search must complete");
+
+        context.nodes = 0;
+        let second = qsearch::<false>(&mut context, &mut position, 1, -100, 100)
+            .expect("second quiescence search must complete");
+
+        assert_eq!(second, first);
+        assert_eq!(context.nodes, 1, "the TT hit must avoid move expansion");
+    }
 }

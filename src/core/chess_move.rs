@@ -70,6 +70,19 @@ impl Move {
         self.0 == u32::MAX
     }
 
+    /// Returns the engine's compact, lossless move representation.
+    ///
+    /// This is crate-private because the bit layout is an implementation detail. It is used by
+    /// compact caches such as the transposition table, which must preserve generated move flags.
+    pub(crate) const fn raw(self) -> u32 {
+        self.0
+    }
+
+    /// Reconstructs a move previously obtained from [`Move::raw`].
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
     pub const fn is_capture(self) -> bool {
         self.0 & FLAG_CAPTURE != 0
     }

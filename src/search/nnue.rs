@@ -1,8 +1,17 @@
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
 use std::path::{Path, PathBuf};
-use std::{fs, sync::Arc};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader, Read},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::core::{Color, Move, PieceType, Position, Score, Square, UndoState};
+
+use super::stockfish_nnue::{StockfishNnueService, StockfishNnueState};
 
 pub(crate) const NNUE_MAGIC: &[u8; 8] = b"VOLKNNUE";
 pub(crate) const NNUE_VERSION: u32 = 1;
@@ -86,97 +95,477 @@ pub(crate) struct NnueMetadata {
     pub(crate) output_scale: i32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AccumulatorPair {
-    perspectives: [Vec<i32>; 2],
+// Keep each standalone perspective on its own cache-line boundary. Search uses
+// topology-sized slabs below, while these fixed values make root construction,
+// full refreshes, and exact incremental-update tests allocation-free.
+#[repr(align(64))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AlignedAccumulator<const HIDDEN_SIZE: usize>([i32; HIDDEN_SIZE]);
+
+impl<const HIDDEN_SIZE: usize> Default for AlignedAccumulator<HIDDEN_SIZE> {
+    fn default() -> Self {
+        Self([0; HIDDEN_SIZE])
+    }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AccumulatorStorage<const HIDDEN_SIZE: usize> {
+    perspectives: [AlignedAccumulator<HIDDEN_SIZE>; 2],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+// Boxing the larger topology would reintroduce heap allocation into standalone
+// accumulator construction; the search stack itself stores active lanes in
+// topology-sized slabs and does not copy this enum per edge.
+#[allow(clippy::large_enum_variant)]
+enum AccumulatorPairStorage {
+    Halfkp128(AccumulatorStorage<128>),
+    Halfkp256(AccumulatorStorage<256>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct AccumulatorPair(AccumulatorPairStorage);
 
 impl AccumulatorPair {
     fn from_biases(hidden_biases: &[i16]) -> Self {
-        let lanes = hidden_biases
-            .iter()
-            .map(|bias| i32::from(*bias))
-            .collect::<Vec<_>>();
-        let perspectives = [lanes.clone(), lanes];
-        Self { perspectives }
+        match hidden_biases.len() {
+            128 => Self(AccumulatorPairStorage::Halfkp128(
+                AccumulatorStorage::from_biases(hidden_biases),
+            )),
+            256 => Self(AccumulatorPairStorage::Halfkp256(
+                AccumulatorStorage::from_biases(hidden_biases),
+            )),
+            hidden_size => panic!("unsupported accumulator hidden size {hidden_size}"),
+        }
+    }
+
+    fn hidden_size(&self) -> usize {
+        match &self.0 {
+            AccumulatorPairStorage::Halfkp128(_) => 128,
+            AccumulatorPairStorage::Halfkp256(_) => 256,
+        }
     }
 
     fn perspective(&self, color: Color) -> &[i32] {
-        &self.perspectives[color.index()]
+        match &self.0 {
+            AccumulatorPairStorage::Halfkp128(storage) => &storage.perspectives[color.index()].0,
+            AccumulatorPairStorage::Halfkp256(storage) => &storage.perspectives[color.index()].0,
+        }
     }
 
     fn perspective_mut(&mut self, color: Color) -> &mut [i32] {
-        &mut self.perspectives[color.index()]
+        match &mut self.0 {
+            AccumulatorPairStorage::Halfkp128(storage) => {
+                &mut storage.perspectives[color.index()].0
+            }
+            AccumulatorPairStorage::Halfkp256(storage) => {
+                &mut storage.perspectives[color.index()].0
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn perspectives_mut(&mut self) -> (&mut [i32], &mut [i32]) {
+        match &mut self.0 {
+            AccumulatorPairStorage::Halfkp128(storage) => {
+                let [white, black] = &mut storage.perspectives;
+                (&mut white.0, &mut black.0)
+            }
+            AccumulatorPairStorage::Halfkp256(storage) => {
+                let [white, black] = &mut storage.perspectives;
+                (&mut white.0, &mut black.0)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn from_perspectives(white: &[i32], black: &[i32]) -> Self {
+        debug_assert_eq!(white.len(), black.len());
+        match white.len() {
+            128 => Self(AccumulatorPairStorage::Halfkp128(
+                AccumulatorStorage::from_perspectives(white, black),
+            )),
+            256 => Self(AccumulatorPairStorage::Halfkp256(
+                AccumulatorStorage::from_perspectives(white, black),
+            )),
+            hidden_size => panic!("unsupported accumulator hidden size {hidden_size}"),
+        }
+    }
+}
+
+impl<const HIDDEN_SIZE: usize> AccumulatorStorage<HIDDEN_SIZE> {
+    fn from_biases(hidden_biases: &[i16]) -> Self {
+        debug_assert_eq!(hidden_biases.len(), HIDDEN_SIZE);
+        let mut lanes = AlignedAccumulator::default();
+        for (lane, bias) in lanes.0.iter_mut().zip(hidden_biases) {
+            *lane = i32::from(*bias);
+        }
+        Self {
+            perspectives: [lanes; 2],
+        }
+    }
+
+    #[cfg(test)]
+    fn from_perspectives(white: &[i32], black: &[i32]) -> Self {
+        debug_assert_eq!(white.len(), HIDDEN_SIZE);
+        debug_assert_eq!(black.len(), HIDDEN_SIZE);
+        let mut white_lanes = AlignedAccumulator::default();
+        let mut black_lanes = AlignedAccumulator::default();
+        white_lanes.0.copy_from_slice(white);
+        black_lanes.0.copy_from_slice(black);
+        Self {
+            perspectives: [white_lanes, black_lanes],
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct AccumulatorStack {
-    frames: Vec<AccumulatorPair>,
+    perspectives: [Vec<i32>; 2],
+    hidden_size: usize,
+    frame_count: usize,
 }
 
 impl AccumulatorStack {
-    pub(crate) fn reset(&mut self, root: AccumulatorPair) {
-        self.frames.clear();
-        self.frames.push(root);
+    fn with_hidden_size(hidden_size: usize) -> Self {
+        let lane_capacity = hidden_size * (super::root::MAX_PLY + 1);
+        Self {
+            perspectives: [
+                Vec::with_capacity(lane_capacity),
+                Vec::with_capacity(lane_capacity),
+            ],
+            hidden_size,
+            frame_count: 0,
+        }
     }
 
+    pub(crate) fn reset(&mut self, root: AccumulatorPair) {
+        if self.hidden_size != root.hidden_size() {
+            *self = Self::with_hidden_size(root.hidden_size());
+        }
+        for color in Color::ALL {
+            let lanes = &mut self.perspectives[color.index()];
+            lanes.clear();
+            lanes.extend_from_slice(root.perspective(color));
+        }
+        self.frame_count = 1;
+    }
+
+    #[cfg(test)]
     pub(crate) fn push(&mut self, frame: AccumulatorPair) {
-        self.frames.push(frame);
+        assert!(
+            self.frame_count <= super::root::MAX_PLY,
+            "NNUE accumulator stack overflow"
+        );
+        debug_assert_eq!(frame.hidden_size(), self.hidden_size);
+        for color in Color::ALL {
+            self.perspectives[color.index()].extend_from_slice(frame.perspective(color));
+        }
+        self.frame_count += 1;
+    }
+
+    fn push_current(&mut self) {
+        assert!(
+            self.frame_count > 0,
+            "cannot copy an empty accumulator stack"
+        );
+        assert!(
+            self.frame_count <= super::root::MAX_PLY,
+            "NNUE accumulator stack overflow"
+        );
+        let start = (self.frame_count - 1) * self.hidden_size;
+        let end = start + self.hidden_size;
+        for lanes in &mut self.perspectives {
+            lanes.extend_from_within(start..end);
+        }
+        self.frame_count += 1;
     }
 
     pub(crate) fn pop(&mut self) {
         assert!(
-            self.frames.len() > 1,
+            self.frame_count > 1,
             "cannot pop the root accumulator frame"
         );
-        self.frames.pop();
+        self.frame_count -= 1;
+        let new_len = self.frame_count * self.hidden_size;
+        for lanes in &mut self.perspectives {
+            lanes.truncate(new_len);
+        }
     }
 
-    pub(crate) fn current(&self) -> &AccumulatorPair {
-        self.frames
-            .last()
-            .expect("NNUE accumulator stack must contain at least one frame")
+    fn current(&self, color: Color) -> &[i32] {
+        assert!(self.frame_count > 0, "NNUE accumulator stack is empty");
+        let start = (self.frame_count - 1) * self.hidden_size;
+        &self.perspectives[color.index()][start..start + self.hidden_size]
+    }
+
+    fn current_mut(&mut self) -> (&mut [i32], &mut [i32]) {
+        assert!(self.frame_count > 0, "NNUE accumulator stack is empty");
+        let start = (self.frame_count - 1) * self.hidden_size;
+        let end = start + self.hidden_size;
+        let [white, black] = &mut self.perspectives;
+        (&mut white[start..end], &mut black[start..end])
+    }
+
+    #[cfg(test)]
+    fn current_pair(&self) -> AccumulatorPair {
+        AccumulatorPair::from_perspectives(self.current(Color::White), self.current(Color::Black))
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct NnueSearchState {
-    service: Arc<NnueService>,
-    stack: AccumulatorStack,
+#[allow(private_interfaces)]
+pub(crate) enum NnueSearchBackend {
+    Volk {
+        network: Arc<NnueNetwork>,
+        stack: AccumulatorStack,
+    },
+    Stockfish(StockfishNnueState),
+}
+
+pub(crate) enum NnueSearchState {
+    Single(NnueSearchBackend),
+    Dual {
+        big: Box<NnueSearchState>,
+        small: Box<NnueSearchState>,
+        ambiguity_threshold: i32,
+        counters: Arc<DualEvalCounters>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DualEvalCounterSnapshot {
+    pub(crate) small_selected: u64,
+    pub(crate) big_fallbacks: u64,
+}
+
+#[derive(Default)]
+pub(crate) struct DualEvalCounters {
+    small_selected: AtomicU64,
+    big_fallbacks: AtomicU64,
+}
+
+impl DualEvalCounters {
+    pub(crate) fn snapshot(&self) -> DualEvalCounterSnapshot {
+        DualEvalCounterSnapshot {
+            small_selected: self.small_selected.load(Ordering::Relaxed),
+            big_fallbacks: self.big_fallbacks.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NnueEvaluationComponents {
+    pub(crate) psqt: i32,
+    pub(crate) positional: i32,
+}
+
+impl NnueEvaluationComponents {
+    pub(crate) const fn total(self) -> Score {
+        Score(self.psqt + self.positional)
+    }
+
+    #[allow(dead_code)] // Staged for the root score-policy integration.
+    pub(crate) fn scaled(self, psqt_weight: i32, positional_weight: i32, divisor: i32) -> Score {
+        assert!(divisor > 0, "NNUE component scale divisor must be positive");
+        let weighted = i64::from(self.psqt) * i64::from(psqt_weight)
+            + i64::from(self.positional) * i64::from(positional_weight);
+        Score((weighted / i64::from(divisor)).clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    }
 }
 
 impl NnueSearchState {
     pub(crate) fn new(service: Arc<NnueService>) -> Self {
-        Self {
-            service,
-            stack: AccumulatorStack::default(),
+        match &service.backend {
+            NnueBackend::Volk(network) => Self::Single(NnueSearchBackend::Volk {
+                network: Arc::clone(network),
+                stack: AccumulatorStack::with_hidden_size(network.topology.hidden_size),
+            }),
+            NnueBackend::Stockfish(stockfish) => Self::Single(NnueSearchBackend::Stockfish(
+                StockfishNnueState::new(Arc::clone(stockfish)),
+            )),
+            NnueBackend::Dual {
+                big,
+                small,
+                ambiguity_threshold,
+                counters,
+            } => Self::Dual {
+                big: Box::new(Self::new(Arc::clone(big))),
+                small: Box::new(Self::new(Arc::clone(small))),
+                ambiguity_threshold: *ambiguity_threshold,
+                counters: Arc::clone(counters),
+            },
         }
     }
 
     pub(crate) fn reset(&mut self, position: &Position) {
-        self.stack.reset(self.service.build_accumulator(position));
+        match self {
+            Self::Dual { big, small, .. } => {
+                big.reset(position);
+                small.reset(position);
+            }
+            Self::Single(backend) => match backend {
+                NnueSearchBackend::Volk { network, stack } => {
+                    stack.reset(network.build_accumulator(position));
+                }
+                NnueSearchBackend::Stockfish(state) => state.reset(position),
+            },
+        }
     }
 
     pub(crate) fn push_child(&mut self, child_position: &Position, mv: Move, undo: UndoState) {
-        let child =
-            self.service
-                .derive_child_accumulator(self.stack.current(), child_position, mv, undo);
-        self.stack.push(child);
+        match self {
+            Self::Dual { big, small, .. } => {
+                big.push_child(child_position, mv, undo);
+                small.push_child(child_position, mv, undo);
+            }
+            Self::Single(backend) => match backend {
+                NnueSearchBackend::Volk { network, stack } => {
+                    stack.push_current();
+                    let (white, black) = stack.current_mut();
+                    network.update_child_perspectives(white, black, child_position, mv, undo);
+                }
+                NnueSearchBackend::Stockfish(state) => state.push_child(child_position, mv, undo),
+            },
+        }
     }
 
     pub(crate) fn pop(&mut self) {
-        self.stack.pop();
+        match self {
+            Self::Dual { big, small, .. } => {
+                small.pop();
+                big.pop();
+            }
+            Self::Single(backend) => match backend {
+                NnueSearchBackend::Volk { stack, .. } => stack.pop(),
+                NnueSearchBackend::Stockfish(state) => state.pop(),
+            },
+        }
     }
 
     pub(crate) fn evaluate(&self, position: &Position) -> Score {
-        self.service.evaluate(position, self.stack.current())
+        self.evaluate_components(position).total()
+    }
+
+    pub(crate) fn evaluate_components(&self, position: &Position) -> NnueEvaluationComponents {
+        match self {
+            Self::Dual {
+                big,
+                small,
+                ambiguity_threshold,
+                counters,
+            } => {
+                let small_evaluation = small.evaluate_components(position);
+                if small_evaluation.total().0.abs() < *ambiguity_threshold {
+                    counters.big_fallbacks.fetch_add(1, Ordering::Relaxed);
+                    big.evaluate_components(position)
+                } else {
+                    counters.small_selected.fetch_add(1, Ordering::Relaxed);
+                    small_evaluation
+                }
+            }
+            Self::Single(backend) => match backend {
+                NnueSearchBackend::Volk { network, stack } => NnueEvaluationComponents {
+                    psqt: 0,
+                    positional: network
+                        .evaluate_perspectives(
+                            position,
+                            stack.current(Color::White),
+                            stack.current(Color::Black),
+                        )
+                        .0,
+                },
+                NnueSearchBackend::Stockfish(state) => {
+                    let evaluation = state.evaluate_components(position);
+                    NnueEvaluationComponents {
+                        psqt: evaluation.psqt,
+                        positional: evaluation.positional,
+                    }
+                }
+            },
+        }
+    }
+
+    #[cfg(test)]
+    fn volk_stack(&self) -> &AccumulatorStack {
+        match self {
+            Self::Dual { .. } => panic!("VOLKNNUE stack requested for a dual evaluator"),
+            Self::Single(backend) => match backend {
+                NnueSearchBackend::Volk { stack, .. } => stack,
+                NnueSearchBackend::Stockfish(_) => {
+                    panic!("VOLKNNUE stack requested for Stockfish backend")
+                }
+            },
+        }
+    }
+}
+
+/// Search-local state for an optional big/small evaluator pair. Selection is
+/// intentionally caller-driven: engine search and time-control tuning decide
+/// when a cheaper net is appropriate, while this type keeps both lazy stacks
+/// synchronized and provides an ambiguity fallback to the big evaluator.
+#[allow(dead_code)]
+pub(crate) struct DualNnueSearchState {
+    big: NnueSearchState,
+    small: NnueSearchState,
+}
+
+#[allow(dead_code)]
+impl DualNnueSearchState {
+    pub(crate) fn new(big: Arc<NnueService>, small: Arc<NnueService>) -> Self {
+        Self {
+            big: NnueSearchState::new(big),
+            small: NnueSearchState::new(small),
+        }
+    }
+
+    pub(crate) fn reset(&mut self, position: &Position) {
+        self.big.reset(position);
+        self.small.reset(position);
+    }
+
+    pub(crate) fn push_child(&mut self, position: &Position, mv: Move, undo: UndoState) {
+        self.big.push_child(position, mv, undo);
+        self.small.push_child(position, mv, undo);
+    }
+
+    pub(crate) fn pop(&mut self) {
+        self.small.pop();
+        self.big.pop();
+    }
+
+    pub(crate) fn evaluate(
+        &self,
+        position: &Position,
+        prefer_small: bool,
+        small_ambiguity_threshold: i32,
+    ) -> (NnueEvaluationComponents, bool) {
+        if !prefer_small {
+            return (self.big.evaluate_components(position), false);
+        }
+        let small = self.small.evaluate_components(position);
+        if small.total().0.abs() < small_ambiguity_threshold.max(0) {
+            (self.big.evaluate_components(position), false)
+        } else {
+            (small, true)
+        }
     }
 }
 
 #[derive(Clone)]
+enum NnueBackend {
+    Volk(Arc<NnueNetwork>),
+    Stockfish(Arc<StockfishNnueService>),
+    Dual {
+        big: Arc<NnueService>,
+        small: Arc<NnueService>,
+        ambiguity_threshold: i32,
+        counters: Arc<DualEvalCounters>,
+    },
+}
+
+#[derive(Clone)]
 pub(crate) struct NnueService {
-    network: Arc<NnueNetwork>,
+    backend: NnueBackend,
 }
 
 impl NnueService {
@@ -186,25 +575,60 @@ impl NnueService {
             return Err("EvalFile requires a non-empty path".to_owned());
         }
 
-        let bytes =
-            fs::read(path).map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
-        let network = NnueNetwork::parse(&bytes)
-            .map_err(|error| format!("failed to load EvalFile '{path}': {error}"))?;
-        Ok(Arc::new(Self {
-            network: Arc::new(network),
-        }))
+        let file = File::open(path)
+            .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
+        let mut reader = BufReader::new(file);
+        let prefix = reader
+            .fill_buf()
+            .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
+
+        let backend = if prefix.starts_with(NNUE_MAGIC) {
+            let mut bytes = Vec::new();
+            reader
+                .read_to_end(&mut bytes)
+                .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
+            let network = NnueNetwork::parse(&bytes)
+                .map_err(|error| format!("failed to load EvalFile '{path}': {error}"))?;
+            NnueBackend::Volk(Arc::new(network))
+        } else {
+            NnueBackend::Stockfish(StockfishNnueService::from_reader(path, &mut reader)?)
+        };
+        Ok(Arc::new(Self { backend }))
+    }
+
+    pub(crate) fn with_small_fallback(
+        big: Arc<Self>,
+        small: Arc<Self>,
+        ambiguity_threshold: i32,
+        counters: Arc<DualEvalCounters>,
+    ) -> Arc<Self> {
+        assert!(
+            !matches!(big.backend, NnueBackend::Dual { .. })
+                && !matches!(small.backend, NnueBackend::Dual { .. }),
+            "dual evaluator inputs must be standalone networks"
+        );
+        Arc::new(Self {
+            backend: NnueBackend::Dual {
+                big,
+                small,
+                ambiguity_threshold: ambiguity_threshold.max(0),
+                counters,
+            },
+        })
     }
 
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn metadata(&self) -> NnueMetadata {
-        self.network.metadata
+        self.volk_network().metadata
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) fn build_accumulator(&self, position: &Position) -> AccumulatorPair {
-        self.network.build_accumulator(position)
+        self.volk_network().build_accumulator(position)
     }
 
+    #[cfg(test)]
     pub(crate) fn derive_child_accumulator(
         &self,
         parent: &AccumulatorPair,
@@ -212,12 +636,31 @@ impl NnueService {
         mv: Move,
         undo: UndoState,
     ) -> AccumulatorPair {
-        self.network
+        self.volk_network()
             .derive_child_accumulator(parent, child_position, mv, undo)
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) fn evaluate(&self, position: &Position, accumulators: &AccumulatorPair) -> Score {
-        self.network.evaluate(position, accumulators)
+        self.volk_network().evaluate(position, accumulators)
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    fn volk_network(&self) -> &NnueNetwork {
+        match &self.backend {
+            NnueBackend::Volk(network) => network,
+            NnueBackend::Stockfish(_) => {
+                panic!("legacy VOLKNNUE accumulator API used with a Stockfish NNUE network")
+            }
+            NnueBackend::Dual { .. } => {
+                panic!("legacy VOLKNNUE accumulator API used with a dual NNUE network")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn is_stockfish(&self) -> bool {
+        matches!(&self.backend, NnueBackend::Stockfish(_))
     }
 }
 
@@ -438,6 +881,7 @@ impl NnueNetwork {
         accumulators
     }
 
+    #[cfg(test)]
     fn derive_child_accumulator(
         &self,
         parent: &AccumulatorPair,
@@ -445,94 +889,147 @@ impl NnueNetwork {
         mv: Move,
         undo: UndoState,
     ) -> AccumulatorPair {
-        let mut child = parent.clone();
+        let mut child = *parent;
+        self.update_child_accumulator(&mut child, child_position, mv, undo);
+        child
+    }
+
+    #[cfg(test)]
+    fn update_child_accumulator(
+        &self,
+        child: &mut AccumulatorPair,
+        child_position: &Position,
+        mv: Move,
+        undo: UndoState,
+    ) {
+        debug_assert_eq!(child.hidden_size(), self.topology.hidden_size);
+        let (white, black) = child.perspectives_mut();
+        self.update_child_perspectives(white, black, child_position, mv, undo);
+    }
+
+    fn update_child_perspectives(
+        &self,
+        white: &mut [i32],
+        black: &mut [i32],
+        child_position: &Position,
+        mv: Move,
+        undo: UndoState,
+    ) {
+        debug_assert_eq!(white.len(), self.topology.hidden_size);
+        debug_assert_eq!(black.len(), self.topology.hidden_size);
         let moving_color = undo.moved_piece.color();
         let moving_piece_type = undo.moved_piece.piece_type();
         let capture_square = capture_square(mv, moving_color);
 
-        for perspective in Color::ALL {
-            if moving_piece_type == PieceType::King && moving_color == perspective {
-                child.perspectives[perspective.index()] =
-                    self.build_perspective(child_position, perspective);
-                continue;
-            }
-
-            let king_square = child_position.king_square(perspective);
-            let lanes = child.perspective_mut(perspective);
-
-            if moving_piece_type != PieceType::King {
-                self.apply_piece_delta(
-                    lanes,
-                    perspective,
-                    king_square,
-                    PieceFeature {
-                        color: moving_color,
-                        piece_type: moving_piece_type,
-                        square: mv.from(),
-                    },
-                    -1,
-                );
-                self.apply_piece_delta(
-                    lanes,
-                    perspective,
-                    king_square,
-                    PieceFeature {
-                        color: moving_color,
-                        piece_type: mv.promotion().unwrap_or(moving_piece_type),
-                        square: mv.to(),
-                    },
-                    1,
-                );
-            } else if mv.is_castle() {
-                let (rook_from, rook_to) = castle_rook_squares(mv.to());
-                self.apply_piece_delta(
-                    lanes,
-                    perspective,
-                    king_square,
-                    PieceFeature {
-                        color: moving_color,
-                        piece_type: PieceType::Rook,
-                        square: rook_from,
-                    },
-                    -1,
-                );
-                self.apply_piece_delta(
-                    lanes,
-                    perspective,
-                    king_square,
-                    PieceFeature {
-                        color: moving_color,
-                        piece_type: PieceType::Rook,
-                        square: rook_to,
-                    },
-                    1,
-                );
-            }
-
-            if let Some(captured_piece) = undo.captured_piece {
-                self.apply_piece_delta(
-                    lanes,
-                    perspective,
-                    king_square,
-                    PieceFeature {
-                        color: captured_piece.color(),
-                        piece_type: captured_piece.piece_type(),
-                        square: capture_square,
-                    },
-                    -1,
-                );
-            }
-        }
-
-        child
+        self.update_child_perspective(
+            white,
+            Color::White,
+            child_position,
+            mv,
+            moving_color,
+            moving_piece_type,
+            undo,
+            capture_square,
+        );
+        self.update_child_perspective(
+            black,
+            Color::Black,
+            child_position,
+            mv,
+            moving_color,
+            moving_piece_type,
+            undo,
+            capture_square,
+        );
     }
 
-    fn build_perspective(&self, position: &Position, perspective: Color) -> Vec<i32> {
-        let mut lanes = self
-            .hidden_biases
-            .iter()
-            .map(|bias| i32::from(*bias))
-            .collect::<Vec<_>>();
+    #[allow(clippy::too_many_arguments)]
+    fn update_child_perspective(
+        &self,
+        lanes: &mut [i32],
+        perspective: Color,
+        child_position: &Position,
+        mv: Move,
+        moving_color: Color,
+        moving_piece_type: PieceType,
+        undo: UndoState,
+        capture_square: Square,
+    ) {
+        if moving_piece_type == PieceType::King && moving_color == perspective {
+            self.build_perspective_into(child_position, perspective, lanes);
+            return;
+        }
+
+        let king_square = child_position.king_square(perspective);
+        if moving_piece_type != PieceType::King {
+            self.apply_piece_delta(
+                lanes,
+                perspective,
+                king_square,
+                PieceFeature {
+                    color: moving_color,
+                    piece_type: moving_piece_type,
+                    square: mv.from(),
+                },
+                -1,
+            );
+            self.apply_piece_delta(
+                lanes,
+                perspective,
+                king_square,
+                PieceFeature {
+                    color: moving_color,
+                    piece_type: mv.promotion().unwrap_or(moving_piece_type),
+                    square: mv.to(),
+                },
+                1,
+            );
+        } else if mv.is_castle() {
+            let (rook_from, rook_to) = castle_rook_squares(mv.to());
+            self.apply_piece_delta(
+                lanes,
+                perspective,
+                king_square,
+                PieceFeature {
+                    color: moving_color,
+                    piece_type: PieceType::Rook,
+                    square: rook_from,
+                },
+                -1,
+            );
+            self.apply_piece_delta(
+                lanes,
+                perspective,
+                king_square,
+                PieceFeature {
+                    color: moving_color,
+                    piece_type: PieceType::Rook,
+                    square: rook_to,
+                },
+                1,
+            );
+        }
+
+        if let Some(captured_piece) = undo.captured_piece {
+            self.apply_piece_delta(
+                lanes,
+                perspective,
+                king_square,
+                PieceFeature {
+                    color: captured_piece.color(),
+                    piece_type: captured_piece.piece_type(),
+                    square: capture_square,
+                },
+                -1,
+            );
+        }
+    }
+
+    fn build_perspective_into(&self, position: &Position, perspective: Color, lanes: &mut [i32]) {
+        debug_assert_eq!(lanes.len(), self.topology.hidden_size);
+        for (lane, bias) in lanes.iter_mut().zip(self.hidden_biases.iter()) {
+            *lane = i32::from(*bias);
+        }
 
         let king_square = position.king_square(perspective);
         for piece_color in Color::ALL {
@@ -546,7 +1043,7 @@ impl NnueNetwork {
                 let mut pieces = position.pieces(piece_color, piece_type);
                 while let Some(square) = pop_lsb(&mut pieces) {
                     self.apply_piece_delta(
-                        &mut lanes,
+                        lanes,
                         perspective,
                         king_square,
                         PieceFeature {
@@ -559,20 +1056,21 @@ impl NnueNetwork {
                 }
             }
         }
-
-        lanes
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     fn evaluate(&self, position: &Position, accumulators: &AccumulatorPair) -> Score {
+        self.evaluate_perspectives(
+            position,
+            accumulators.perspective(Color::White),
+            accumulators.perspective(Color::Black),
+        )
+    }
+
+    fn evaluate_perspectives(&self, position: &Position, white: &[i32], black: &[i32]) -> Score {
         let (active, passive) = match position.side_to_move() {
-            Color::White => (
-                accumulators.perspective(Color::White),
-                accumulators.perspective(Color::Black),
-            ),
-            Color::Black => (
-                accumulators.perspective(Color::Black),
-                accumulators.perspective(Color::White),
-            ),
+            Color::White => (white, black),
+            Color::Black => (black, white),
         };
 
         let mut output = self.output_bias;
@@ -598,6 +1096,7 @@ impl NnueNetwork {
         feature: PieceFeature,
         delta: i32,
     ) {
+        debug_assert!(matches!(delta, -1 | 1));
         let Some(bucket) = feature_bucket(perspective, feature.color, feature.piece_type) else {
             return;
         };
@@ -605,8 +1104,14 @@ impl NnueNetwork {
         let weights_offset = feature_index * self.topology.hidden_size;
         let weights =
             &self.input_weights[weights_offset..weights_offset + self.topology.hidden_size];
-        for (lane, weight) in lanes.iter_mut().zip(weights.iter()) {
-            *lane += delta * *weight as i32;
+        if delta > 0 {
+            for (lane, weight) in lanes.iter_mut().zip(weights.iter()) {
+                *lane += i32::from(*weight);
+            }
+        } else {
+            for (lane, weight) in lanes.iter_mut().zip(weights.iter()) {
+                *lane -= i32::from(*weight);
+            }
         }
     }
 }
@@ -746,6 +1251,25 @@ pub(crate) fn tiny_test_evalfile_path() -> PathBuf {
 mod tests {
     use super::*;
     use crate::core::{MoveList, ParsedMove};
+    use crate::nnue_rs::Arch;
+    use crate::search::{
+        SearchLimits,
+        service::{SearchRequest, UciSearchService},
+    };
+    use std::{
+        mem::{align_of, size_of},
+        path::PathBuf,
+    };
+
+    const DEFAULT_SFNNV10_TEST_NET: &str = "/tmp/nn-c288c895ea92.nnue";
+    const DEFAULT_STOCKFISH_SMALL_TEST_NET: &str = "/tmp/nn-37f18f62d772.nnue";
+
+    fn stockfish_test_net_path() -> Option<PathBuf> {
+        let path = std::env::var_os("VOLKRIX_SFNNUE_TEST_NET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_SFNNV10_TEST_NET));
+        path.is_file().then_some(path)
+    }
 
     fn tiny_test_service() -> Arc<NnueService> {
         NnueService::open_eval_file(
@@ -773,7 +1297,7 @@ mod tests {
         let mut stack = AccumulatorStack::default();
         stack.reset(service.build_accumulator(&position));
         assert_eq!(
-            *stack.current(),
+            stack.current_pair(),
             service.build_accumulator(&position),
             "root accumulator mismatch"
         );
@@ -782,7 +1306,8 @@ mod tests {
         for uci in moves {
             let mv = find_legal_move(&mut position, uci);
             let undo = position.make_move(mv).expect("test move must be legal");
-            let child = service.derive_child_accumulator(stack.current(), &position, mv, undo);
+            let parent = stack.current_pair();
+            let child = service.derive_child_accumulator(&parent, &position, mv, undo);
             let rebuilt = service.build_accumulator(&position);
             assert_eq!(
                 child, rebuilt,
@@ -797,7 +1322,7 @@ mod tests {
             position.unmake_move(mv, undo);
             let rebuilt = service.build_accumulator(&position);
             assert_eq!(
-                *stack.current(),
+                stack.current_pair(),
                 rebuilt,
                 "unmake must restore the previous accumulator frame exactly"
             );
@@ -807,6 +1332,7 @@ mod tests {
     #[test]
     fn tiny_test_net_metadata_matches_supported_compatibility_topology() {
         let service = tiny_test_service();
+        assert!(!service.is_stockfish());
         let metadata = service.metadata();
 
         assert_eq!(metadata.version, NNUE_VERSION);
@@ -857,6 +1383,116 @@ mod tests {
         let first = service.build_accumulator(&position);
         let second = service.build_accumulator(&position);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn accumulator_storage_is_fixed_aligned_and_preallocated_for_the_search_horizon() {
+        let service = tiny_test_service();
+        let position = Position::startpos();
+        let root = service.build_accumulator(&position);
+
+        assert_eq!(align_of::<AccumulatorPair>(), 64);
+        assert!(size_of::<AccumulatorPair>() >= 2 * HALFKP_256X2.hidden_size * size_of::<i32>());
+
+        let mut stack = AccumulatorStack::default();
+        stack.reset(root);
+        let initial_capacities = stack.perspectives.each_ref().map(|lanes| lanes.capacity());
+        assert!(
+            initial_capacities
+                .iter()
+                .all(|capacity| *capacity > super::super::root::MAX_PLY * stack.hidden_size)
+        );
+        for _ in 0..super::super::root::MAX_PLY {
+            stack.push_current();
+            assert_eq!(
+                stack.perspectives.each_ref().map(|lanes| lanes.capacity()),
+                initial_capacities
+            );
+        }
+    }
+
+    #[test]
+    fn retained_256_topology_uses_the_same_allocation_free_search_stack() {
+        let biases = (0..HALFKP_256X2.hidden_size)
+            .map(|lane| lane as i16 - 128)
+            .collect::<Vec<_>>();
+        let root = AccumulatorPair::from_biases(&biases);
+        assert_eq!(root.hidden_size(), HALFKP_256X2.hidden_size);
+        assert_eq!(root.perspective(Color::White).len(), 256);
+
+        let mut stack = AccumulatorStack::with_hidden_size(HALFKP_256X2.hidden_size);
+        stack.reset(root);
+        let initial_capacities = stack.perspectives.each_ref().map(|lanes| lanes.capacity());
+        for _ in 0..super::super::root::MAX_PLY {
+            stack.push_current();
+        }
+        assert_eq!(stack.current_pair(), root);
+        assert_eq!(
+            stack.perspectives.each_ref().map(|lanes| lanes.capacity()),
+            initial_capacities
+        );
+    }
+
+    #[test]
+    fn long_deterministic_legal_walk_matches_full_refresh_at_every_ply() {
+        let service = tiny_test_service();
+        let mut position = Position::startpos();
+        let mut state = NnueSearchState::new(Arc::clone(&service));
+        state.reset(&position);
+        let initial_capacities = state
+            .volk_stack()
+            .perspectives
+            .each_ref()
+            .map(|lanes| lanes.capacity());
+        let mut undos = Vec::new();
+        let mut random_state = 0x9e37_79b9_7f4a_7c15u64;
+
+        for ply in 0..96 {
+            let mut legal_moves = MoveList::new();
+            position.generate_legal_moves(&mut legal_moves);
+            if legal_moves.is_empty() {
+                break;
+            }
+
+            random_state ^= random_state << 13;
+            random_state ^= random_state >> 7;
+            random_state ^= random_state << 17;
+            let mv = legal_moves.get((random_state as usize) % legal_moves.len());
+            let undo = position
+                .make_move(mv)
+                .expect("generated move must remain legal");
+            state.push_child(&position, mv, undo);
+
+            let rebuilt = service.build_accumulator(&position);
+            assert_eq!(
+                state.volk_stack().current_pair(),
+                rebuilt,
+                "incremental accumulator mismatch at deterministic ply {ply} after {mv}"
+            );
+            assert_eq!(
+                state.evaluate(&position),
+                service.evaluate(&position, &rebuilt),
+                "incremental evaluation mismatch at deterministic ply {ply} after {mv}"
+            );
+            assert_eq!(
+                state
+                    .volk_stack()
+                    .perspectives
+                    .each_ref()
+                    .map(|lanes| lanes.capacity()),
+                initial_capacities
+            );
+            undos.push((mv, undo));
+        }
+
+        while let Some((mv, undo)) = undos.pop() {
+            state.pop();
+            position.unmake_move(mv, undo);
+            assert_eq!(
+                state.volk_stack().current_pair(),
+                service.build_accumulator(&position)
+            );
+        }
     }
 
     #[test]
@@ -915,6 +1551,187 @@ mod tests {
     }
 
     #[test]
+    fn component_scaling_is_explicit_and_overflow_safe() {
+        let components = NnueEvaluationComponents {
+            psqt: 320,
+            positional: -96,
+        };
+        assert_eq!(components.total(), Score(224));
+        assert_eq!(components.scaled(125, 131, 128), Score(214));
+
+        let extreme = NnueEvaluationComponents {
+            psqt: i32::MAX,
+            positional: i32::MAX,
+        };
+        assert_eq!(extreme.scaled(i32::MAX, i32::MAX, 1), Score(i32::MAX));
+    }
+
+    #[test]
+    fn dual_state_selects_small_and_falls_back_to_big_when_ambiguous() {
+        let Some(big_path) = stockfish_test_net_path() else {
+            return;
+        };
+        let small_path = Path::new(DEFAULT_STOCKFISH_SMALL_TEST_NET);
+        if !small_path.is_file() {
+            return;
+        }
+        let big =
+            NnueService::open_eval_file(big_path.to_str().expect("big net path must be UTF-8"))
+                .expect("big net must load");
+        let small =
+            NnueService::open_eval_file(small_path.to_str().expect("small net path must be UTF-8"))
+                .expect("small net must load");
+        let mut state = DualNnueSearchState::new(big, small);
+        let mut position = Position::startpos();
+        state.reset(&position);
+
+        let (selected_small, used_small) = state.evaluate(&position, true, 200);
+        assert!(used_small);
+        assert_eq!(selected_small.total(), Score(251));
+
+        let (fallback_big, used_small) = state.evaluate(&position, true, 300);
+        assert!(!used_small);
+        assert_eq!(fallback_big.total(), Score(44));
+
+        let mv = find_legal_move(&mut position, "e2e4");
+        let undo = position.make_move(mv).expect("test move must apply");
+        state.push_child(&position, mv, undo);
+        let (forced_big, used_small) = state.evaluate(&position, false, 0);
+        assert!(!used_small);
+        assert_eq!(forced_big.total(), Score(-65));
+        state.pop();
+        position.unmake_move(mv, undo);
+    }
+
+    #[test]
+    fn production_dual_service_tracks_selection_and_fallback_counters() {
+        let Some(big_path) = stockfish_test_net_path() else {
+            return;
+        };
+        let small_path = Path::new(DEFAULT_STOCKFISH_SMALL_TEST_NET);
+        if !small_path.is_file() {
+            return;
+        }
+        let big =
+            NnueService::open_eval_file(big_path.to_str().expect("big net path must be UTF-8"))
+                .expect("big net must load");
+        let small =
+            NnueService::open_eval_file(small_path.to_str().expect("small net path must be UTF-8"))
+                .expect("small net must load");
+        let counters = Arc::new(DualEvalCounters::default());
+        let dual = NnueService::with_small_fallback(big, small, 300, Arc::clone(&counters));
+        let mut state = NnueSearchState::new(dual);
+        let mut position = Position::startpos();
+        state.reset(&position);
+
+        let fallback_score = state.evaluate(&position);
+        assert_ne!(fallback_score, Score(251));
+        assert_eq!(
+            counters.snapshot(),
+            DualEvalCounterSnapshot {
+                small_selected: 0,
+                big_fallbacks: 1,
+            }
+        );
+
+        let mut legal_moves = MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let mv = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.to_string() == "e2e4")
+            .expect("e2e4 must be legal");
+        let undo = position.make_move(mv).expect("e2e4 must apply");
+        state.push_child(&position, mv, undo);
+        let _ = state.evaluate(&position);
+        state.pop();
+        position.unmake_move(mv, undo);
+        assert_eq!(state.evaluate(&position), fallback_score);
+        assert_eq!(counters.snapshot().big_fallbacks, 3);
+    }
+
+    #[test]
+    fn evalfile_auto_detects_sfnnv10_and_runs_incremental_search() {
+        let Some(path) = stockfish_test_net_path() else {
+            return;
+        };
+        let path_text = path.to_str().expect("test net path must be UTF-8");
+        let service = NnueService::open_eval_file(path_text).expect("SFNNv10 network must load");
+        assert!(service.is_stockfish());
+
+        let stockfish = match &service.backend {
+            NnueBackend::Stockfish(stockfish) => stockfish,
+            NnueBackend::Volk(_) => panic!("Stockfish network was misdetected as VOLKNNUE"),
+            NnueBackend::Dual { .. } => panic!("standalone network unexpectedly became dual"),
+        };
+        assert_eq!(stockfish.network_architecture(), Arch::Sfnnv10);
+
+        let mut position = Position::startpos();
+        let mut state = NnueSearchState::new(Arc::clone(&service));
+        state.reset(&position);
+        let start_score = state.evaluate(&position).0;
+        assert_eq!(start_score, stockfish.evaluate_fresh(&position));
+        if path == Path::new(DEFAULT_SFNNV10_TEST_NET) {
+            assert_eq!(start_score, 44, "pinned SFNNv10 start-position oracle");
+        }
+        let mv = find_legal_move(&mut position, "e2e4");
+        let undo = position.make_move(mv).expect("test move must apply");
+        state.push_child(&position, mv, undo);
+        let e4_score = state.evaluate(&position).0;
+        assert_eq!(e4_score, stockfish.evaluate_fresh(&position));
+        if path == Path::new(DEFAULT_SFNNV10_TEST_NET) {
+            assert_eq!(e4_score, -65, "pinned SFNNv10 e2e4 oracle");
+        }
+        state.pop();
+        position.unmake_move(mv, undo);
+
+        let mut search_service = UciSearchService::new();
+        search_service.debug_install_nnue(path_text, service);
+        let result = search_service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(2),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+                root_moves: None,
+            },
+        );
+        assert_eq!(result.depth, 2);
+        assert!(result.best_move.is_some());
+        assert!(result.nodes > 0);
+    }
+
+    #[test]
+    fn evalfile_accepts_stockfish_small_halfkav2_hm_network() {
+        let path = Path::new(DEFAULT_STOCKFISH_SMALL_TEST_NET);
+        if !path.is_file() {
+            return;
+        }
+        let path_text = path.to_str().expect("test net path must be UTF-8");
+        let service = NnueService::open_eval_file(path_text).expect("small network must load");
+        let stockfish = match &service.backend {
+            NnueBackend::Stockfish(stockfish) => stockfish,
+            NnueBackend::Volk(_) => panic!("Stockfish network was misdetected as VOLKNNUE"),
+            NnueBackend::Dual { .. } => panic!("standalone network unexpectedly became dual"),
+        };
+        assert_eq!(stockfish.network_architecture(), Arch::HalfKAv2Hm);
+
+        let mut position = Position::startpos();
+        let mut state = NnueSearchState::new(Arc::clone(&service));
+        state.reset(&position);
+        assert_eq!(state.evaluate(&position).0, 251, "small-net start oracle");
+        let mv = find_legal_move(&mut position, "e2e4");
+        let undo = position.make_move(mv).expect("test move must apply");
+        state.push_child(&position, mv, undo);
+        assert_eq!(state.evaluate(&position).0, 49, "small-net e2e4 oracle");
+        assert_eq!(
+            state.evaluate(&position).0,
+            stockfish.evaluate_fresh(&position)
+        );
+    }
+
+    #[test]
     fn parser_rejects_malformed_network() {
         let mut bytes = Vec::from(&NNUE_MAGIC[..]);
         bytes.extend_from_slice(&NNUE_VERSION.to_le_bytes());
@@ -924,5 +1741,29 @@ mod tests {
         bytes.extend_from_slice(&(HALFKP_128X2.output_inputs() as u32).to_le_bytes());
         bytes.extend_from_slice(&1i32.to_le_bytes());
         assert!(NnueNetwork::parse(&bytes).is_err());
+    }
+
+    #[test]
+    #[ignore = "manual release profile for incremental NNUE accumulator updates"]
+    fn incremental_accumulator_update_profile_report() {
+        let service = tiny_test_service();
+        let mut position = Position::startpos();
+        let mut state = NnueSearchState::new(Arc::clone(&service));
+        state.reset(&position);
+        let mv = find_legal_move(&mut position, "e2e4");
+        let undo = position.make_move(mv).expect("profile move must be legal");
+        let started = std::time::Instant::now();
+        let mut checksum = 0i64;
+
+        for _ in 0..100_000 {
+            state.push_child(std::hint::black_box(&position), mv, undo);
+            checksum = checksum.wrapping_add(i64::from(state.evaluate(&position).0));
+            state.pop();
+        }
+
+        println!(
+            "incremental_accumulator_updates: count 100000 checksum {checksum} time_us {}",
+            started.elapsed().as_micros()
+        );
     }
 }

@@ -2,4 +2,6 @@
 /.idea
 /.vscode
 .DS_Store
-
+*.nnue
+__pycache__/
+*.py[cod]

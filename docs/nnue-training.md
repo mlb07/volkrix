@@ -1,414 +1,288 @@
-# NNUE Training
-
-Phase 13 adds Volkrix's first retained offline NNUE training and net-iteration path. It does not add new runtime or UCI controls.
-
-## Current Status And Handoff
-
-This document is the authoritative NNUE handoff note for future work.
-
-Preserved NNUE baseline:
-
-- NNUE-only preservation commit: `58044c8`
-- retained runtime format: Volkrix-owned `VOLKNNUE`
-- retained feature scheme: `HalfKP`
-- retained production topology: `HalfKP 256x2`
-- retained runtime compatibility asset: synthetic in-repo `HalfKP 128x2` test net
-- retained offline trainer backend: Bullet CPU through `tools/volkrix-nnue`
-
-What was changed and kept:
-
-- the old Python trainer was removed
-- offline training now runs through Bullet
-- Rust remains authoritative for feature semantics, export semantics, packing, and loader validation
-- the runtime is topology-aware for retained clean-room HalfKP topologies
-- the practical corpus workflow now exists:
-  - `selfplay-fens`
-  - `export-examples`
-  - `train-bullet`
-  - `pack-volknnue`
-  - `validate-volknnue`
-  - `compare-fallback`
-- two-stage training exists through `--init-from-checkpoint-dir`
-- depth-2 quiet search-label export is practical
-
-What was proved:
-
-- the Bullet adapter/pack/load/runtime bridge works
-- packed nets load through the existing `EvalFile` path
-- the retained fallback engine path still exists when `EvalFile=""`
-- the current training bottleneck is not the loader or packer
-
-What was not proved:
-
-- no current trained candidate net has yet beaten fallback in practical match testing
-
-Largest real NNUE evidence run so far:
-
-- stage 1 corpus: `263,198` realistic self-play positions with depth-1 search labels
-- stage 2 corpus: `12,074` depth-2 quiet search-labeled positions
-- production training target: `HalfKP 256x2`
-- comparison setup: `Threads=1`, `Hash=64`, `SyzygyPath=""`, fallback via `EvalFile=""`, `movetime 50 ms`
-- result:
-  - stage-1 candidate vs fallback: `0W 0D 16L`
-  - stage-2 two-stage candidate vs fallback: `0W 0D 16L`
-
-Current conclusion:
-
-- keep the NNUE runtime and offline tooling work
-- do not treat the current candidate nets as strong
-- if continuing NNUE work, the next priority is larger and stronger search-labeled data, not more NNUE infrastructure rewrites
-
-Boundary for future agents:
-
-- when asked about NNUE, start from this document first
-- treat unrelated search/runtime changes outside the preserved NNUE slice as separate work unless explicitly requested
-- do not claim NNUE strength gains from the current local candidate nets
-- do not widen runtime/UCI behavior unless explicitly requested
-
-## Retained Runtime Baseline
-
-Authoritative retained baseline:
-
-- commit `594cb6bcc6b29dd2d13647b1162b882a66cde264`
-- `EvalFile=""`, `SyzygyPath=""`, `Threads=1` remains the exact fixed-depth deterministic baseline
-- tablebases still outrank NNUE on retained eligible positions
-- TT remains the only shared mutable search structure
-
-## Offline Tooling Boundary
-
-Phase 13 uses a retained Rust-first split:
-
-- Rust remains authoritative for:
-  - HalfKP feature semantics
-  - example-format semantics
-  - VOLKNNUE packing
-  - final load validation
-- the isolated offline trainer uses Bullet's CPU backend through the `volkrix-nnue` tool crate
-- no Bullet dependency is introduced into the engine runtime path
-
-Retained Rust offline tooling lives in the isolated workspace member `tools/volkrix-nnue`.
-
-## Retained Corpus Input
-
-The retained larger-corpus input format is FEN lines:
-
-- one position per line
-- no retained PGN ingestion
-- no retained UCI move-sequence ingestion
-
-Retained tiny in-repo fixture corpus:
-
-- `tests/data/nnue/phase13-fixture.fens`
-
-## Retained Label Environment
-
-Every exported label is generated only in an explicit isolated environment:
-
-- `Threads=1`
-- `SyzygyPath=""`
-- `EvalFile=""`
-- an explicit search/static label mode recorded in the export manifest
-- explicit search depth, TT setting, hash size, worker count, position filter, and optional timeout recorded in the export manifest
-
-No retained label may depend on hidden runtime state.
-
-The exporter creates fresh isolated search services for labeling so prior TT contents, network state, tablebase state, and deferred UCI/runtime configuration cannot leak into the corpus.
-
-## Retained Target Semantics
-
-The retained scalar target scheme is:
-
-- explicit Volkrix-generated scalar supervision recorded by the export manifest
-- score orientation matches the engine's existing side-to-move convention
-- direct rules remain authoritative
-- retained Phase 11 tablebase-scope positions are excluded from the corpus
-
-Target conversion:
-
-- take the side-to-move search output
-- convert it directly into the retained scalar target orientation
-- clip to `[-2000, 2000]` centipawns
-
-Phase 13 Layer I does not preserve a separate mate-distance target scheme. Mate scores saturate into the retained clip band.
-
-## Normalized FEN And Split Rule
-
-For the retained split rule, "normalized FEN" means:
-
-- parse the source line with `Position::from_fen`
-- reserialize it with `Position::to_fen`
-- use that canonical six-field FEN string exactly
-
-The retained train/validation split is:
-
-- `fnv1a64(normalized_fen_utf8) % 10 == 0` => validation
-- all other positions => training
-
-Record-order splitting is not retained.
-
-## Retained Example Format
-
-The retained example file is a versioned text file:
-
-1. line 1: `VOLKRIX_EXAMPLES<TAB>1`
-2. line 2: JSON manifest prefixed with `# `
-3. line 3: fixed tab-separated column header
-4. remaining lines: tab-separated examples
-
-Retained manifest fields include:
-
-- exporter version
-- source engine commit
-- topology id
-- feature count
-- hidden size
-- output input count
-- label depth
-- target clip
-- explicit label environment
-- normalized-FEN rule
-
-Retained row columns are:
-
-- `fen`
-- `normalized_fen`
-- `side_to_move`
-- `raw_score_cp`
-- `target_cp`
-- `active_features`
-- `passive_features`
-
-Feature columns are comma-separated sparse HalfKP feature indices already derived from the authoritative Rust feature encoder and already oriented for active/passive side-to-move use.
-
-## Checkpoint And Pack Artifacts
-
-Retained trainer checkpoint directory contents:
-
-- `manifest.json`
-- `input_weights.f32le`
-- `hidden_biases.f32le`
-- `output_weights.f32le`
-- `output_bias.f32le`
-- `train.bulletdata`
-- `validation.bulletdata`
-- `bullet-training.json`
-- `bullet-checkpoints/`
-
-Retained checkpoint manifest fields include:
-
-- trainer version
-- seed
-- optimizer
-- loss
-- split rule
-- example counts
-- retained topology metadata
-- source export manifest
-- optional parent-checkpoint traceability for two-stage training:
-  - `init_from_mode`
-  - `init_from_checkpoint_dir`
-  - `init_from_checkpoint_trainer_version`
-  - `init_from_checkpoint_epochs`
-  - `init_from_checkpoint_examples_path`
-
-Retained Bullet sidecar metadata records:
-
-- Bullet git revision
-- backend (`Bullet CPU`)
-- activation (`crelu` in the training graph, matching runtime clipped ReLU after `QA=255` scaling)
-- eval scale
-- batch size
-- batches per superbatch
-- superbatch range
-- learning-rate schedule endpoints
-- data file paths
-- optional parent-checkpoint traceability:
-  - `init_from_mode`
-  - `init_from_checkpoint_dir`
-  - `init_from_bullet_checkpoint`
-  - `init_from_checkpoint_trainer_version`
-  - `init_from_checkpoint_epochs`
-  - `init_from_checkpoint_examples_path`
-
-Retained packed net traceability lives alongside the packed VOLKNNUE file only:
-
-- packed net: `<name>.volknnue`
-- pack manifest sidecar: `<name>.volknnue.manifest.json`
-
-It is not embedded inside the packed VOLKNNUE payload because the Phase 12 VOLKNNUE file format remains locked.
-
-## Commands
-
-Export retained examples:
+# NNUE Runtime and Training
+
+Volkrix has two NNUE paths with different purposes:
+
+- The Stockfish-format path loads an existing `.nnue` through pinned `nnue-rs`
+  0.4.0. It is the practical route to a strong pretrained evaluator without
+  training a Volkrix model.
+- The `VOLKNNUE` path is Volkrix's clean-room HalfKP format and offline training
+  pipeline. It exists for controlled experimentation and reproducible ownership
+  of feature, export, packing, and loader semantics.
+
+Official release bundles enable the large Stockfish-format network through
+same-directory discovery. A source build does the same when that file is installed
+beside the executable. `EvalFile` selects another network at runtime, and an empty
+value restores the classical evaluator. Tablebase and board-rule results remain
+authoritative over both evaluators.
+
+## Pretrained Stockfish-format network
+
+The repository includes a fetcher for the Stockfish 18 network published under
+CC0:
 
 ```bash
-cargo run -p volkrix-nnue -- export-examples \
-  --input tests/data/nnue/phase13-fixture.fens \
-  --output /tmp/volkrix-phase13-fixture.examples
+scripts/fetch-stockfish18-net.sh target/release/nn-c288c895ea92.nnue
 ```
 
-Train retained checkpoint with Bullet:
+Official release archives already contain that large network beside the engine,
+which lets Volkrix discover it automatically. Source builds use the command above
+to create the same layout. An explicit `EvalFile` overrides sibling discovery;
+an explicit empty value selects classical evaluation for that session.
+
+Fetch the official smaller HalfKAv2_hm evaluator, which is the lower-latency,
+lower-memory AArch64 alternative with the current scalar backend:
 
 ```bash
-cargo run -p volkrix-nnue -- train-bullet \
-  --examples /tmp/volkrix-phase13-fixture.examples \
-  --checkpoint-dir /tmp/volkrix-phase13-checkpoint
+scripts/fetch-stockfish18-net.sh --small ./nn-37f18f62d772.nnue
 ```
 
-Initialize a new Bullet run from a prior Volkrix checkpoint:
+The small network is opt-in and is not substituted into official bundles.
 
-```bash
-cargo run -p volkrix-nnue -- train-bullet \
-  --examples /tmp/volkrix-phase13-fixture.examples \
-  --checkpoint-dir /tmp/volkrix-phase13-stage2-checkpoint \
-  --init-from-checkpoint-dir /tmp/volkrix-phase13-checkpoint \
-  --superbatches 64 \
-  --initial-lr 0.0002 \
-  --final-lr 0.00002
+The script downloads from the Stockfish testing service and requires this exact
+SHA-256 before installing the file:
+
+```text
+c288c895ea924429ea9092e3f36b2b3c1f00f2a3a4c759ff7e57e79e3b43e4a7
 ```
 
-Pack retained VOLKNNUE:
+Configure the verified file through UCI:
 
-```bash
-cargo run -p volkrix-nnue -- pack-volknnue \
-  --checkpoint-dir /tmp/volkrix-phase13-checkpoint \
-  --output /tmp/volkrix-phase13.volknnue
+```text
+setoption name EvalFile value /absolute/path/nn-c288c895ea92.nnue
+isready
 ```
 
-Validate retained VOLKNNUE:
+Format detection reads the file prefix once. Non-`VOLKNNUE` files are delegated
+to Volkrix's pinned MIT fork of `nnue-rs` 0.4.0, which validates and parses
+SFNNv10 threat nets, HalfKAv2_hm, HalfKAv2, and HalfKP. Each search thread
+pre-creates accumulator frames for the full search horizon. A move push records
+only a compact `Move` + `UndoState` delta. The accumulator is materialized on
+first evaluation, avoiding both eager inference work and the former two-board,
+64-square diff. An unevaluated chain refreshes only the requested leaf.
+
+Inference uses AVX2 on supported x86-64 systems. AArch64 uses bit-exact NEON for
+activation and accumulator kernels and the ARM dot-product instruction when the
+CPU reports `FEAT_DotProd`; all paths retain a scalar fallback and parity tests.
+The evaluator also preserves PSQT and positional components for explicit score
+scaling. `SmallEvalFile` can keep synchronized big/small lazy states under the
+default-off `DualEvalPolicy` A/B seam. The `small-fallback` policy uses the large
+network when the small score lies inside `DualEvalThreshold`; bench counters
+record both selections. No dual policy is promoted without paired match evidence.
+The first threshold-200 candidate was rejected at 2W/5D/41L in 48 completed
+games, so the large network remains authoritative by default.
+
+The post-Stockfish-18 development network format beginning with version
+`0x6a448afa` is intentionally rejected. It includes additional pair features and
+a different downstream architecture, not merely a renamed SFNNv10 header.
+Volkrix will enable it only after a permissively licensed format specification or
+independent implementation plus differential oracle coverage establishes exact
+behavior; the project does not copy GPL engine implementation code or guess file
+layout constants.
+
+## `VOLKNNUE` runtime
+
+The version-1 format begins with the eight-byte `VOLKNNUE` magic and records its
+topology and dimensions. Supported topologies are:
+
+- HalfKP 128x2, retained for deterministic integration fixtures
+- HalfKP 256x2, the production topology used by the offline packer
+
+The feature space contains 40,960 sparse inputs: perspective king square × ten
+own/enemy non-king piece buckets × piece square. The runtime shares immutable
+weights and gives each search thread cache-line-aligned, topology-sized
+accumulator slabs reserved for all plies. Ordinary push/evaluate/pop performs no
+heap allocation and no per-edge `Vec` clone. King moves rebuild the affected
+perspective as required.
+
+The checked-in `tests/data/nnue/volkrix-halfkp128x2-test.volknnue` is synthetic.
+It validates parsing, topology checks, orientation, and incremental updates; it is
+not a playing-strength network.
+
+## Tooling boundary
+
+Offline commands live in the separate `tools/volkrix-nnue` workspace member.
+Rust is authoritative for:
+
+- FEN normalization and corpus filtering
+- HalfKP feature indices and score orientation
+- versioned example and checkpoint metadata
+- `VOLKNNUE` quantization, packing, and validation
+- paired engine-match reporting
+
+Training uses the CPU backend from Bullet pinned to git revision
+`feab6443fc523c9d349427bca2d5bb3c04369420`. Bullet is not linked into the engine
+binary.
+
+## End-to-end `VOLKNNUE` workflow
+
+### 1. Prepare positions
+
+Inputs are normalized FEN lines, one position per line. Expand curated seeds:
 
 ```bash
-cargo run -p volkrix-nnue -- validate-volknnue \
-  --evalfile /tmp/volkrix-phase13.volknnue
+cargo run --release -p volkrix-nnue -- expand-fens \
+  --input <seed.fens> \
+  --output <expanded.fens> \
+  --max-plies 4 \
+  --branching 3 \
+  --max-positions 100000
 ```
 
-## Fixture Smoke Path
-
-Retained fixture smoke flow:
-
-1. export from `tests/data/nnue/phase13-fixture.fens`
-2. train the retained Bullet checkpoint
-3. pack to VOLKNNUE
-4. validate load through the retained Phase 12 loader
-
-This is a smoke path only. It is not a strength corpus.
-
-## Bullet Training Notes
-
-The retained Bullet trainer is pinned to:
-
-- Bullet git revision `feab6443fc523c9d349427bca2d5bb3c04369420`
-- CPU backend only
-- retained HalfKP `40960 -> 256x2 -> 1` production graph
-- deterministic normalized-FEN split
-- `AdamW`
-- sigmoid-squared-error value loss
-
-The training graph uses normalized hidden-layer parameters with `QA=255` and exports them back into Volkrix's runtime integer layout after training:
-
-- `l0` weights and biases are multiplied by `255`
-- `l1` weights are multiplied by `400 * 64 / 255`
-- `l1` bias is multiplied by `400 * 64`
-
-That scaling is what keeps the retained VOLKNNUE pack path compatible with the runtime loader without changing the engine.
-
-Two-stage training uses checkpoint initialization, not raw Bullet schedule continuation:
-
-- `--init-from-checkpoint-dir` resolves the prior Volkrix checkpoint directory
-- the tool loads the prior Bullet weights from that checkpoint
-- stage 2 then trains over the full new corpus from batch 0 with its own local superbatch schedule
-- parent-checkpoint traceability is recorded in both `manifest.json` and `bullet-training.json`
-
-This keeps the fine-tune corpus fully visible to stage 2 instead of inheriting Bullet's dataset-offset behavior from schedule resume.
-
-## Canonical Two-Stage Workflow
-
-Canonical current experiment:
-
-1. Stage 1 pretrain on a large self-play search-labeled corpus with cheap depth-1 labels
-2. Stage 2 fine-tune from that checkpoint on a smaller higher-quality depth-2 quiet self-play search corpus
-3. pack and validate the final VOLKNNUE
-4. compare it against fallback at `Threads=1`, `Hash=64`, `SyzygyPath=""`
-
-Example commands:
+Or generate positions through Volkrix self-play:
 
 ```bash
-target/release/volkrix-nnue export-examples \
-  --input /tmp/volkrix-bullet-selfplay-40000-d1.fens \
-  --output /tmp/volkrix-bullet-selfplay-40000-d1-search1-w8.examples \
+cargo run --release -p volkrix-nnue -- selfplay-fens \
+  --input <seed.fens> \
+  --output <selfplay.fens> \
+  --depth 4 \
+  --hash-mb 64 \
+  --max-plies 160 \
+  --max-positions 1000000
+```
+
+`selfplay-fens` also accepts `--movetime-ms` instead of `--depth`. Seed sources,
+licenses, engine commit, and generation settings should be archived with every
+corpus.
+
+### 2. Export supervised examples
+
+```bash
+cargo run --release -p volkrix-nnue -- export-examples \
+  --input <positions.fens> \
+  --output <examples.txt> \
   --label-mode search \
-  --label-depth 1 \
-  --tt on \
-  --hash-mb 64 \
-  --workers 8
+  --label-depth 4 \
+  --tt off \
+  --workers 8 \
+  --position-filter quiet \
+  --label-timeout-ms 30000
+```
 
-target/release/volkrix-nnue train-bullet \
-  --examples /tmp/volkrix-bullet-selfplay-40000-d1-search1-w8.examples \
-  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage1-checkpoint \
-  --batch-size 512 \
-  --superbatches 128
+Search and static-eval label modes are supported. The manifest records the source
+commit, topology, label environment, search depth, TT/hash settings, filter, and
+timeout. Fresh search services isolate labels from previous TT, network, or
+tablebase state. Eligible tablebase-scope positions are excluded.
 
-target/release/volkrix-nnue train-bullet \
-  --examples /tmp/volkrix-bullet-selfplay-40000-d2w8-quiet-timeout100.examples \
-  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage2-checkpoint \
-  --init-from-checkpoint-dir /tmp/volkrix-bullet-two-stage-stage1-checkpoint \
+Targets use the engine's side-to-move score orientation and are clipped to
+`[-2000, 2000]` centipawns. Mate scores therefore saturate at the clip boundary.
+
+The versioned text format is:
+
+1. `VOLKRIX_EXAMPLES<TAB>1`
+2. a JSON manifest prefixed by `# `
+3. a fixed tab-separated column header
+4. rows containing FEN, normalized FEN, side to move, raw/target score, and sparse
+   active/passive feature lists
+
+Normalized FEN is produced by parsing and reserializing all six fields. The split
+is deterministic and independent of input order:
+
+```text
+fnv1a64(normalized_fen_utf8) % 10 == 0  -> validation
+otherwise                               -> training
+```
+
+### 3. Train
+
+```bash
+cargo run --release -p volkrix-nnue -- train-bullet \
+  --examples <examples.txt> \
+  --checkpoint-dir <checkpoint-dir> \
+  --superbatches 64 \
   --batch-size 512 \
+  --initial-lr 0.001 \
+  --final-lr 0.0001
+```
+
+Optional flags also control save rate, trainer/loader thread counts, queue size,
+and evaluation scale. Continue from a prior compatible checkpoint with:
+
+```bash
+cargo run --release -p volkrix-nnue -- train-bullet \
+  --examples <stage2.examples> \
+  --checkpoint-dir <stage2-checkpoint> \
+  --init-from-checkpoint-dir <stage1-checkpoint> \
   --superbatches 64 \
   --initial-lr 0.0002 \
   --final-lr 0.00002
-
-target/release/volkrix-nnue pack-volknnue \
-  --checkpoint-dir /tmp/volkrix-bullet-two-stage-stage2-checkpoint \
-  --output /tmp/volkrix-bullet-two-stage-stage2.volknnue
-
-target/release/volkrix-nnue validate-volknnue \
-  --evalfile /tmp/volkrix-bullet-two-stage-stage2.volknnue
-
-target/release/volkrix-nnue compare-fallback \
-  --openings /tmp/volkrix-bullet-eval-openings.fens \
-  --candidate /tmp/volkrix-bullet-two-stage-stage2.volknnue \
-  --movetime-ms 50 \
-  --hash-mb 64 \
-  --max-plies 120
 ```
 
-## Real Candidate-Net Validation
+The checkpoint directory contains the manifest, little-endian float tensors,
+Bullet datasets and metadata, raw Bullet checkpoints, and training logs. Parent
+checkpoint provenance is carried into a continued run.
 
-Phase 13 also requires one real locally trained candidate net outside the repo:
+The Bullet graph uses dual-perspective sparse HalfKP inputs, clipped ReLU hidden
+activations, AdamW, and a sigmoid score target. Packing quantizes the trained
+parameters into the integer layout expected by the runtime.
 
-- loaded through `EvalFile`
-- validated at `Threads=1`
-- optionally smoke-checked at `Threads=2`
+### 4. Pack and validate
 
-Required candidate-vs-fallback sanity comparison:
+```bash
+cargo run --release -p volkrix-nnue -- pack-volknnue \
+  --checkpoint-dir <checkpoint-dir> \
+  --output <candidate.volknnue>
 
-- candidate net through `EvalFile`
-- fallback with `EvalFile=""`
-- `Threads=1`
-- `Hash=64`
-- `SyzygyPath=""`
+cargo run --release -p volkrix-nnue -- validate-volknnue \
+  --evalfile <candidate.volknnue>
+```
 
-This is practical sanity evidence, not an Elo claim.
+Packing writes a `<candidate.volknnue>.manifest.json` sidecar. Traceability is kept
+outside the locked version-1 payload so runtime compatibility is not changed by
+new training metadata.
 
-Manual validation hooks:
+## Classical Texel tuning
 
-- `cargo test real_net_smoke_threads_one -- --ignored --nocapture`
-- `cargo test real_net_smoke_threads_two -- --ignored --nocapture`
-- `cargo test phase_thirteen_candidate_vs_fallback_sanity_report -- --ignored --nocapture`
+The same exported examples can tune the parameterized classical evaluator:
 
-Set `VOLKRIX_EVALFILE` to the local trained candidate-net path before running those commands.
+```bash
+cargo run --release -p volkrix-nnue -- texel-tune \
+  --examples <examples.txt> \
+  --output <weights.json> \
+  --iterations 12 \
+  --step 8 \
+  --regularization 0.000001
+```
 
-## Synthetic Test Net Versus Real Trained Nets
+Treat emitted weights as a candidate artifact. Validate with
+`compare-classical-weights` before changing defaults.
 
-Phase 12 synthetic integration asset:
+## Strength validation
 
-- `tests/data/nnue/volkrix-halfkp128x2-test.volknnue`
+A lower training or validation loss does not establish engine strength. Compare a
+packed candidate against the classical fallback with paired color-reversed games:
 
-That file remains:
+```bash
+cargo run --release -p volkrix-nnue -- compare-fallback \
+  --openings <held-out.fens> \
+  --candidate <candidate.volknnue> \
+  --movetime-ms 100 \
+  --hash-mb 64 \
+  --max-plies 240
+```
 
-- deterministic
-- synthetic
-- a runtime compatibility asset for the older `HalfKP 128x2` shape
-- intended only for parser/integration validation
+The report includes pentanomial counts, confidence intervals, Elo bounds when
+finite, and termination/adjudication counts. Small runs are smoke tests only.
+Promote a network only after a large held-out Fastchess/OpenBench experiment with
+a predeclared stopping rule.
 
-Phase 13+ real trained candidate nets are separate local artifacts produced by the retained export/train/pack workflow. New retained production checkpoints and packed nets target `HalfKP 256x2` and are not checked into the repo.
+The largest previously documented local `VOLKNNUE` candidates lost all 16 games
+in each of two tiny comparisons against the classical fallback. That result proves
+the pipeline exercised real networks; it does not validate those networks for
+play. Keep them external, and do not describe the current `VOLKNNUE` trainer output
+as stronger until new match evidence says so.
+
+## Reproducibility checklist
+
+For every retained network, archive:
+
+- corpus sources, licenses, normalized corpus checksum, and generation command
+- exporter and engine commits plus complete manifest
+- split rule and train/validation counts
+- Bullet revision, configuration, logs, and parent checkpoint chain
+- packed network and sidecar checksums
+- compiler/CPU, match binaries, openings checksum, command, and raw game log
+- W/D/L, pentanomial counts, confidence interval, time losses, crashes, and
+  adjudications
+
+Production `.nnue`, `.volknnue`, Bullet datasets, and checkpoints are intentionally
+ignored by git unless a separately reviewed distribution decision is made.

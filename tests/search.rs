@@ -92,6 +92,48 @@ fn fifty_move_is_handled_as_draw_inside_search() {
 }
 
 #[test]
+fn quiet_mate_on_the_fifty_move_boundary_is_not_scored_as_a_draw() {
+    for depth in 1..=4 {
+        let mut position =
+            Position::from_fen("7k/8/6K1/5Q2/8/8/8/8 w - - 99 1").expect("FEN parse must succeed");
+        let result = search(&mut position, SearchLimits::new(depth));
+        let best_move = result.best_move.expect("mate in one must yield a move");
+
+        let undo = position
+            .make_move(best_move)
+            .expect("best move must be legal");
+        assert_eq!(
+            position.status(),
+            PositionStatus::Checkmate,
+            "depth {depth}"
+        );
+        position.unmake_move(best_move, undo);
+        assert!(result.score.0 > 29_000, "depth {depth}: {}", result.score.0);
+    }
+}
+
+#[test]
+fn mirrored_quiet_mate_on_the_fifty_move_boundary_is_not_a_draw() {
+    for depth in 1..=4 {
+        let mut position =
+            Position::from_fen("8/8/8/8/5q2/6k1/8/7K b - - 99 1").expect("FEN parse must succeed");
+        let result = search(&mut position, SearchLimits::new(depth));
+        let best_move = result.best_move.expect("mate in one must yield a move");
+
+        let undo = position
+            .make_move(best_move)
+            .expect("best move must be legal");
+        assert_eq!(
+            position.status(),
+            PositionStatus::Checkmate,
+            "depth {depth}"
+        );
+        position.unmake_move(best_move, undo);
+        assert!(result.score.0 > 29_000, "depth {depth}: {}", result.score.0);
+    }
+}
+
+#[test]
 fn insufficient_material_is_handled_as_draw_inside_search() {
     let mut position =
         Position::from_fen("4k3/8/8/8/8/8/8/3BK3 w - - 0 1").expect("FEN parse must succeed");

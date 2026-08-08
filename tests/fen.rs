@@ -22,3 +22,14 @@ fn invalid_fen_is_rejected() {
     assert!(error.to_string().contains("6 fields"));
     assert_ne!(STARTPOS_FEN, "bad fen");
 }
+
+#[test]
+fn duplicate_castling_rights_are_rejected() {
+    for rights in ["KK", "QQ", "kk", "qq", "KQkqK"] {
+        let fen = format!("8/8/8/8/8/8/8/K6k w {rights} - 0 1");
+        assert!(
+            Position::from_fen(&fen).is_err(),
+            "duplicate castling rights must be rejected: {fen}"
+        );
+    }
+}

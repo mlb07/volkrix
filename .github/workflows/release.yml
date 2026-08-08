@@ -38,6 +38,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Third-party license and provenance audit
+        run: python scripts/audit_third_party.py
+
       - name: Build release binary
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
@@ -46,10 +49,27 @@ jobs:
       - name: Prepare release bundle
         shell: bash
         run: |
+          set -euo pipefail
           bundle_dir="volkrix-${{ matrix.target }}"
           mkdir -p "$bundle_dir"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$bundle_dir/${{ matrix.binary }}"
-          cp README.md LICENSE-MIT LICENSE-APACHE "$bundle_dir/"
+          cp README.md THIRD_PARTY_NOTICES.md LICENSE-MIT LICENSE-APACHE "$bundle_dir/"
+          mkdir -p "$bundle_dir/scripts"
+          cp scripts/fetch-stockfish18-net.sh "$bundle_dir/scripts/"
+          chmod +x "$bundle_dir/scripts/fetch-stockfish18-net.sh"
+
+          # Official bundles are strength-ready: the verified large SF18 network
+          # sits beside the executable for Volkrix's runtime sibling discovery.
+          scripts/fetch-stockfish18-net.sh \
+            "$bundle_dir/nn-c288c895ea92.nnue"
+          test -s "$bundle_dir/nn-c288c895ea92.nnue"
+
+      - name: Smoke-test packaged binary and network
+        run: >-
+          python scripts/uci_smoke.py
+          --engine "volkrix-${{ matrix.target }}/${{ matrix.binary }}"
+          --evalfile "volkrix-${{ matrix.target }}/nn-c288c895ea92.nnue"
+          --transcript "volkrix-${{ matrix.target }}/uci-smoke.log"
 
       - name: Create tarball
         if: runner.os != 'Windows'
@@ -61,7 +81,19 @@ jobs:
         shell: pwsh
         run: Compress-Archive -Path "volkrix-${{ matrix.target }}" -DestinationPath "${{ matrix.archive }}"
 
+      - name: Create archive checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
+          fi
+
       - name: Upload release asset
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "${{ matrix.archive }}" --clobber
+        run: >-
+          gh release upload "${{ github.event.release.tag_name }}"
+          "${{ matrix.archive }}" "${{ matrix.archive }}.sha256" --clobber

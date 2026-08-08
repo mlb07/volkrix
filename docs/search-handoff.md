@@ -1,123 +1,113 @@
-# Search Handoff
+# Search Change Acceptance
 
-This note tracks the accepted non-NNUE, non-eval search work that landed after the original Phase 9 baseline.
+This document is the handoff protocol for search and evaluation experiments. It
+replaces historical lists of tiny local matches: those results are useful lab
+notes, but they are not durable evidence that the current tree is stronger.
 
-## Scope
+## Non-negotiable correctness gate
 
-- search flow, ordering, pruning, and qsearch only
-- no classical-eval edits
-- no NNUE runtime edits
-- no UCI-surface edits beyond what existing search paths already consume
-- for new tuning work, promote changes only if they beat current `HEAD`
-- if an initial result is close, require a larger follow-up bucket before promotion
+Before measuring strength, a candidate must pass:
 
-## Accepted Search Changes
+```bash
+cargo fmt --all -- --check
+cargo test --workspace --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --release --features internal-testing --locked
+cargo test --release --test perft -- --ignored
+```
 
-- root fail-high handling now beta-cuts correctly
-- principal variation search is active at root and in the main alpha-beta path
-- move ordering uses a staged move picker instead of repeated full-list rescoring
-- previous-iteration PV reuse now works below the root when the current prefix still matches
-- previous-iteration PV hints below the root are now only reused on PV nodes
-- countermove ordering is active for quiet replies
-- quiet alpha-improving best moves feed back into quiet-history ordering
-- capture ordering uses SEE buckets plus a light victim/aggressor tie-break
-- late move reductions scale with move lateness instead of always reducing by one ply
-- null-move pruning is enabled with a real reversible null move in `Position`
-- reverse futility pruning is enabled for shallow non-PV nodes
-- shallow futility pruning is no longer enabled in the current phase-9 default
-- shallow late-move pruning is enabled for very late quiet non-check moves
-- shallow late-move pruning now stops at depth `2` instead of depth `3`
-- late move reductions now start at depth `5` instead of depth `4`
-- null-move pruning now uses the deeper `R=3` reduction from depth `6` upward instead of depth `7`
-- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
-- null-move pruning now skips depth `3` nodes and only starts at depth `4`
-- reverse futility pruning now uses a more conservative `140 * depth` margin instead of `120 * depth`
-- root aspiration re-search now widens only the side that failed instead of rebuilding a symmetric window around the original guess
-- qsearch now skips non-promotion captures with `SEE <= 0` when not in check
-- alpha-beta and qsearch now clear the active PV row on entry, including TT cutoff, stand-pat, tablebase, draw, and depth-limit exits, so UCI `info ... pv` lines cannot inherit stale continuations from sibling branches
-- UCI `go searchmoves ...` is now supported by resolving the requested moves against the current root legal move list and carrying that root filter through normal, threaded, and root-tablebase search paths
+Use focused tests during iteration, but run the complete gate before promotion.
+Replay printed PVs as legal move sequences, exercise stop/deadline behavior, and
+test `Threads=1` plus representative multithread counts after touching shared
+state.
 
-## Supporting Engine Changes
+## Performance gate
 
-- `Position` now supports `make_null_move` / `unmake_null_move`
-- `Position::has_non_pawn_material` exists to guard selective pruning in low-material cases
-- `SearchHeuristics` now exposes explicit toggles for the accepted selective-search features
-- `tests/uci.rs::go_depth_reports_only_legal_pv_lines` replays every printed PV token from the root position across repeated searches to guard against stale TT/PV output
-- `tests/uci.rs` covers `go searchmoves` constrained best moves, later `depth` arguments, and illegal root-move rejection without starting a search
+Build the baseline and candidate with the same compiler, target features, release
+profile, and environment. Record:
 
-## Validation Pattern
+- both commit IDs and exact binaries
+- `rustc -Vv`, CPU model, OS, and power mode
+- command line, thread/hash/evaluator settings, and network checksum
+- several warm runs of `volkrix bench`
+- NPS and completed depth at fixed wall times on representative positions
 
-Accepted search changes were kept only when they passed:
+Node count can rise because a search became stronger or fall because a pruning
+became unsound. Wall time can move independently of both. A benchmark is a
+regression detector and profiler, never an Elo substitute.
 
-- `cargo test --quiet --lib search::root`
-- `cargo test --quiet --test search`
-- `cargo test --quiet --test uci`
-- `cargo run --quiet --release -- bench`
+## Strength gate
 
-## Current Evidence
+Every opening must be played twice with colors reversed. Hold `Hash`, `Threads`,
+`Move Overhead`, `SyzygyPath`, `EvalFile`, adjudication, and time control constant
+unless that option is the experiment itself.
 
-- current `HEAD` keep candidate: `quiet_shape_bonus` now returns `0`
-- targeted validation stayed clean:
-- `cargo test --quiet --lib search::root`
-- `cargo test --quiet --test search`
-- `cargo test --quiet --test uci`
-- `cargo run --quiet --release -- bench`
-- direct same-machine engine evidence versus the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
-- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `40W 314D 30L`, score `51.3%`, approximate Elo `+9.0`
-- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `13W 168D 11L`, score `50.5%`, approximate Elo `+3.6`
+The built-in paired harness is suitable for smoke tests:
 
-Previous retained search evidence from the same round:
+```bash
+cargo run --locked --release -p volkrix-nnue -- compare-engines \
+  --openings /absolute/path/to/openings.fens \
+  --baseline /absolute/path/to/baseline \
+  --candidate /absolute/path/to/candidate \
+  --baseline-evalfile /absolute/path/to/network.nnue \
+  --candidate-evalfile /absolute/path/to/network.nnue \
+  --artifacts /absolute/path/to/new-run-directory \
+  --movetime-ms 100 \
+  --hash-mb 64 \
+  --max-plies 240
+```
 
-- `ASPIRATION_DELTA` is now `36` instead of `32`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
-- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
+It reports pentanomial pair buckets, score, a paired confidence interval, an Elo
+interval where finite, termination reasons, and max-ply adjudications. Treat a
+small run as plumbing validation only. For promotion, use a large varied and
+license-compatible opening suite with Fastchess or OpenBench and a predeclared
+SPRT or confidence threshold.
 
-- qsearch now skips non-promotion captures only when `SEE < 0`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
+Do not tune on one opening set and quote the same set as confirmation. Keep a
+held-out suite, test at more than one time scale, and check that gains survive
+both colors and common hardware targets.
 
-- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
+## Experiment isolation
 
-- `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
+Change one coherent mechanism at a time. Search, evaluation, NNUE architecture,
+SMP, and time-management changes should normally be separate candidates. When a
+bundle is unavoidable, keep intermediate binaries so regressions can be bisected.
 
-- late-move pruning now only fires through depth `2` instead of depth `3`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
-- late move reductions now start at depth `5` instead of depth `4`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 179D 4L`, score `51.3%`, approximate Elo `+9.0`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
-- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 175D 8L`, score `50.3%`, approximate Elo `+1.8`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
-- qsearch now skips non-promotion captures with `SEE <= 0` when not in check
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
-- qsearch now skips clearly losing non-promotion captures by SEE when not in check
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 87D 1L`, score `53.6%`, approximate Elo `+25.4`
-- `search_root_with_aspiration_core` now keeps the non-failing side of the window fixed and widens only the side that missed
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 181D 1L`, score `52.3%`, approximate Elo `+16.3`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 82D 5L`, score `52.1%`, approximate Elo `+14.5`
-- `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
+For classical tuning, emit a candidate weights JSON first and compare it without
+rewriting engine defaults:
 
-## Current Caveat
+```bash
+cargo run --release -p volkrix-nnue -- compare-classical-weights \
+  --openings <openings.fens> \
+  --candidate-weights <weights.json> \
+  --depth 4
+```
 
-Exact retained benchmark signatures in `tests/tt.rs` are sensitive to concurrent eval work. If classical-eval edits are in flight, treat immediate same-tree before/after comparisons as authoritative for search experiments, then rebaseline `tests/tt.rs` once eval and search are settled together.
+For `VOLKNNUE`, compare a packed candidate directly with the classical fallback:
+
+```bash
+cargo run --release -p volkrix-nnue -- compare-fallback \
+  --openings <openings.fens> \
+  --candidate <net.volknnue> \
+  --movetime-ms 100
+```
+
+## Promotion record
+
+A retained result should include the raw game log and:
+
+- hypothesis and exact code/config difference
+- test protocol chosen before the run
+- opening-suite source, license, and checksum
+- W/D/L and pentanomial counts
+- score/Elo interval and stopping rule
+- crashes, time losses, illegal moves, and adjudication counts
+- performance delta and correctness commands
+
+If a candidate is neutral, uncertain, or hardware-specific, record that plainly.
+There is no valid “it cannot get better” endpoint for a chess engine; the honest
+release standard is that each retained change has survived the strongest
+available falsification attempt.
+
+See [`strength-testing.md`](strength-testing.md) for the fail-closed UCI release
+smoke, FastChess SPRT wrapper, PGO production build, and OpenBench template.

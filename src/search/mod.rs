@@ -13,10 +13,13 @@ mod root;
 pub mod service;
 #[cfg(not(feature = "offline-tools"))]
 pub(crate) mod service;
+mod stockfish_nnue;
 pub(crate) mod tablebase;
 mod tt;
 
-pub use bench::{BenchConfig, BenchResult, run_bench};
+pub use bench::{BenchConfig, BenchResult, DualBenchStats, run_bench};
 pub use eval::evaluate;
 pub use limits::SearchLimits;
+pub(crate) use root::PonderState;
 pub use root::{SearchResult, SearchStats, search};
+pub use service::{DEFAULT_DUAL_EVAL_THRESHOLD, MAX_DUAL_EVAL_THRESHOLD};

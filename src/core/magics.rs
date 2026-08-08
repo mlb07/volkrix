@@ -108,7 +108,26 @@ fn occupancy_from_index(mask: u64, index: usize) -> u64 {
     result
 }
 
+#[inline]
 fn subset_index(occupied: u64, mask: u64) -> usize {
+    #[cfg(target_arch = "x86_64")]
+    if std::arch::is_x86_feature_detected!("bmi2") {
+        // SAFETY: the BMI2 feature is checked at runtime before entering the
+        // target-feature-specific implementation.
+        return unsafe { subset_index_bmi2(occupied, mask) };
+    }
+
+    subset_index_portable(occupied, mask)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi2")]
+unsafe fn subset_index_bmi2(occupied: u64, mask: u64) -> usize {
+    std::arch::x86_64::_pext_u64(occupied, mask) as usize
+}
+
+#[inline]
+fn subset_index_portable(occupied: u64, mask: u64) -> usize {
     let mut index = 0usize;
     let mut working_mask = mask;
     let mut bit_index = 0usize;

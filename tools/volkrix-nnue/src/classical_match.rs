@@ -166,6 +166,7 @@ fn play_match_game(
                     soft_deadline: None,
                     hard_deadline: None,
                     stop_flag: None,
+                    root_moves: None,
                 },
             )
         } else {
@@ -176,6 +177,7 @@ fn play_match_game(
                     soft_deadline: None,
                     hard_deadline: None,
                     stop_flag: None,
+                    root_moves: None,
                 },
             )
         };

@@ -210,19 +210,16 @@ impl Position {
     }
 
     pub(crate) fn search_key(&self) -> u64 {
-        let history = self.repetition_history.as_slice();
-        let relevant_len = usize::min(history.len(), self.halfmove_clock as usize + 1);
-        let start = history.len().saturating_sub(relevant_len);
+        // Repetition is deliberately not folded into the TT key. The search checks path-dependent
+        // draws before probing, and repetition terminal scores are never stored. A position-only
+        // key therefore lets actual transpositions share work instead of making every move-order
+        // history a different position. The rule-50 clock *does* affect the value of otherwise
+        // identical positions, so retain it in constant time.
+        self.zobrist_key ^ (self.halfmove_clock as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+    }
 
-        let mut hash = mix_u64(self.zobrist_key ^ ((self.halfmove_clock as u64) << 48));
-        hash ^= mix_u64(relevant_len as u64);
-        for (offset, key) in history[start..].iter().enumerate() {
-            let mixed =
-                mix_u64(key.wrapping_add((offset as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
-            hash ^= mixed;
-            hash = hash.rotate_left(11);
-        }
-        hash
+    pub(crate) fn correction_history_keys(&self) -> (u64, [u64; 2]) {
+        self.recompute_correction_history_keys()
     }
 
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
@@ -331,6 +328,24 @@ impl Position {
     pub(crate) fn refresh_derived_state_from_scratch(&mut self) {
         self.zobrist_key = self.recompute_zobrist();
         self.repetition_history.clear_and_seed(self.zobrist_key);
+    }
+
+    fn recompute_correction_history_keys(&self) -> (u64, [u64; 2]) {
+        let mut pawn_key = 0u64;
+        let mut non_pawn_keys = [0u64; 2];
+        for index in 0..64 {
+            let square = Square::from_index_unchecked(index as u8);
+            let Some(piece) = self.board[index] else {
+                continue;
+            };
+            let key = zobrist::piece_square(piece, square);
+            if piece.piece_type() == PieceType::Pawn {
+                pawn_key ^= key;
+            } else {
+                non_pawn_keys[piece.color().index()] ^= key;
+            }
+        }
+        (pawn_key, non_pawn_keys)
     }
 
     fn recompute_zobrist(&self) -> u64 {
@@ -502,7 +517,6 @@ impl Position {
         if self.zobrist_key != self.recompute_zobrist() {
             return Err("incremental zobrist key does not match recomputed zobrist".to_owned());
         }
-
         if self.repetition_history.len() == 0 {
             return Err("repetition history must contain the current position key".to_owned());
         }
@@ -551,6 +565,325 @@ impl Position {
                 moves.push(mv);
             }
         }
+    }
+
+    /// Independent make/unmake legality oracle for deterministic stress tooling.
+    ///
+    /// This deliberately remains behind the internal-testing surface: production
+    /// search must use the optimized generator above, while fuzz/property jobs use
+    /// this slower path to detect disagreements.
+    #[cfg(any(test, feature = "internal-testing"))]
+    #[doc(hidden)]
+    pub fn debug_generate_legal_moves_slow(&mut self, moves: &mut MoveList) {
+        moves.clear();
+        let mut pseudo_legal = MoveList::new();
+        self.debug_generate_pseudo_legal_slow(&mut pseudo_legal);
+
+        for mv in pseudo_legal.as_slice().iter().copied() {
+            if let Ok(undo) = self.make_move(mv) {
+                moves.push(mv);
+                self.unmake_move(mv, undo);
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_generate_pseudo_legal_slow(&self, moves: &mut MoveList) {
+        moves.clear();
+        for index in 0..64 {
+            let from = Square::from_index_unchecked(index);
+            let Some(piece) = self.piece_at(from) else {
+                continue;
+            };
+            if piece.color() != self.side_to_move {
+                continue;
+            }
+
+            match piece.piece_type() {
+                PieceType::Pawn => self.debug_generate_pawn_moves_slow(from, piece.color(), moves),
+                PieceType::Knight => {
+                    self.debug_generate_leaper_moves_slow(
+                        from,
+                        &[
+                            (-2, -1),
+                            (-2, 1),
+                            (-1, -2),
+                            (-1, 2),
+                            (1, -2),
+                            (1, 2),
+                            (2, -1),
+                            (2, 1),
+                        ],
+                        moves,
+                    );
+                }
+                PieceType::Bishop => self.debug_generate_slider_moves_slow(
+                    from,
+                    &[(-1, -1), (-1, 1), (1, -1), (1, 1)],
+                    moves,
+                ),
+                PieceType::Rook => self.debug_generate_slider_moves_slow(
+                    from,
+                    &[(-1, 0), (1, 0), (0, -1), (0, 1)],
+                    moves,
+                ),
+                PieceType::Queen => self.debug_generate_slider_moves_slow(
+                    from,
+                    &[
+                        (-1, -1),
+                        (-1, 1),
+                        (1, -1),
+                        (1, 1),
+                        (-1, 0),
+                        (1, 0),
+                        (0, -1),
+                        (0, 1),
+                    ],
+                    moves,
+                ),
+                PieceType::King => {
+                    self.debug_generate_leaper_moves_slow(
+                        from,
+                        &[
+                            (-1, -1),
+                            (-1, 0),
+                            (-1, 1),
+                            (0, -1),
+                            (0, 1),
+                            (1, -1),
+                            (1, 0),
+                            (1, 1),
+                        ],
+                        moves,
+                    );
+                    self.debug_generate_castling_moves_slow(piece.color(), moves);
+                }
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_generate_pawn_moves_slow(&self, from: Square, color: Color, moves: &mut MoveList) {
+        let direction = color.pawn_direction();
+        let promotion_rank = match color {
+            Color::White => 7,
+            Color::Black => 0,
+        };
+
+        if let Some(one_step) = from.offset(0, direction)
+            && self.piece_at(one_step).is_none()
+        {
+            self.debug_push_pawn_move_slow(from, one_step, false, promotion_rank, moves);
+            if from.rank() == color.pawn_start_rank()
+                && let Some(two_step) = from.offset(0, direction * 2)
+                && self.piece_at(two_step).is_none()
+            {
+                moves.push(Move::new(from, two_step).with_flags(FLAG_DOUBLE_PAWN_PUSH));
+            }
+        }
+
+        for file_delta in [-1, 1] {
+            let Some(to) = from.offset(file_delta, direction) else {
+                continue;
+            };
+            if self
+                .piece_at(to)
+                .is_some_and(|piece| piece.color() == color.opposite())
+            {
+                self.debug_push_pawn_move_slow(from, to, true, promotion_rank, moves);
+                continue;
+            }
+            if Some(to) == self.en_passant {
+                let captured_square = to.offset(0, -direction);
+                if captured_square.is_some_and(|square| {
+                    self.piece_at(square)
+                        == Some(Piece::from_parts(color.opposite(), PieceType::Pawn))
+                }) {
+                    moves.push(Move::new(from, to).with_flags(FLAG_CAPTURE | FLAG_EN_PASSANT));
+                }
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_push_pawn_move_slow(
+        &self,
+        from: Square,
+        to: Square,
+        capture: bool,
+        promotion_rank: u8,
+        moves: &mut MoveList,
+    ) {
+        let flags = if capture { FLAG_CAPTURE } else { 0 };
+        if to.rank() == promotion_rank {
+            for promotion_piece in PieceType::promotion_pieces() {
+                moves.push(
+                    Move::new(from, to)
+                        .with_flags(flags)
+                        .with_promotion(promotion_piece),
+                );
+            }
+        } else {
+            moves.push(Move::new(from, to).with_flags(flags));
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_generate_leaper_moves_slow(
+        &self,
+        from: Square,
+        deltas: &[(i8, i8)],
+        moves: &mut MoveList,
+    ) {
+        for &(file_delta, rank_delta) in deltas {
+            if let Some(to) = from.offset(file_delta, rank_delta) {
+                self.debug_push_target_slow(from, to, moves);
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_generate_slider_moves_slow(
+        &self,
+        from: Square,
+        directions: &[(i8, i8)],
+        moves: &mut MoveList,
+    ) {
+        for &(file_delta, rank_delta) in directions {
+            let mut target = from;
+            while let Some(to) = target.offset(file_delta, rank_delta) {
+                target = to;
+                if !self.debug_push_target_slow(from, to, moves) {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Adds a geometrically reachable target and returns whether a slider may
+    /// continue past it. This reference path deliberately reads the mailbox
+    /// board rather than the production attack tables or bitboards.
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_push_target_slow(&self, from: Square, to: Square, moves: &mut MoveList) -> bool {
+        match self.piece_at(to) {
+            None => {
+                moves.push(Move::new(from, to));
+                true
+            }
+            Some(piece) if piece.color() != self.side_to_move => {
+                moves.push(Move::new(from, to).with_flags(FLAG_CAPTURE));
+                false
+            }
+            Some(_) => false,
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_generate_castling_moves_slow(&self, color: Color, moves: &mut MoveList) {
+        let rank = match color {
+            Color::White => 0,
+            Color::Black => 7,
+        };
+        let king = Square::from_coords(4, rank).expect("reference king square must exist");
+        if self.piece_at(king) != Some(Piece::from_parts(color, PieceType::King))
+            || self.debug_is_square_attacked_slow(king, color.opposite())
+        {
+            return;
+        }
+
+        for (kingside, rook_file, empty_files, transit_files, destination_file) in [
+            (true, 7, &[5, 6][..], &[5, 6][..], 6),
+            (false, 0, &[1, 2, 3][..], &[3, 2][..], 2),
+        ] {
+            let has_right = if kingside {
+                self.castling_rights.has_kingside(color)
+            } else {
+                self.castling_rights.has_queenside(color)
+            };
+            if !has_right {
+                continue;
+            }
+            let rook = Square::from_coords(rook_file, rank).expect("reference rook square");
+            if self.piece_at(rook) != Some(Piece::from_parts(color, PieceType::Rook))
+                || empty_files.iter().any(|&file| {
+                    self.piece_at(Square::from_coords(file, rank).expect("reference path square"))
+                        .is_some()
+                })
+                || transit_files.iter().any(|&file| {
+                    self.debug_is_square_attacked_slow(
+                        Square::from_coords(file, rank).expect("reference transit square"),
+                        color.opposite(),
+                    )
+                })
+            {
+                continue;
+            }
+            let destination =
+                Square::from_coords(destination_file, rank).expect("reference destination");
+            moves.push(Move::new(king, destination).with_flags(FLAG_CASTLE));
+        }
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_is_square_attacked_slow(&self, target: Square, by_color: Color) -> bool {
+        for index in 0..64 {
+            let from = Square::from_index_unchecked(index);
+            let Some(piece) = self.piece_at(from) else {
+                continue;
+            };
+            if piece.color() != by_color {
+                continue;
+            }
+
+            let file_delta = target.file() as i8 - from.file() as i8;
+            let rank_delta = target.rank() as i8 - from.rank() as i8;
+            let abs_file = file_delta.abs();
+            let abs_rank = rank_delta.abs();
+            let attacks = match piece.piece_type() {
+                PieceType::Pawn => abs_file == 1 && rank_delta == by_color.pawn_direction(),
+                PieceType::Knight => {
+                    (abs_file == 1 && abs_rank == 2) || (abs_file == 2 && abs_rank == 1)
+                }
+                PieceType::Bishop => {
+                    abs_file == abs_rank
+                        && abs_file != 0
+                        && self.debug_path_clear_slow(from, target)
+                }
+                PieceType::Rook => {
+                    ((file_delta == 0) != (rank_delta == 0))
+                        && self.debug_path_clear_slow(from, target)
+                }
+                PieceType::Queen => {
+                    ((abs_file == abs_rank && abs_file != 0)
+                        || ((file_delta == 0) != (rank_delta == 0)))
+                        && self.debug_path_clear_slow(from, target)
+                }
+                PieceType::King => {
+                    abs_file <= 1 && abs_rank <= 1 && (abs_file != 0 || abs_rank != 0)
+                }
+            };
+            if attacks {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(any(test, feature = "internal-testing"))]
+    fn debug_path_clear_slow(&self, from: Square, to: Square) -> bool {
+        let file_step = (to.file() as i8 - from.file() as i8).signum();
+        let rank_step = (to.rank() as i8 - from.rank() as i8).signum();
+        let mut square = from;
+        while let Some(next) = square.offset(file_step, rank_step) {
+            if next == to {
+                return true;
+            }
+            if self.piece_at(next).is_some() {
+                return false;
+            }
+            square = next;
+        }
+        false
     }
 
     /// Generates captures and quiet promotions. If the side to move is in check, all legal
@@ -603,6 +936,72 @@ impl Position {
 
     pub fn make_move(&mut self, mv: Move) -> Result<UndoState, MoveError> {
         self.make_move_with_history(mv, HistoryMode::Persistent)
+    }
+
+    /// Applies a move that has already passed `generate_legal_moves`.
+    ///
+    /// Search owns the precondition here. Skipping the second king-safety test
+    /// avoids repeating attack generation at every searched edge while retaining
+    /// the authoritative move-state and repetition-history updates.
+    pub(crate) fn make_generated_move(&mut self, mv: Move) -> Result<UndoState, MoveError> {
+        let undo = self.make_move_unchecked(mv)?;
+        if self.repetition_history.push(self.zobrist_key).is_err() {
+            self.unmake_move_internal(mv, undo, HistoryMode::Transient);
+            return Err(MoveError::HistoryOverflow);
+        }
+        debug_assert_eq!(self.zobrist_key, self.recompute_zobrist());
+        debug_assert_eq!(self.repetition_history.current(), Some(self.zobrist_key));
+        Ok(undo)
+    }
+
+    /// Returns whether an already generated move checks the opposing king.
+    /// This computes the post-move attack map without mutating the position.
+    pub(crate) fn gives_check(&self, mv: Move) -> bool {
+        let moving_color = self.side_to_move;
+        let Some(moving_piece) = self.piece_at(mv.from()) else {
+            return false;
+        };
+        let placed_type = mv.promotion().unwrap_or(moving_piece.piece_type());
+        let enemy_king = self.king_squares[moving_color.opposite().index()];
+
+        let mut occupied = self.occupancies[OCCUPANCY_ALL];
+        occupied &= !mv.from().bit();
+        occupied &= !mv.to().bit();
+        if mv.is_en_passant() {
+            let captured_square = match moving_color {
+                Color::White => mv.to().offset(0, -1),
+                Color::Black => mv.to().offset(0, 1),
+            };
+            if let Some(square) = captured_square {
+                occupied &= !square.bit();
+            }
+        }
+        occupied |= mv.to().bit();
+
+        let mut pieces = [0u64; 6];
+        for piece_type in PieceType::ALL {
+            pieces[piece_type.index()] = self.pieces(moving_color, piece_type);
+        }
+        pieces[moving_piece.piece_type().index()] &= !mv.from().bit();
+        pieces[placed_type.index()] |= mv.to().bit();
+
+        if mv.is_castle() {
+            let (rook_from, rook_to) = castle_rook_squares(mv.to());
+            occupied &= !rook_from.bit();
+            occupied |= rook_to.bit();
+            pieces[PieceType::Rook.index()] &= !rook_from.bit();
+            pieces[PieceType::Rook.index()] |= rook_to.bit();
+        }
+
+        attacks::pawn_attackers_to(enemy_king, moving_color) & pieces[PieceType::Pawn.index()] != 0
+            || attacks::knight_attacks(enemy_king) & pieces[PieceType::Knight.index()] != 0
+            || attacks::bishop_attacks(enemy_king, occupied)
+                & (pieces[PieceType::Bishop.index()] | pieces[PieceType::Queen.index()])
+                != 0
+            || attacks::rook_attacks(enemy_king, occupied)
+                & (pieces[PieceType::Rook.index()] | pieces[PieceType::Queen.index()])
+                != 0
+            || attacks::king_attacks(enemy_king) & pieces[PieceType::King.index()] != 0
     }
 
     pub(crate) fn make_null_move(&mut self) -> Result<NullMoveState, MoveError> {
@@ -1595,15 +1994,6 @@ fn pop_lsb(bitboard: &mut u64) -> Option<Square> {
     Some(square)
 }
 
-fn mix_u64(mut value: u64) -> u64 {
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    value ^= value >> 33;
-    value
-}
-
 fn clear_castling_right_for_square(rights: &mut CastlingRights, square: Square) {
     match square {
         Square::A1 => rights.remove(CastlingRights::WHITE_QUEENSIDE),
@@ -1692,6 +2082,36 @@ mod tests {
                 .push(position.zobrist_key)
                 .expect("test setup must be able to fill history to capacity");
         }
+    }
+
+    #[test]
+    fn search_key_is_position_based_but_keeps_rule_fifty_state() {
+        let fresh = Position::from_fen(STARTPOS_FEN).expect("FEN must parse");
+        let aged = Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 42 1")
+            .expect("FEN must parse");
+
+        assert_eq!(fresh.zobrist_key(), aged.zobrist_key());
+        assert_ne!(fresh.search_key(), aged.search_key());
+        assert_eq!(fresh.search_key(), fresh.search_key());
+    }
+
+    #[test]
+    fn search_key_shares_transpositions_across_repetition_histories() {
+        let mut cycled = Position::startpos();
+        for mv in ["g1f3", "g8f6", "f3g1", "f6g8"] {
+            cycled.apply_uci_move(mv).expect("cycle move must be legal");
+        }
+        let direct = Position::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 4 3")
+            .expect("FEN must parse");
+
+        assert_eq!(cycled.zobrist_key(), direct.zobrist_key());
+        assert_eq!(cycled.halfmove_clock(), direct.halfmove_clock());
+        assert_ne!(
+            cycled.repetition_history.as_slice(),
+            direct.repetition_history.as_slice()
+        );
+        assert_eq!(cycled.search_key(), direct.search_key());
+        assert!(!cycled.is_draw_by_repetition());
     }
 
     fn assert_fast_matches_slow(position: &mut Position, label: &str) {
@@ -1936,6 +2356,59 @@ mod tests {
                 .validate()
                 .expect("post-unmake state must validate");
             assert_eq!(snapshot(&position), before);
+        }
+    }
+
+    #[test]
+    fn direct_gives_check_matches_post_move_attack_state() {
+        for fen in [
+            crate::core::STARTPOS_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "4k3/P7/8/8/8/8/7p/4K3 w - - 0 1",
+        ] {
+            let mut position = Position::from_fen(fen).expect("FEN must parse");
+            let before = snapshot(&position);
+            let mut moves = MoveList::new();
+            position.generate_legal_moves(&mut moves);
+
+            for mv in moves.as_slice().iter().copied() {
+                let direct = position.gives_check(mv);
+                let undo = position
+                    .make_move(mv)
+                    .expect("generated move must be legal");
+                let post_move = position.is_in_check(position.side_to_move());
+                position.unmake_move(mv, undo);
+                assert_eq!(direct, post_move, "{fen}: {mv}");
+                assert_eq!(snapshot(&position), before, "{fen}: {mv}");
+            }
+        }
+    }
+
+    #[test]
+    fn generated_move_path_matches_checked_move_path() {
+        for fen in [
+            crate::core::STARTPOS_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+        ] {
+            let mut root = Position::from_fen(fen).expect("FEN must parse");
+            let mut moves = MoveList::new();
+            root.generate_legal_moves(&mut moves);
+
+            for mv in moves.as_slice().iter().copied() {
+                let mut checked = root.clone();
+                let mut generated = root.clone();
+                let checked_undo = checked.make_move(mv).expect("move must be legal");
+                let generated_undo = generated
+                    .make_generated_move(mv)
+                    .expect("generated move must apply");
+                assert_eq!(snapshot(&generated), snapshot(&checked), "{fen}: {mv}");
+
+                checked.unmake_move(mv, checked_undo);
+                generated.unmake_move(mv, generated_undo);
+                assert_eq!(snapshot(&generated), snapshot(&checked), "{fen}: {mv}");
+            }
         }
     }
 

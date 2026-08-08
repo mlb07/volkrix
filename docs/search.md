@@ -1,472 +1,251 @@
 # Search
 
-Phases 4 through 13 establish Volkrix's deterministic single-thread baseline, its TT-backed search layers, practical UCI runtime behavior, the first conservative SMP layer, the first optional tablebase / probe integration, the first optional NNUE evaluator path, and now the first offline NNUE training / packing layer on top of that retained engine.
-
-Phase 13 does not widen the engine runtime surface. The retained runtime shape documented below remains authoritative. The offline export / training / packing workflow is documented separately in `docs/nnue-training.md`.
-
-## Current Shape
-
-- iterative deepening at the root
-- alpha-beta negamax core
-- quiescence search for tactical stabilization
-- principal variation tracking through the existing root/PV bookkeeping
-- tapered classical evaluation as the retained fallback evaluator
-- an optional NNUE evaluator boundary controlled by `EvalFile`
-- transposition table integration with deterministic TT-on and TT-off paths at `Threads=1`
-- stronger move ordering through root PV hints, SEE-informed capture buckets, killer moves, and quiet history
-- aspiration windows around iterative deepening
-- basic quiet-only late move reductions at eligible later quiet moves only
-- conservative non-PV selective pruning through null move, a tightened shallow reverse futility guard, shallow futility, and shallow late-move pruning
-- a conservative Lazy SMP Layer I when `Threads > 1`
-- an optional tablebase boundary controlled by `SyzygyPath`
-- cooperative stop, movetime, clocked search, and infinite-search control in the UCI runtime
-- terminal handling for checkmate, stalemate, repetition, fifty-move draw, and insufficient-material draw
-
-## Current Search Candidate Status
-
-The current committed search bundle reintroduced a staged move picker and selective-search work on top of the older stronger classical baseline.
-
-Current tuning rule:
-
-- for new search work, compare candidate builds directly against current `HEAD`
-- if an initial result is close, do not promote it from the small screen alone; require a larger bucket before keeping it
-- older baseline comparisons below are historical context, not promotion targets
-
-Current search-specific changes in the committed tree include:
-
-- staged move picking in `src/search/movepicker.rs`
-- principal variation search with scout-window re-search at root and in the main alpha-beta path
-- previous-iteration PV reuse below the root when the current search prefix still matches
-- previous-iteration PV hints below the root are now only reused on PV nodes
-- continuation-history scoring for quiet replies
-- null-move pruning backed by reversible null moves in `Position`
-- a slightly more aggressive null-move reduction step from depth `6` upward
-- null-move pruning now requires a small static-eval cushion over `beta` before it is eligible
-- reverse futility pruning for shallow non-PV nodes
-- shallow futility pruning is no longer enabled in the current phase-9 default
-- shallow late-move pruning for very late quiet non-check moves
-- shallow late-move pruning now stops at depth `2` instead of depth `3`
-- qsearch and root search refactors to consume the staged picker
-- an external-engine comparison tool in `tools/volkrix-nnue` for same-machine A/B match testing
-
-What is currently proved against the immediate pre-search-change baseline `e9a5a06`:
-
-- proxy bench improved from `623756` nodes / checksum `5873b4276c1d4c51` to `655322` nodes / checksum `5873b44162c8b651`
-- wall-clock bench time on the same machine dropped from `803 ms` to `482 ms`
-- `cargo test --quiet --lib search::root` passed
-- `cargo test --quiet --test search` passed
-- `cargo test --quiet --test uci` passed
-
-What is not yet proved:
-
-- no Elo gain is established yet
-- quick same-machine matches versus `e9a5a06` were fully neutral in the first samples
-- a later local PVS/PV-reuse refresh versus the immediate pre-change binary was small and mixed:
-- `24` games over `12` expanded openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
-- `48` games over `24` expanded openings at `--movetime-ms 10 --max-plies 60`: `0W 48D 0L`, score `50.0%`
-- `16` games over `8` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 15D 0L`, score `53.1%`, approximate Elo `+21.7`
-- a later local selective-pruning refresh versus the immediate pre-pruning binary was also small and mixed:
-- `24` games over `12` expanded openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
-- `16` games over `8` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 14D 1L`, score `50.0%`
-- a later tuned selective-pruning refresh with a more conservative reverse-futility guard was positive in the next local samples:
-- `96` games over `48` expanded openings at `--movetime-ms 10 --max-plies 60`: `3W 93D 0L`, score `51.6%`, approximate Elo `+10.9`
-- `48` games over `24` expanded openings at `--movetime-ms 50 --max-plies 60`: `1W 47D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `4` games over `2` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 4D 0L`
-- `16` games over `8` expanded openings at `--movetime-ms 10 --max-plies 40`: `0W 16D 0L`
-- `8` games over `4` expanded openings at `--movetime-ms 50 --max-plies 60`: `0W 8D 0L`
-
-Current interpretation:
-
-- the search bundle clearly changes node counts, checksums, and wall time
-- the search bundle is not currently justified as an Elo improvement
-- the newer PVS/PV-reuse refresh looks promising in very small samples but remains far too small to treat as a proved strength gain
-- the newer selective-pruning refresh looked mixed at first, but the tightened reverse-futility variant was positive in both follow-up samples and is the first `#2` form worth keeping for broader validation
-- until a longer match produces a real score edge, treat this as a performance-positive but strength-unproven candidate
-
-Future-agent guidance:
-
-- do not claim Elo gain from this search bundle based on bench movement alone
-- if search tuning resumes, compare directly against `e9a5a06` or another explicitly recorded strong baseline binary
-- prefer the external-engine match workflow over checksum-only reasoning
-- `cargo run -p volkrix-nnue -- expand-fens --input tests/data/nnue/phase13-fixture.fens --output /tmp/volkrix-openings.fens --max-plies 4 --branching 3 --max-positions 96`
-- `cargo run -p volkrix-nnue -- compare-engines --openings /tmp/volkrix-openings.fens --baseline <baseline-bin> --candidate <candidate-bin> --movetime-ms <n> --max-plies <n> --max-openings <n>`
-- when the handoff notes and the code disagree, trust the code and re-document from the tree instead of inheriting the old note
-
-## Recent Rejected Search Experiments
-
-These local search experiments were tested directly against the committed `ef06683` baseline and were not kept:
-
-- conservative check extension:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 15D 1L`, approximate Elo `-21.7`
-- quiet-history maluses for failed quiets:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`
-- root fail-high beta-cut inside root aspiration windows:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 15D 0L`, approximate Elo `+21.7`
-- larger follow-up `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 89D 5L`, approximate Elo `-10.9`
-- more aggressive depth-scaled late-move reduction:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
-
-Current interpretation for these rejected passes:
-
-- none of the four changes above showed a durable strength gain against the immediate committed baseline
-- node savings alone were not a sufficient promotion signal
-- the root fail-high experiment looked promising in a tiny slower bucket and then failed the larger fast follow-up
-- treat all four as explored-and-rejected unless a materially different variant is tested
-
-## Current Local Search Keep Candidate
-
-The current in-tree search candidate removes the fixed quiet-shape ordering bias:
-
-- `quiet_shape_bonus` now returns `0`
-- intent: let learned quiet-history and continuation-history signals drive quiet ordering without an added hand-written shape bias
-- targeted validation stayed clean:
-- `cargo test --quiet --lib search::root`
-- `cargo test --quiet --test search`
-- `cargo test --quiet --test uci`
-- `cargo run --quiet --release -- bench`
-- same-machine engine evidence against the latest pre-change `HEAD` snapshot is positive:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
-- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `40W 314D 30L`, score `51.3%`, approximate Elo `+9.0`
-- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `13W 168D 11L`, score `50.5%`, approximate Elo `+3.6`
-
-Current interpretation for this keep candidate:
-
-- this is still local same-machine evidence, not a large statistically hardened Elo claim
-- unlike the recent rejected `HEAD`-only experiments, it stayed positive in the larger fast follow-up and then stayed positive again in the larger slower confirmation bucket
-- if search work pauses here, this is the current search-side change worth keeping from this round
-
-Previous retained change from the same `HEAD`-only round:
-
-- `ASPIRATION_DELTA` is now `36` instead of `32`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `5W 90D 1L`, score `52.1%`, approximate Elo `+14.5`
-- `384` games over `192` openings at `--movetime-ms 10 --max-plies 60`: `30W 328D 26L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 50 --max-plies 80`: `15W 164D 13L`, score `50.5%`, approximate Elo `+3.6`
-
-- qsearch now skips non-promotion captures only when `SEE < 0` instead of `SEE <= 0`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `3W 92D 1L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 178D 5L`, score `51.0%`, approximate Elo `+7.2`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
-
-- `alpha_beta_core` now only applies `previous_pv_move(ply)` when `node_state.is_pv`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 181D 4L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
-
-- `SearchHeuristics::phase9_default()` now sets `futility_pruning: false`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `6W 182D 4L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 83D 5L`, score `51.6%`, approximate Elo `+10.9`
-
-- late-move pruning now only fires through depth `2` instead of depth `3`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 85D 2L`, score `53.6%`, approximate Elo `+25.4`
-- late move reductions now start at depth `5` instead of depth `4`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 179D 4L`, score `51.3%`, approximate Elo `+9.0`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `5W 87D 4L`, score `50.5%`, approximate Elo `+3.6`
-- null-move pruning now requires `static_eval >= beta + 32` before it is eligible
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 89D 3L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `9W 175D 8L`, score `50.3%`, approximate Elo `+1.8`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `10W 82D 4L`, score `53.1%`, approximate Elo `+21.7`
-- qsearch now skips non-promotion captures with `SEE <= 0` when the side to move is not in check
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 93D 1L`, score `50.5%`, approximate Elo `+3.6`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 174D 8L`, score `50.5%`, approximate Elo `+3.6`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
-- qsearch now skips clearly losing non-promotion captures by SEE when the side to move is not in check
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `2W 94D 0L`, score `51.0%`, approximate Elo `+7.2`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `5W 185D 2L`, score `50.8%`, approximate Elo `+5.4`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `8W 87D 1L`, score `53.6%`, approximate Elo `+25.4`
-- `search_root_with_aspiration_core` now preserves the non-failing side of the window and widens only the side that failed instead of rebuilding a symmetric window around the original guess on every retry
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `10W 181D 1L`, score `52.3%`, approximate Elo `+16.3`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `9W 82D 5L`, score `52.1%`, approximate Elo `+14.5`
-- `null_move_reduction(depth)` changed from `if depth >= 7 { 3 } else { 2 }` to `if depth >= 6 { 3 } else { 2 }`
-- evidence at promotion time:
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `4W 91D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `192` games over `96` openings at `--movetime-ms 10 --max-plies 60`: `7W 184D 1L`, score `51.6%`, approximate Elo `+10.9`
-- `96` games over `48` openings at `--movetime-ms 50 --max-plies 80`: `6W 86D 4L`, score `51.0%`, approximate Elo `+7.2`
-
-Additional rejected search experiments from the same round:
-
-- exact countermove ordering for quiet replies:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
-- countermove ordering plus qsearch TT exact reuse / depth-0 stores:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`
-- root TT stores without changing the root beta-cut behavior:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`
-- `96` games over `48` openings at `--movetime-ms 10 --max-plies 60`: `6W 84D 6L`, score `50.0%`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `1W 14D 1L`, score `50.0%`
-- root TT stores plus root fail-high beta-cuts:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 24D 0L`
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 80`: `2W 14D 0L`, score `56.2%`
-- `48` games over `24` openings at `--movetime-ms 50 --max-plies 80`: `3W 41D 4L`, score `49.0%`
-- PV-only internal iterative deepening on missing move hints:
-- `24` games over `12` openings at `--movetime-ms 10 --max-plies 60`: `0W 23D 1L`, score `47.9%`, approximate Elo `-14.5`
-
-## Current Classical Eval Status
-
-The retained fallback evaluator is still the strongest practical Volkrix evaluator today when `EvalFile=""`.
-
-Recent classical-eval additions on top of the existing tapered material / piece-square / mobility / king-safety / pawn-structure base include:
-
-- pawn-island penalties
-- pawn-phalanx bonuses
-- backward-pawn penalties
-- protected passed-pawn bonuses
-- rook-on-seventh bonuses
-- supported knight-outpost bonuses
-
-What is currently proved:
-
-- the targeted eval test suite covers these terms directly in `tests/eval.rs`
-- the eval path remains deterministic and does not mutate position state in the covered tests
-- the classical evaluator now exposes a parameterized `ClassicalEvalWeights` surface while preserving default behavior, so offline tuning can vary weights without changing engine code shape
-- the offline toolchain now includes a first-pass `texel-tune` command that reads retained examples files and fits classical weights offline
-- a first tuned candidate on `96` depth-2 search-labeled expanded positions improved offline loss:
-- train log-loss `0.694556 -> 0.693712`
-- validation log-loss `0.691864 -> 0.690567`
-- a stronger follow-up corpus on `256` expanded positions with quiet-filtered depth-2 search labels produced `84` examples, but the tuned candidate was not better:
-- train log-loss `0.692744 -> 0.692738`
-- validation log-loss `0.692891 -> 0.692899`
-- a depth-3 pass on a smaller curated expanded corpus improved offline loss but the direct tuned weights were too aggressive to promote unchanged
-- a broader depth-2 pass on a `64`-position expanded curated corpus improved offline loss:
-- `any` corpus: train log-loss `0.694906 -> 0.693533`, validation log-loss `0.690616 -> 0.688720`
-- `quiet` corpus: train log-loss `0.692755 -> 0.692683`
-- the low-risk `quiet`-subset candidate was promoted into the current default classical weights with these effective deltas from the old defaults:
-- knight mobility `4 -> 7`
-- bishop mobility `5 -> 8`
-- queen mobility `1 -> 3`
-- phalanx pawn bonus `8 -> 12`
-- pawn-threat-vs-minor `12 -> 13`
-- that candidate produced the first positive same-machine match score against the frozen pre-tuning baseline binary:
-- `64` games over `32` expanded curated openings at `--movetime-ms 10 --max-plies 60`: `4W 58D 2L`, score `51.6%`, approximate Elo `+10.9`
-- a later conservative backward-pawn penalty was added to the default evaluator with targeted eval coverage:
-- `cargo test --quiet --test eval`
-- `cargo test --quiet --test search`
-- `cargo test --quiet --test uci`
-- `cargo test --quiet -p volkrix-nnue parameter_specs_are_unique`
-- same-machine engine evidence against the frozen pre-backward-pawn binary is mildly positive but still small:
-- `24` games over `12` self-play openings at `--movetime-ms 10 --max-plies 60`: `1W 23D 0L`, score `52.1%`, approximate Elo `+14.5`
-- `16` games over `8` self-play openings at `--movetime-ms 50 --max-plies 80`: `0W 16D 0L`, score `50.0%`
-
-What is not yet proved:
-
-- the current positive match result is still a small same-machine sample, not a statistically solid Elo claim
-- the backward-pawn term also remains strength-unproven beyond small local samples
-- the current tuner is a score-target logistic tuning pass over retained examples data, not yet a large-scale game-result Texel workflow with proven Elo gains
-- the first tuned candidate was neutral in a same-machine engine match and was not kept as the default evaluator:
-- `16` games over `8` openings at `--movetime-ms 50 --max-plies 60`: `0W 16D 0L`
-- several more aggressive depth-3-derived candidates stayed neutral or regressed on broader follow-up matches, so the current default keeps only the low-risk quiet-subset deltas above
-
-Future-agent guidance:
-
-- record any new classical-eval terms and their evidence here or in a more specific eval handoff note
-- do not claim Elo gain from classical-eval edits unless match evidence supports it
-- if search work is in flight elsewhere, keep eval changes isolated from search-logic edits
-- for Texel tuning, start from the new parameterized classical weights in `src/search/eval.rs` instead of editing constants in-place
-- current first-pass workflow:
-- `cargo run -p volkrix-nnue -- export-examples --input <fens.txt> --output /tmp/volkrix.examples [--label-mode search|static]`
-- `cargo run -p volkrix-nnue -- texel-tune --examples /tmp/volkrix.examples --output /tmp/volkrix-weights.json [--iterations N] [--step N] [--sigmoid-scale F] [--regularization F] [--max-examples N]`
-- after tuning, treat the emitted weights JSON as a candidate artifact first; do not replace default eval weights without a match result
-- the most useful workflow so far was:
-- `cargo run -p volkrix-nnue -- expand-fens --input <seed-fens> --output /tmp/volkrix-expanded.fens --max-plies 4 --branching 3 --max-positions 64`
-- `cargo run -p volkrix-nnue -- export-examples --input /tmp/volkrix-expanded.fens --output /tmp/volkrix-expanded-d2-quiet.examples --label-depth 2 --label-mode search --workers 4 --tt off --position-filter quiet`
-- `cargo run -p volkrix-nnue -- texel-tune --examples /tmp/volkrix-expanded-d2-quiet.examples --output /tmp/volkrix-expanded-d2-quiet.weights.json --iterations 12 --step 8 --regularization 0.000001`
-- promote only the low-risk overlapping deltas that survive eval tests and then validate with `compare-engines`
-- for baseline-vs-candidate classical testing, prefer `cargo run -p volkrix-nnue -- compare-engines --openings <fens.txt> --baseline <baseline-bin> --candidate <candidate-bin> [--movetime-ms N | --depth N]`
-
-## Current NNUE Runtime Model
-
-The retained NNUE runtime design is still deliberately narrow:
-
-- `EvalFile` is the only new public control surface
-- NNUE is optional and disabled by default
-- the runtime owns an optional internal NNUE service behind `search::nnue`
-- the retained network format is a clean-room Volkrix-owned `VOLKNNUE` binary format only
-- the runtime supports only retained clean-room HalfKP topologies
-- retained production topology is `HalfKP 256x2`
-- retained compatibility support includes the synthetic in-repo `HalfKP 128x2` test net
-- one active network only
-- one retained feature scheme only
-- one retained accumulator/update architecture only
-- no external `.nnue` compatibility in this phase
-- helpers remain silent and non-authoritative for user-visible publication
-- TT remains the only shared mutable search structure
-- network weights are shared read-only across workers
-
-When `EvalFile` is empty:
-
-- `Threads=1` preserves the authoritative retained Phase 11 fixed-depth deterministic baseline exactly
-- `Threads>1` preserves the retained Phase 11 SMP behavior
-- the classical evaluator remains the active path
-- runtime/deferred-command semantics remain unchanged
-
-## Retained HalfKP-Like Feature Scheme
-
-The retained feature space is:
-
-- `64` normalized king squares
-- `10` non-king piece buckets
-- `64` normalized piece squares
-- total feature count: `64 * 10 * 64 = 40,960`
-
-The `10` retained non-king buckets are explicitly:
-
-1. own pawn
-2. own knight
-3. own bishop
-4. own rook
-5. own queen
-6. enemy pawn
-7. enemy knight
-8. enemy bishop
-9. enemy rook
-10. enemy queen
-
-Squares are normalized per perspective so each accumulator sees its own side from the same board orientation. Kings are not encoded as input pieces; instead, the king square selects the active `HalfKP` slice for that perspective.
-
-## Retained Topology and Score Orientation
-
-The retained production topology is:
-
-- one shared input-to-hidden matrix: `40960 x 256`
-- one hidden bias vector: `256`
-- one output head over concatenated perspective activations: `512 -> 1`
-
-The runtime remains compatibility-capable for the synthetic in-repo `HalfKP 128x2` test asset, but new retained production checkpoints and packed nets target `HalfKP 256x2`.
-
-The retained numeric path is:
-
-- input weights: `i16`
-- hidden biases: `i16`
-- accumulator lanes: `i32`
-- output weights: `i16`
-- output bias: `i32`
-- activation: clipped ReLU to `[0, 255]`
-- final score: output sum divided by the stored output scale
-
-Final NNUE score orientation in engine terms:
-
-- positive scores favor the side to move
-- negative scores favor the opponent
-
-That matches Volkrix's retained classical static-eval convention, so search integration does not need a separate score-orientation bridge.
-
-## Evaluator Boundary and Authority Rules
-
-Phase 12 introduces a clean evaluator boundary:
-
-- retained classical evaluation when `EvalFile` is empty
-- NNUE evaluation when a network is loaded successfully
-
-The retained authority rules remain unchanged:
-
-- direct mate/stalemate/repetition/fifty-move/insufficient-material handling stays authoritative before evaluator choice matters
-- when `SyzygyPath` is enabled and a position is tablebase-resolved within the retained Phase 11 scope, tablebase handling remains authoritative and NNUE must not override that result
-- helpers do not emit user-visible info lines
-- helpers do not own or publish final `bestmove` or user-visible PV state
-
-## Thread-Local Accumulator / Update Architecture
-
-Accumulator state is deliberately kept out of `Position`.
-
-The retained model is:
-
-- search-local accumulator state stored in `SearchContext`
-- one accumulator for White-king perspective
-- one accumulator for Black-king perspective
-- exact root build from the current position at search start
-- stack-based restoration on unmake
-
-Retained incremental update rules:
-
-- ordinary non-king moves patch both perspectives incrementally by removing the old feature and adding the new feature
-- captures, promotions, and en passant apply exact piece add/remove deltas
-- if a king moves, that side's perspective accumulator is rebuilt from the child position instead of patching king-indexed features incrementally
-- castling uses the king-move rebuild for the moving side's perspective and a simple rook delta for the opposite perspective
-- unmake restoration uses accumulator stack pop, not reverse-delta reconstruction
-
-## Tiny Test Net and Real-Net Policy
-
-Phase 12 includes one deterministic in-repo integration net:
-
-- `tests/data/nnue/volkrix-halfkp128x2-test.volknnue`
-
-This file is:
-
-- clean-room and Volkrix-owned
-- minimal and synthetic
-- a compatibility asset, not the retained production topology target
-- intended for parser, accumulator, and inference validation only
-- explicitly not treated as a production playing net
-
-Optional ignored real-net smoke tests may be run with `VOLKRIX_EVALFILE`, but that is validation convenience only and is not required for Phase 12 completion.
-
-## Determinism and Validation Rules
-
-- `EvalFile` empty / `Threads=1` fixed-depth benchmark and profile paths remain the authoritative reproducible baseline
-- NNUE-enabled runs are correctness, integration, and benefit checks, not checksum-equality requirements
-- `Threads>1` NNUE-enabled runs are not required to preserve deterministic move order or checksum
-- `Threads>1` NNUE-enabled runs must still remain correct
-
-## Phase 12 Evidence
-
-No-network fixed-depth baseline preservation:
-
-| Profile | Nodes | Checksum |
-| --- | ---: | --- |
-| Retained Phase 11 baseline / `EvalFile` empty / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
-| Phase 12 default / `EvalFile` empty / `SyzygyPath` empty / `Threads=1` | 505147 | `244a71a65613ec7f` |
-
-Targeted tiny-test-net validation:
-
-| Scenario | Purpose |
-| --- | --- |
-| `tests/eval.rs::tiny_nnue_eval_returns_finite_scores_on_curated_positions` | finite-score inference sanity |
-| `src/search/nnue.rs` incremental-update tests | full rebuild vs incremental exactness |
-| `tests/uci.rs::nnue_enabled_go_depth_returns_a_legal_move` | public `EvalFile` activation and legal move production |
-| `src/search/service.rs` NNUE threaded tests | `Threads=1` and `Threads=2` correctness with shared read-only weights |
-
-Manual benchmark/report hooks are available through:
-
-- `cargo test --test tt phase_twelve_nnue_profile_report -- --ignored --nocapture`
-
-That report prints:
-
-- retained Phase 11 baseline / `EvalFile` empty / `SyzygyPath` empty / `Threads=1`
-- Phase 12 default / `EvalFile` empty / `SyzygyPath` empty / `Threads=1`
-- targeted tiny-test-net checks at `Threads=1`
-- targeted tiny-test-net checks at `Threads=2`
-
-## Deferred Beyond Phase 12
-
-Still deferred beyond this first NNUE engine-integration layer:
-
-- external `.nnue` compatibility
-- training pipeline work
-- self-play data generation
-- tuner infrastructure
-- network architecture search
-- broader feature-family experimentation
-- extra public NNUE knobs
-- broad classical-eval deletion
-- broader eval/search co-design work
-
-The Phase 12 goal is a still-trusted retained Phase 11 engine when `EvalFile` is empty, plus a clean, optional, testable NNUE inference path that can later support training-pipeline and tuning work without destabilizing the current search/runtime substrate.
+Volkrix uses iterative-deepening principal-variation search with a classical or
+NNUE static evaluator. The search is designed around three constraints: chess
+rules are resolved before cache reuse, all speculative state changes are exactly
+reversible, and strength changes require game evidence rather than benchmark
+movement alone.
+
+## Iterative deepening and root search
+
+Depths are searched in order so each completed iteration supplies the next one
+with a score, root ordering, and PV. From depth two onward the root begins with an
+aspiration window around the previous score and expands only the bound that
+failed. The root and internal nodes use PVS: the first candidate receives a full
+window; later candidates receive a scout window and are re-searched when they can
+raise alpha.
+
+The main thread publishes only fully completed iterative results. Cooperative
+soft deadlines stop after a completed iteration; hard deadlines and `stop`
+interrupt node expansion. Mate scores are ply-normalized when stored in the TT and
+mate-distance bounds tighten the alpha-beta window as the search descends.
+
+## Move ordering
+
+The staged picker prioritizes:
+
+1. a legal TT/PV move
+2. tactical moves ordered by SEE-informed capture buckets
+3. killer moves
+4. quiets ordered by history and continuation history
+
+Successful cutoffs reward the responsible move. Failed quiet candidates receive
+history maluses, and capture-history updates are implemented for controlled
+tuning even though capture-history scoring is not enabled by default. Previous
+iteration PV hints are reused only while the current PV prefix still matches and
+only at PV nodes.
+
+## Selectivity
+
+The default search combines:
+
+- precomputed logarithmic late-move reductions, with a full-depth re-search after
+  a reduced move improves alpha; contextual adjustments are implemented for
+  controlled tuning but disabled by default after profiling regressed
+- guarded null-move pruning in positions with non-pawn material
+- reverse futility, shallow futility, and late-move pruning
+- SEE and quiet-history pruning for sufficiently late moves
+- ProbCut on promising tactical candidates
+- internal iterative reduction when a deeper node has no TT move
+
+Two additional mechanisms remain experimental and default-off:
+
+- correction history reconstructs pawn and per-color non-pawn structure keys
+  only when explicitly enabled. It never changes the raw static evaluation stored
+  in the TT. A 300-game paired test scored 70 wins, 137 draws, and 93 losses
+  (46.17%, about -26.7 Elo), so the default path allocates no correction tables
+  and pays no incremental position-key maintenance.
+- singular extension performs a reduced null-window search at a non-root node
+  while excluding one legal TT move. It requires depth 8, an exact/lower TT
+  result within three plies of the requested depth, and an ordinary non-mate,
+  non-tablebase score. Exclusion nodes cannot reuse or publish a TT result for
+  the incomplete move set, probe tablebases, recursively exclude another move,
+  or apply forward pruning. Only a verified fail-low extends the TT move by one
+  ply. Multi-cut behavior is deliberately not implemented.
+
+The initial four-position depth-9 release profile for singular extension reduced
+nodes from 3,447,998 to 1,194,220 and runtime from 4.58 s to 1.94 s, with 99
+verification searches and 10 extensions. Two evaluations changed while all four
+best moves remained stable. Its subsequent 200-game paired match scored 60 wins,
+76 draws, and 64 losses (49.0%, about -7 Elo). The result did not justify
+promotion, so singular extension remains disabled.
+
+Every pruning family has explicit depth, PV, check, mate-score, and move-type
+guards. The rules are covered by focused tests and can be toggled internally for
+A/B profiling. They are heuristics, not proofs; the validation process in
+[`search-handoff.md`](search-handoff.md) is the authority for retaining a tuning
+change.
+
+## Quiescence
+
+At the nominal depth limit, quiescence continues tactical play to reduce horizon
+effects. A non-check node starts from stand pat and searches legal tactical moves;
+an in-check node searches all evasions and cannot stand pat. Losing captures can
+be rejected by SEE. Quiescence probes and stores depth-zero TT entries, reuses a
+cached static evaluation where safe, honors mate-distance bounds, and checks the
+same rule/tablebase terminal conditions as the main search.
+
+## Draws, tablebases, and TT order
+
+The order of operations is deliberate:
+
+1. stop/deadline checks
+2. repetition, fifty-move, insufficient-material, mate, and stalemate handling
+3. eligible tablebase result
+4. TT probe
+5. search or static evaluation
+
+Repetition is path-dependent, so a repetition result is never stored. The TT key
+contains the board Zobrist key and the rule-50 clock but not the repetition path.
+This preserves correct rule-50 values while allowing transpositions reached by
+different move orders to share search work.
+
+Syzygy probing uses root DTZ and internal WDL results for castling-free positions
+with no more than seven pieces, subject to `SyzygyProbeLimit` and the cardinality
+actually loaded by Fathom. `SyzygyProbeLimit=0` disables probes without unloading
+the configured files. Exact board rules and tablebase values outrank NNUE or
+classical evaluation.
+
+With `Syzygy50MoveRule=true`, root DTZ receives the position's halfmove clock.
+Because Fathom's non-root WDL entry point has no rule-50-clock argument, those
+probes are conservatively limited to a zero halfmove clock. Disabling the option
+allows WDL probes at any clock and promotes cursed/blessed outcomes to
+unconditional wins/losses. Probe errors never become tablebase scores: search
+continues normally and UCI diagnostics report the failure.
+
+## Transposition table
+
+The TT is shared by all threads and contains cache-line-aligned clusters of four
+entries. A logical entry occupies two `AtomicU64` words:
+
+- a compact payload with move, score, static eval, depth, bound, and generation
+- a verification word formed from the position key and payload
+
+A reader accepts an entry only when the two words reconstruct its requested key.
+This checksum-style protocol makes a concurrently mixed read behave like an
+ordinary 64-bit collision instead of accepting a torn payload. Probe, store, and
+clear use atomics rather than a cluster mutex. Replacement favors the matching
+key, then an empty slot, then the lowest depth adjusted for generation age.
+
+The TT is disposable acceleration. Correctness must not depend on an entry being
+present, surviving replacement, or arriving in a particular order.
+
+## Parallel search
+
+`Threads=1` runs the main search only. With more threads, a persistent pool starts
+helper searches over deterministic round-robin root-move shards. All workers have
+private positions, heuristics, PV buffers, and accumulator stacks; only the TT and
+immutable evaluator/tablebase services are shared.
+
+The main thread remains authoritative for `bestmove` and user-visible PV output.
+Helpers warm the TT and their completed nodes, TT hits, and seldepth are folded
+into the final statistics. A helper panic is contained and accounted for so the
+pool can recover instead of leaving an active-worker count stuck.
+
+Root sharding prevents every helper from beginning with the same root list, but
+this remains shared-TT Lazy SMP rather than split-point work stealing. OS
+scheduling can change which TT entries win races, so multithreaded runs are not a
+fixed-node reproducibility mode.
+
+## Evaluation
+
+When `EvalFile` is empty, search uses the tapered classical evaluator. When a
+network is loaded, each thread owns a reusable incremental state:
+
+- `VOLKNNUE`: topology-sized, cache-line-aligned accumulator slabs reserved for
+  the full search horizon; ordinary push/pop performs no allocation or `Vec` clone
+- Stockfish format: pre-created `nnue-rs` accumulator frames and a zero-copy view
+  of the parent board reconstructed from the child position, move, and undo state
+
+Weights are immutable and shared through `Arc`. King moves trigger the refreshes
+required by the selected feature architecture; ordinary moves use incremental
+updates. Both paths are tested against fresh evaluation across normal captures,
+en passant, castling, promotions, and long make/unmake sequences.
+
+An optional production dual state can synchronize `EvalFile` and
+`SmallEvalFile`. `DualEvalPolicy=off` is the default and selects the original
+big-only path without constructing the dual wrapper. The experimental
+`small-fallback` policy evaluates the small network first and uses the big
+network inside `DualEvalThreshold` centipawns. Bench output reports
+`small_selected` and `big_fallbacks` so thresholds can be frozen before paired
+strength testing:
+
+```bash
+target/release/volkrix bench --depth 6 --threads 1 \
+  --evalfile /tmp/nn-c288c895ea92.nnue \
+  --small-evalfile /tmp/nn-37f18f62d772.nnue \
+  --dual-policy small-fallback --dual-threshold 200
+```
+
+Throughput does not imply strength here. A direct 48-game sanity match rejected
+threshold 200 with 2 wins, 5 draws, and 41 losses (9.4%) against big-only. The
+policy therefore remains default-off. Higher fallback thresholds may be tested
+as separate candidates, but none is promoted without new paired match evidence.
+
+The Stockfish adapter accepts the architectures supported by the pinned
+`nnue-rs` fork: SFNNv10 threat networks, HalfKAv2_hm, HalfKAv2, and HalfKP. It
+uses AVX2 on x86-64 and stable NEON/DotProd kernels with scalar tails on AArch64.
+All optimized kernels have scalar parity tests.
+
+Representative Apple M4 release measurements (one thread, August 2026):
+
+| Artifact | Four-position depth-7 nodes | Median time | NPS |
+| --- | ---: | ---: | ---: |
+| Generic release, SFNNv10 big | 187,557 | 451 ms | 415.9k |
+| M4-native PGO, SFNNv10 big | 187,557 | 419 ms | 447.6k |
+
+The structural lazy/direct-delta and SIMD work reduced an isolated 10,000-cycle
+quiet push/evaluate/pop median from 50.125 ms to 16.503 ms. The PGO artifact was
+about 7.1% faster at one thread and 7.0% faster at two threads in the production
+bench; its 100-game generic-build A/B was directionally positive but inconclusive
+(26 wins, 50 draws, 24 losses).
+
+These performance observations are not Elo measurements. A separate final
+paired, color-reversed Fastchess gate on the same Apple M4 used 100 games from
+the official `8moves_v3.pgn` suite at `0.1+0.01`, `Threads=1`, `Hash=64`, and the
+default 10 ms move overhead. The big SFNNv10 network scored 88 wins, 8 losses,
+and 4 draws (90.0%) against the small network, with no time forfeits. This short
+local match is not a universal rating, but it decisively makes the big network
+the maximum-strength recommendation; the small network remains the useful
+throughput/memory alternative.
+
+Against the frozen pre-roadmap Volkrix binary in a separate 100-game paired,
+color-reversed match at `1+0.01`, `Threads=1`, and `Hash=64`, the final M4 PGO
+artifact scored 45 wins, 34 draws, and 21 losses (62.0%, about +85.0 Elo,
+99.96% likelihood of superiority), with no crashes, hangs, illegal moves, or
+time forfeits.
+
+## Time management and reporting
+
+`go movetime` uses one hard deadline after subtracting `Move Overhead`. Clock mode
+reserves the configured overhead plus a small fraction of remaining time, derives
+a soft budget from moves-to-go and increment, and caps a larger hard budget by
+the available clock. Completed-iteration best-move and score stability contract
+the soft target for stable positions or extend unstable searches toward—but
+never beyond—the hard deadline. The previous iteration cost is used to avoid
+starting work unlikely to finish in the remaining adaptive budget. Fixed
+`movetime` searches are deliberately exempt from this contraction. Integer
+arithmetic is saturating and deadlines are checked for overflow.
+
+`go nodes N` uses one exact atomic budget shared by the main thread and every
+helper. It can be combined with a depth or time limit; the first exhausted limit
+stops the search.
+
+Each completed iteration may publish:
+
+```text
+info depth D seldepth S score cp|mate V nodes N nps R time MS tthits H pv ...
+```
+
+With SMP, the last line is rewritten to include completed helper statistics.
+Only the main thread emits protocol output.
+
+## Current limitations
+
+- No MultiPV or `go mate`
+- No split-point/work-stealing SMP
+- No bundled tablebase files
+- No statistically hardened public Elo rating is asserted by this repository
+
+These are release facts, not hidden roadmap phases. Priorities are kept in
+[`roadmap.md`](roadmap.md).

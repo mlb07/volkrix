@@ -204,17 +204,23 @@ fn parse_castling_rights(value: &str) -> Result<CastlingRights, FenError> {
 
     let mut rights = CastlingRights::NONE;
     for symbol in value.chars() {
-        match symbol {
-            'K' => rights.insert(CastlingRights::WHITE_KINGSIDE),
-            'Q' => rights.insert(CastlingRights::WHITE_QUEENSIDE),
-            'k' => rights.insert(CastlingRights::BLACK_KINGSIDE),
-            'q' => rights.insert(CastlingRights::BLACK_QUEENSIDE),
+        let right = match symbol {
+            'K' => CastlingRights::WHITE_KINGSIDE,
+            'Q' => CastlingRights::WHITE_QUEENSIDE,
+            'k' => CastlingRights::BLACK_KINGSIDE,
+            'q' => CastlingRights::BLACK_QUEENSIDE,
             _ => {
                 return Err(FenError::InvalidCastlingRights(format!(
                     "invalid castling symbol '{symbol}'"
                 )));
             }
+        };
+        if rights.contains(right) {
+            return Err(FenError::InvalidCastlingRights(format!(
+                "duplicate castling symbol '{symbol}'"
+            )));
         }
+        rights.insert(right);
     }
     Ok(rights)
 }

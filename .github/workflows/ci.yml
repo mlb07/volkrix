@@ -23,7 +23,29 @@ jobs:
           components: rustfmt, clippy
       - name: cargo fmt
         run: cargo fmt --check
+      - name: validation tooling tests
+        run: |
+          python scripts/test_uci_smoke.py
+          python scripts/test_third_party_audit.py
+      - name: third-party license and provenance audit
+        run: python scripts/audit_third_party.py
       - name: cargo clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test
-        run: cargo test
+      - name: cargo test (workspace, all features)
+        run: cargo test --workspace --all-features --locked
+      - name: verify publishable source package
+        if: runner.os == 'Linux'
+        run: cargo package --locked
+      - name: release profiling surface compiles
+        run: cargo test --release --package volkrix --features internal-testing --test tt --no-run --locked
+      - name: build release UCI smoke binary
+        run: cargo build --locked --release --package volkrix --bin volkrix
+      - name: fetch verified CI network
+        shell: bash
+        run: scripts/fetch-stockfish18-net.sh --small target/release/nn-37f18f62d772.nnue
+      - name: real-network UCI smoke
+        run: >-
+          python scripts/uci_smoke.py
+          --engine target/release/volkrix${{ runner.os == 'Windows' && '.exe' || '' }}
+          --evalfile target/release/nn-37f18f62d772.nnue
+          --transcript target/release/uci-smoke.log

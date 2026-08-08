@@ -26,6 +26,10 @@ impl RepetitionHistory {
         self.len
     }
 
+    #[cfg_attr(
+        not(any(test, debug_assertions, feature = "internal-testing")),
+        allow(dead_code)
+    )]
     pub(crate) fn as_slice(&self) -> &[u64] {
         &self.keys[..self.len]
     }
