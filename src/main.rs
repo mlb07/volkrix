@@ -31,6 +31,10 @@ fn parse_bench_args(
     mut args: impl Iterator<Item = String>,
 ) -> Result<volkrix::search::BenchConfig, String> {
     let mut config = volkrix::search::BenchConfig::default().with_classical_eval();
+    #[cfg(volkrix_embedded_nnue)]
+    {
+        config = config.with_discovered_eval();
+    }
     while let Some(argument) = args.next() {
         match argument.as_str() {
             "--no-tt" => config = config.without_tt(),
@@ -68,6 +72,13 @@ fn parse_bench_args(
                 let value = required_bench_value(&mut args, "--evalfile")?;
                 if value == "classical" {
                     config = config.with_classical_eval();
+                } else if value == "embedded" {
+                    #[cfg(volkrix_embedded_nnue)]
+                    {
+                        config = config.with_discovered_eval();
+                    }
+                    #[cfg(not(volkrix_embedded_nnue))]
+                    return Err("--evalfile embedded requires an embedded-network build".to_owned());
                 } else {
                     let path = std::path::Path::new(&value);
                     if !path.is_absolute() {

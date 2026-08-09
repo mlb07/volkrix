@@ -180,7 +180,10 @@ def run_smoke(
 ) -> list[str]:
     evaluator = "classical"
     eval_value = ""
-    if eval_file != "classical":
+    use_default_evaluator = eval_file == "embedded"
+    if use_default_evaluator:
+        evaluator = "embedded"
+    elif eval_file != "classical":
         evaluator_path = existing_file(eval_file, "EvalFile")
         evaluator = str(evaluator_path)
         eval_value = evaluator
@@ -199,6 +202,11 @@ def run_smoke(
             prefix = f"option name {option} "
             if not any(line.startswith(prefix) for line in handshake):
                 raise SmokeFailure(f"engine did not advertise required option '{option}'")
+        if use_default_evaluator and not any(
+            line.startswith("option name EvalFile type string default <embedded:")
+            for line in handshake
+        ):
+            raise SmokeFailure("engine did not advertise an embedded default EvalFile")
         if small_evaluator is not None:
             for option in ("SmallEvalFile", "DualEvalPolicy", "DualEvalThreshold"):
                 prefix = f"option name {option} "
@@ -207,15 +215,17 @@ def run_smoke(
                         f"engine did not advertise required dual option '{option}'"
                     )
 
-        for name, value in (
+        settings = [
             ("Threads", str(threads)),
             ("Hash", str(hash_mb)),
             ("Move Overhead", str(move_overhead_ms)),
             ("SyzygyPath", tablebase_path),
             ("SyzygyProbeLimit", str(syzygy_probe_limit)),
             ("Syzygy50MoveRule", syzygy_50_move_rule),
-            ("EvalFile", eval_value),
-        ):
+        ]
+        if not use_default_evaluator:
+            settings.append(("EvalFile", eval_value))
+        for name, value in settings:
             session.send(f"setoption name {name} value {value}".rstrip())
         if small_evaluator is not None:
             session.send(f"setoption name SmallEvalFile value {small_evaluator}")
@@ -271,7 +281,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--evalfile",
         required=True,
-        help="'classical' or a network file; the choice is always sent explicitly",
+        help="'classical', 'embedded', or a network file",
     )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--depth", type=int, default=3)
@@ -308,7 +318,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--dual-threshold must be between 0 and 2000")
     if args.dual_policy == "small-fallback" and not args.small_evalfile:
         parser.error("--dual-policy small-fallback requires --small-evalfile")
-    if args.dual_policy == "small-fallback" and args.evalfile == "classical":
+    if args.dual_policy == "small-fallback" and args.evalfile in {"classical", "embedded"}:
         parser.error("dual evaluation requires a network --evalfile")
     return args
 

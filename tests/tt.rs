@@ -141,6 +141,24 @@ fn root_split_smp_ab_profile_report() {
 }
 
 #[test]
+#[ignore = "manual isolated Multi-Cut A/B profile; strength still requires paired SPRT"]
+fn multi_cut_ab_profile_report() {
+    for profile in [
+        HeuristicProfile::Phase9Default,
+        HeuristicProfile::MultiCutEnabled,
+    ] {
+        let result = run_profile_bench(8, profile);
+        println!(
+            "multi_cut_ab profile {profile:?} nodes {} checksum {:016x} time_ms {} nps {}",
+            result.total_nodes,
+            result.checksum,
+            result.elapsed_ms,
+            result.nps(),
+        );
+    }
+}
+
+#[test]
 #[ignore = "manual no-tablebase profile report for Phase 11 disabled-path preservation"]
 fn phase_eleven_no_tablebase_profile_report() {
     let baseline = run_threaded_profile_bench(5, HeuristicProfile::Phase9Default, 1);

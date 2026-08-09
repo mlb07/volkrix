@@ -25,6 +25,11 @@ use crate::{
     },
 };
 
+#[cfg(feature = "spsa-tuning")]
+use crate::search::parameters::{
+    PARAMETER_SPECS, SearchParameters, manifest_lines, parameter_spec,
+};
+
 const DEFAULT_GO_DEPTH: u8 = 1;
 const MAX_GO_DEPTH: u8 = 127;
 const MIN_HASH_MB: usize = 1;
@@ -68,6 +73,10 @@ enum SetOptionCommand {
     SmallEvalFile,
     DualEvalPolicy(DualEvalPolicy),
     DualEvalThreshold(i32),
+    #[cfg(feature = "spsa-tuning")]
+    TuneParameter(&'static str, i32),
+    #[cfg(feature = "spsa-tuning")]
+    TuneManifest,
 }
 
 enum RuntimeInput {
@@ -82,6 +91,8 @@ pub struct UciEngine {
     search_service: UciSearchService,
     move_overhead_ms: u64,
     ponder_enabled: bool,
+    #[cfg(feature = "spsa-tuning")]
+    search_parameters: SearchParameters,
 }
 
 impl UciEngine {
@@ -91,6 +102,8 @@ impl UciEngine {
             search_service: UciSearchService::new(),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             ponder_enabled: false,
+            #[cfg(feature = "spsa-tuning")]
+            search_parameters: SearchParameters::DEFAULT,
         }
     }
 
@@ -108,6 +121,8 @@ impl UciEngine {
             ),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             ponder_enabled: false,
+            #[cfg(feature = "spsa-tuning")]
+            search_parameters: SearchParameters::DEFAULT,
         }
     }
 
@@ -297,6 +312,16 @@ impl UciEngine {
                         ),
                         "option name Clear Hash type button".to_owned(),
                     ];
+                    #[cfg(feature = "spsa-tuning")]
+                    {
+                        lines.extend(PARAMETER_SPECS.iter().map(|spec| {
+                            format!(
+                                "option name {} type spin default {} min {} max {}",
+                                spec.name, spec.default, spec.min, spec.max
+                            )
+                        }));
+                        lines.push("option name TuneManifest type button".to_owned());
+                    }
                     if let Some(diagnostic) = self.search_service.eval_discovery_diagnostic() {
                         lines.push(format!(
                             "info string warning: {}",
@@ -491,6 +516,20 @@ impl UciEngine {
                     Err(error) => vec![format!("info string error: {error}")],
                 }
             }
+            #[cfg(feature = "spsa-tuning")]
+            Ok(SetOptionCommand::TuneParameter(name, value)) => {
+                match self.search_parameters.set(name, value) {
+                    Ok(()) => {
+                        // Bounds and static-evaluation entries from a different
+                        // parameter vector must never leak into the next run.
+                        self.search_service.clear_hash();
+                        Vec::new()
+                    }
+                    Err(error) => vec![format!("info string error: {error}")],
+                }
+            }
+            #[cfg(feature = "spsa-tuning")]
+            Ok(SetOptionCommand::TuneManifest) => manifest_lines(self.search_parameters),
             Err(error) => vec![format!("info string error: {error}")],
         }
     }
@@ -604,14 +643,16 @@ impl UciEngine {
         } else {
             DEFAULT_GO_DEPTH
         });
-        let limits = SearchLimits::new(depth_limit).with_node_limit(options.nodes);
+        let limits = self
+            .search_limits(depth_limit)
+            .with_node_limit(options.nodes);
         if options.infinite {
             if stop_flag.is_none() {
                 return Err("go infinite requires the stdio runtime".to_owned());
             }
 
             return Ok(SearchRequest {
-                limits: SearchLimits::new(MAX_GO_DEPTH),
+                limits: self.search_limits(MAX_GO_DEPTH),
                 soft_deadline: None,
                 hard_deadline: None,
                 stop_flag,
@@ -627,7 +668,9 @@ impl UciEngine {
             let search_time_ms = movetime_ms.saturating_sub(self.move_overhead_ms);
             let deadline = checked_deadline(now, search_time_ms, "go movetime")?;
             return Ok(SearchRequest {
-                limits: SearchLimits::new(MAX_GO_DEPTH).with_node_limit(options.nodes),
+                limits: self
+                    .search_limits(MAX_GO_DEPTH)
+                    .with_node_limit(options.nodes),
                 soft_deadline: Some(deadline),
                 hard_deadline: Some(deadline),
                 stop_flag,
@@ -638,7 +681,9 @@ impl UciEngine {
         if options.wtime_ms.is_some() || options.btime_ms.is_some() {
             let (soft_ms, hard_ms) = self.clock_budget_ms(&options)?;
             return Ok(SearchRequest {
-                limits: SearchLimits::new(MAX_GO_DEPTH).with_node_limit(options.nodes),
+                limits: self
+                    .search_limits(MAX_GO_DEPTH)
+                    .with_node_limit(options.nodes),
                 soft_deadline: Some(checked_deadline(now, soft_ms, "go clock soft limit")?),
                 hard_deadline: Some(checked_deadline(now, hard_ms, "go clock hard limit")?),
                 stop_flag,
@@ -653,6 +698,13 @@ impl UciEngine {
             stop_flag,
             root_moves,
         })
+    }
+
+    fn search_limits(&self, depth: u8) -> SearchLimits {
+        let limits = SearchLimits::new(depth);
+        #[cfg(feature = "spsa-tuning")]
+        let limits = limits.with_parameters(self.search_parameters);
+        limits
     }
 
     fn resolve_searchmoves(&self, searchmoves: &[String]) -> Result<Option<Vec<Move>>, String> {
@@ -709,10 +761,22 @@ impl UciEngine {
         // `movestogo` values spends too aggressively in tournament controls.
         let moves_to_go = u64::from(options.movestogo.unwrap_or(25).max(1));
         let base = available / moves_to_go;
+        #[cfg(not(feature = "spsa-tuning"))]
         let soft = available.min(base.saturating_add(increment.saturating_mul(3) / 4));
+        #[cfg(feature = "spsa-tuning")]
+        let soft = available.min(base.saturating_add(
+            increment.saturating_mul(self.search_parameters.time_increment_pct as u64) / 100,
+        ));
+        #[cfg(not(feature = "spsa-tuning"))]
         let hard = available.min(
             soft.saturating_mul(3)
                 .saturating_div(2)
+                .max(soft.saturating_add(10)),
+        );
+        #[cfg(feature = "spsa-tuning")]
+        let hard = available.min(
+            soft.saturating_mul(self.search_parameters.time_hard_pct as u64)
+                .saturating_div(100)
                 .max(soft.saturating_add(10)),
         );
         Ok((soft, hard))
@@ -1093,6 +1157,33 @@ fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, Stri
             }
             Ok(SetOptionCommand::DualEvalThreshold(threshold))
         }
+        #[cfg(feature = "spsa-tuning")]
+        "TuneManifest" => {
+            if value_index.is_some() {
+                return Err("setoption name TuneManifest does not take a value".to_owned());
+            }
+            Ok(SetOptionCommand::TuneManifest)
+        }
+        #[cfg(feature = "spsa-tuning")]
+        name if parameter_spec(name).is_some() => {
+            let Some(value_index) = value_index else {
+                return Err(format!("setoption name {name} requires 'value <integer>'"));
+            };
+            if value_index + 2 != tokens.len() {
+                return Err(format!("setoption name {name} requires exactly one value"));
+            }
+            let value = tokens[value_index + 1]
+                .parse::<i32>()
+                .map_err(|_| format!("invalid setoption name {name} value"))?;
+            let spec = parameter_spec(name).expect("guarded tuning parameter must exist");
+            if !(spec.min..=spec.max).contains(&value) {
+                return Err(format!(
+                    "{name} value must be between {} and {}",
+                    spec.min, spec.max
+                ));
+            }
+            Ok(SetOptionCommand::TuneParameter(spec.name, value))
+        }
         _ => Err(format!("unsupported option '{name}'")),
     }
 }
@@ -1356,6 +1447,88 @@ mod tests {
         let response = engine.handle_line(&format!("setoption name Threads value {threads}"));
         assert!(response.lines.is_empty());
         engine
+    }
+
+    #[cfg(not(feature = "spsa-tuning"))]
+    #[test]
+    fn production_build_does_not_expose_experimental_tuning_controls() {
+        let mut engine = UciEngine::new();
+        assert!(
+            engine
+                .handle_line("uci")
+                .lines
+                .iter()
+                .all(|line| !line.starts_with("option name Tune"))
+        );
+        assert_eq!(
+            engine
+                .handle_line("setoption name TuneFutilityBase value 100")
+                .lines,
+            ["info string error: unsupported option 'TuneFutilityBase'"]
+        );
+    }
+
+    #[cfg(feature = "spsa-tuning")]
+    #[test]
+    fn tuning_build_advertises_exact_bounded_schema() {
+        let mut engine = UciEngine::new();
+        let response = engine.handle_line("uci");
+        for spec in PARAMETER_SPECS {
+            let expected = format!(
+                "option name {} type spin default {} min {} max {}",
+                spec.name, spec.default, spec.min, spec.max
+            );
+            assert!(response.lines.contains(&expected), "missing {expected}");
+        }
+        assert!(
+            response
+                .lines
+                .contains(&"option name TuneManifest type button".to_owned())
+        );
+    }
+
+    #[cfg(feature = "spsa-tuning")]
+    #[test]
+    fn tuning_options_validate_mutate_and_report_deterministically() {
+        let mut engine = UciEngine::new();
+        let defaults = engine.handle_line("setoption name TuneManifest").lines;
+        assert!(defaults[0].starts_with("info string tuning manifest version 1 checksum "));
+        assert_eq!(
+            defaults,
+            engine.handle_line("setoption name TuneManifest").lines
+        );
+
+        let searched = engine.handle_line("go depth 2");
+        assert!(
+            searched
+                .lines
+                .iter()
+                .any(|line| line.starts_with("bestmove "))
+        );
+        assert!(engine.debug_tt_entry_count() > 0);
+        assert!(
+            engine
+                .handle_line("setoption name TuneFutilityBase value 100")
+                .lines
+                .is_empty()
+        );
+        assert_eq!(engine.debug_tt_entry_count(), 0);
+        let changed = engine.handle_line("setoption name TuneManifest").lines;
+        assert_ne!(defaults[0], changed[0]);
+        assert!(changed.iter().any(|line| {
+            line == "info string tuning parameter TuneFutilityBase value 100 default 90 min 0 max 240 step 10"
+        }));
+
+        let rejected = engine.handle_line("setoption name TuneFutilityBase value 241");
+        assert_eq!(
+            rejected.lines,
+            ["info string error: TuneFutilityBase value must be between 0 and 240"]
+        );
+        assert_eq!(
+            changed,
+            engine.handle_line("setoption name TuneManifest").lines,
+            "a rejected update must not change the live vector"
+        );
     }
 
     #[test]

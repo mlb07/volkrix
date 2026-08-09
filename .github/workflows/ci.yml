@@ -27,6 +27,9 @@ jobs:
         run: |
           python scripts/test_uci_smoke.py
           python scripts/test_third_party_audit.py
+          python scripts/test_build_pgo.py
+          python scripts/test_strength_lab.py
+          python scripts/test_local_spsa.py
       - name: third-party license and provenance audit
         run: python scripts/audit_third_party.py
       - name: cargo clippy
@@ -49,3 +52,41 @@ jobs:
           --engine target/release/volkrix${{ runner.os == 'Windows' && '.exe' || '' }}
           --evalfile target/release/nn-37f18f62d772.nnue
           --transcript target/release/uci-smoke.log
+      - name: OpenBench embedded-network build and isolated smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -q '^option name Tune' target/release/uci-smoke.log; then
+            echo 'production build unexpectedly exposed Tune options' >&2
+            exit 1
+          fi
+          mkdir -p target/openbench-ci
+          network_path="$PWD/target/release/nn-37f18f62d772.nnue"
+          output_path="$PWD/target/openbench-ci/volkrix-openbench"
+          if command -v cygpath >/dev/null 2>&1; then
+            network_path="$(cygpath -m "$network_path")"
+            output_path="$(cygpath -m "$output_path")"
+          fi
+          make -C openbench \
+            EXE="$output_path" EVALFILE="$network_path"
+          engine_path="${output_path}${{ runner.os == 'Windows' && '.exe' || '' }}"
+          python scripts/uci_smoke.py \
+            --engine "$engine_path" \
+            --evalfile embedded \
+            --transcript target/openbench-ci/embedded-uci-smoke.log
+          printf 'uci\nsetoption name TuneManifest\nquit\n' | "$engine_path" \
+            > target/openbench-ci/tune-manifest.log
+          grep -q '^option name TuneManifest type button$' target/openbench-ci/tune-manifest.log
+          grep -q '^info string tuning manifest version 1 checksum ' target/openbench-ci/tune-manifest.log
+          grep -q '^info string tuning parameter Tune' target/openbench-ci/tune-manifest.log
+          cp "$network_path" target/openbench-ci/nn-c288c895ea92.nnue
+          VOLKRIX_EVAL_FILE=/definitely/missing/ambient-network.nnue \
+            python scripts/uci_smoke.py \
+              --engine "$engine_path" \
+              --evalfile embedded \
+              --transcript target/openbench-ci/embedded-env-precedence.log
+          VOLKRIX_EVAL_FILE=/definitely/missing/ambient-network.nnue \
+            "$engine_path" bench > target/openbench-ci/embedded-bench.log
+          grep -q 'evaluator <embedded:37f18f62d772' target/openbench-ci/embedded-bench.log
+          VOLKRIX_EMBEDDED_NNUE="$network_path" \
+            cargo test --locked --features embedded-nnue embedded_startup_ -- --nocapture

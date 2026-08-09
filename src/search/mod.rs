@@ -6,6 +6,8 @@ pub mod internal;
 pub mod limits;
 mod movepicker;
 pub(crate) mod nnue;
+#[cfg(feature = "spsa-tuning")]
+pub(crate) mod parameters;
 mod qsearch;
 mod root;
 #[cfg(feature = "offline-tools")]

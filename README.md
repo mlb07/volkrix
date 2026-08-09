@@ -26,7 +26,8 @@ neural network to be trained first.
 These features describe the implementation, not an Elo claim. Search changes are
 promoted through paired games and confidence-aware match reports; see
 [`benches/README.md`](benches/README.md) and
-[`docs/strength-testing.md`](docs/strength-testing.md).
+[`docs/strength-testing.md`](docs/strength-testing.md), including the deployable
+[`OpenBench and external calibration lab`](docs/openbench.md).
 
 ## Build
 

@@ -15,6 +15,8 @@ pub enum HeuristicProfile {
     Phase8Baseline,
     LmrOnly,
     Phase9Default,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    MultiCutEnabled,
     CorrectionHistoryEnabled,
     SingularExtensionsEnabled,
 }
@@ -42,6 +44,8 @@ impl HeuristicProfile {
             Self::Phase8Baseline => baseline,
             Self::LmrOnly => baseline.with_late_move_reductions(true),
             Self::Phase9Default => SearchHeuristics::phase9_default(),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::MultiCutEnabled => SearchHeuristics::phase9_default().with_multi_cut(true),
             Self::CorrectionHistoryEnabled => {
                 SearchHeuristics::phase9_default().with_correction_history(true)
             }

@@ -19,6 +19,7 @@ const BENCH_FENS: [&str; 4] = [
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum BenchEvaluator {
+    Discovered,
     Classical,
     EvalFile(String),
 }
@@ -26,6 +27,7 @@ enum BenchEvaluator {
 impl BenchEvaluator {
     fn label(&self) -> String {
         match self {
+            Self::Discovered => "default".to_owned(),
             Self::Classical => "classical".to_owned(),
             Self::EvalFile(path) => path.clone(),
         }
@@ -101,6 +103,12 @@ impl BenchConfig {
 
     pub fn with_eval_file(mut self, path: impl Into<String>) -> Self {
         self.evaluator = BenchEvaluator::EvalFile(path.into());
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_discovered_eval(mut self) -> Self {
+        self.evaluator = BenchEvaluator::Discovered;
         self
     }
 
@@ -239,6 +247,15 @@ fn run_threaded_bench(config: BenchConfig) -> BenchResult {
     }
 
     let dual_eval = dual_bench_stats(&service, &config);
+    let evaluator = if config.evaluator == BenchEvaluator::Discovered {
+        if service.eval_file().is_empty() {
+            "classical".to_owned()
+        } else {
+            service.eval_file().to_owned()
+        }
+    } else {
+        config.evaluator.label()
+    };
     BenchResult {
         depth: config.depth,
         positions: BENCH_FENS.len(),
@@ -247,7 +264,7 @@ fn run_threaded_bench(config: BenchConfig) -> BenchResult {
         tt_enabled: config.tt_enabled,
         hash_mb: config.hash_mb,
         threads: config.threads,
-        evaluator: config.evaluator.label(),
+        evaluator,
         dual_eval,
         elapsed_ms: started.elapsed().as_millis(),
     }
@@ -333,6 +350,7 @@ fn run_threaded_timed_bench(config: BenchConfig, movetime_ms: u64) -> TimedBench
 
 fn configure_evaluator(service: &mut UciSearchService, evaluator: &BenchEvaluator) {
     let path = match evaluator {
+        BenchEvaluator::Discovered => return,
         BenchEvaluator::Classical => "",
         BenchEvaluator::EvalFile(path) => path,
     };

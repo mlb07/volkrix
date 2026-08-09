@@ -5,12 +5,13 @@
   "build": {
     "path": "openbench",
     "compilers": [
-      "gcc"
+      "cargo>=1.85.0"
     ],
     "cpuflags": [],
     "systems": [
       "Linux",
-      "Windows"
+      "Windows",
+      "Darwin"
     ]
   },
   "test_presets": {
@@ -32,6 +33,30 @@
       "both_time_control": "60.0+0.6",
       "workload_size": 8
     },
+    "STC regression": {
+      "both_options": "Threads=1 Hash=64",
+      "both_time_control": "10.0+0.1",
+      "workload_size": 32,
+      "test_bounds": "[-3.00, 0.00]"
+    },
+    "LTC regression": {
+      "both_options": "Threads=1 Hash=128",
+      "both_time_control": "60.0+0.6",
+      "workload_size": 8,
+      "test_bounds": "[-3.00, 0.00]"
+    },
+    "STC progtest": {
+      "both_options": "Threads=1 Hash=64",
+      "both_time_control": "10.0+0.1",
+      "workload_size": 32,
+      "test_max_games": 4000
+    },
+    "LTC progtest": {
+      "both_options": "Threads=1 Hash=128",
+      "both_time_control": "60.0+0.6",
+      "workload_size": 8,
+      "test_max_games": 1000
+    },
     "SMP STC": {
       "both_options": "Threads=4 Hash=64",
       "both_time_control": "10.0+0.1",
@@ -43,6 +68,14 @@
       "book_name": "UHO_Lichess_4852_v1.epd",
       "win_adj": "movecount=3 score=400",
       "draw_adj": "movenumber=40 movecount=8 score=10"
+    },
+    "STC": {
+      "dev_options": "Threads=1 Hash=16",
+      "dev_time_control": "10.0+0.1"
+    },
+    "LTC": {
+      "dev_options": "Threads=1 Hash=64",
+      "dev_time_control": "60.0+0.6"
     }
   },
   "datagen_presets": {

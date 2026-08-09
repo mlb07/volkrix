@@ -223,7 +223,7 @@ command=(
     "$fastchess"
     -recover -repeat -games 2 -rounds "$rounds"
     -strict
-    -ratinginterval 1 -scoreinterval 1 -autosaveinterval 0
+    -ratinginterval 1 -scoreinterval 1 -autosaveinterval 2
     -report penta=true -variant standard -concurrency "$concurrency"
     -openings "file=$book" "format=$book_format" order=sequential
     -engine name=Candidate "cmd=$candidate" "dir=$(dirname "$candidate")"
@@ -331,6 +331,9 @@ status=${PIPESTATUS[0]}
 set -e
 printf '%s\n' "$status" > "$output_dir/exit-status"
 [ "$status" -eq 0 ] || die "FastChess exited with status $status; artifacts retained at $output_dir"
+python3 "$script_dir/strength_lab.py" summarize-pgn \
+    --pgn "$output_dir/games.pgn" --candidate Candidate \
+    --output "$output_dir/summary.json"
 for artifact in "$output_dir"/*; do
     [ -f "$artifact" ] || continue
     [ "$(basename "$artifact")" = artifacts.sha256 ] && continue

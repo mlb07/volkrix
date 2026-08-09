@@ -18,11 +18,30 @@ use super::{
     tt::{self, Bound, TtHit, TtStore},
 };
 
+#[cfg(feature = "spsa-tuning")]
+use super::parameters::SearchParameters;
+
+#[cfg(feature = "spsa-tuning")]
+macro_rules! search_parameter {
+    ($context:expr, $field:ident, $default:expr) => {
+        $context.parameters.$field
+    };
+}
+
+#[cfg(not(feature = "spsa-tuning"))]
+macro_rules! search_parameter {
+    ($context:expr, $field:ident, $default:expr) => {
+        $default
+    };
+}
+
 pub(crate) const MAX_PLY: usize = 128;
 pub(crate) const INF: i32 = 32_000;
 pub(crate) const MATE_SCORE: i32 = 30_000;
 const MATE_THRESHOLD: i32 = MATE_SCORE - MAX_PLY as i32;
+#[cfg_attr(feature = "spsa-tuning", allow(dead_code))]
 const ASPIRATION_DELTA: i32 = 36;
+#[cfg_attr(feature = "spsa-tuning", allow(dead_code))]
 const NULL_MOVE_STATIC_MARGIN: i32 = 32;
 const HISTORY_MAX: i32 = 16_384;
 const PIECE_TYPE_COUNT: usize = 6;
@@ -31,6 +50,14 @@ const CORRECTION_HISTORY_MASK: usize = CORRECTION_HISTORY_SIZE - 1;
 const CORRECTION_HISTORY_LIMIT: i32 = 16;
 const SINGULAR_MIN_DEPTH: usize = 8;
 const SINGULAR_TT_DEPTH_SLACK: usize = 3;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const MULTI_CUT_MIN_DEPTH: usize = 7;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const MULTI_CUT_MOVE_LIMIT: usize = 6;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const MULTI_CUT_REQUIRED_CUTOFFS: usize = 3;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const MULTI_CUT_REDUCTION: usize = 3;
 
 type ContinuationHistory = [[[[[i16; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
 type CaptureHistory = [[[[i16; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
@@ -374,6 +401,7 @@ impl IterationStability {
         self.has_previous = true;
     }
 
+    #[cfg_attr(feature = "spsa-tuning", allow(dead_code))]
     fn soft_budget_factor(self) -> f64 {
         if self.comparisons == 0 {
             return 1.0;
@@ -391,6 +419,26 @@ impl IterationStability {
             return 1.45;
         }
         1.25
+    }
+
+    #[cfg(feature = "spsa-tuning")]
+    fn soft_budget_factor_with_parameters(self, parameters: SearchParameters) -> f64 {
+        if self.comparisons == 0 {
+            return 1.0;
+        }
+        if self.stable_iterations >= 3 {
+            return f64::from(parameters.time_stable3_pct) / 100.0;
+        }
+        if self.stable_iterations == 2 {
+            return f64::from(parameters.time_stable2_pct) / 100.0;
+        }
+        if self.stable_iterations == 1 {
+            return f64::from(parameters.time_stable1_pct) / 100.0;
+        }
+        if self.score_delta >= parameters.time_score_swing_cp {
+            return f64::from(parameters.time_score_swing_pct) / 100.0;
+        }
+        f64::from(parameters.time_unstable_pct) / 100.0
     }
 }
 
@@ -414,6 +462,8 @@ pub(crate) struct SearchContext<'a> {
     excluded_moves: Option<Box<[Move; MAX_PLY]>>,
     classical_weights: Option<eval::ClassicalEvalWeights>,
     heuristics: SearchHeuristics,
+    #[cfg(feature = "spsa-tuning")]
+    parameters: SearchParameters,
     control: SearchControl,
     tt: Option<Arc<tt::TranspositionTable>>,
     nnue: Option<NnueSearchState>,
@@ -436,6 +486,12 @@ struct SearchDebugCounters {
     internal_iterative_reductions: u32,
     probcut_attempts: u32,
     probcut_prunes: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    multi_cut_attempts: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    multi_cut_probes: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    multi_cut_prunes: u32,
     null_move_verifications: u32,
     correction_history_lookups: u32,
     correction_history_updates: u32,
@@ -638,6 +694,8 @@ impl<'a> SearchContext<'a> {
                 .then(|| Box::new([Move::NONE; MAX_PLY])),
             classical_weights: resources.classical_weights,
             heuristics: limits.heuristics,
+            #[cfg(feature = "spsa-tuning")]
+            parameters: limits.parameters,
             control,
             tt: resources.tt.or_else(|| {
                 limits
@@ -856,7 +914,7 @@ impl<'a> SearchContext<'a> {
         depth: usize,
         guess: i32,
     ) -> RootSearchOutcome {
-        let mut delta = ASPIRATION_DELTA;
+        let mut delta = search_parameter!(self, aspiration_delta, ASPIRATION_DELTA);
         let mut alpha = (guess - delta).max(-INF);
         let mut beta = (guess + delta).min(INF);
         loop {
@@ -1279,7 +1337,7 @@ impl<'a> SearchContext<'a> {
         let mut searched_capture_count = 0usize;
 
         if !is_exclusion
-            && null_move_is_eligible(
+            && null_move_is_eligible_with_parameters(
                 self.heuristics,
                 position,
                 node_state,
@@ -1287,11 +1345,19 @@ impl<'a> SearchContext<'a> {
                 beta,
                 static_eval,
                 in_check,
+                search_parameter!(self, null_static_margin, NULL_MOVE_STATIC_MARGIN),
             )
             && let Ok(null_undo) = position.make_null_move()
         {
             self.set_previous_move(ply + 1, Move::NONE);
-            let reduction = null_move_reduction(depth, static_eval, beta);
+            let reduction = null_move_reduction_with_parameters(
+                depth,
+                static_eval,
+                beta,
+                search_parameter!(self, null_base_reduction, 2_i32) as usize,
+                search_parameter!(self, null_depth_divisor, 6_i32) as usize,
+                search_parameter!(self, null_eval_divisor, 256),
+            );
             let null_beta = (-beta).saturating_add(1).min(INF);
             let null_score = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                 position,
@@ -1307,7 +1373,10 @@ impl<'a> SearchContext<'a> {
             if let Some(score) = null_score {
                 let null_score = -score;
                 if null_score >= beta {
-                    let verified_score = if null_move_requires_verification(depth) {
+                    let verified_score = if null_move_requires_verification_with_parameters(
+                        depth,
+                        search_parameter!(self, null_verify_depth, 10_i32) as usize,
+                    ) {
                         self.debug_counters.null_move_verifications += 1;
                         self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                             position,
@@ -1342,7 +1411,7 @@ impl<'a> SearchContext<'a> {
         }
 
         if !is_exclusion
-            && reverse_futility_is_eligible(
+            && reverse_futility_is_eligible_with_parameters(
                 self.heuristics,
                 position,
                 node_state,
@@ -1350,6 +1419,7 @@ impl<'a> SearchContext<'a> {
                 beta,
                 static_eval,
                 in_check,
+                search_parameter!(self, reverse_futility_slope, 140),
             )
         {
             self.debug_counters.reverse_futility_prunes += 1;
@@ -1365,6 +1435,82 @@ impl<'a> SearchContext<'a> {
             return Some(beta);
         }
 
+        // Multi-Cut is intentionally isolated behind a default-off heuristic seam. At a cut
+        // node, several independent reduced-depth fail-highs are evidence that at least one
+        // full-depth move will also fail high. This is probabilistic forward pruning, so keep
+        // the guards strict, suppress recursive Multi-Cut/null probing in child trials, and
+        // publish only a reduced-depth TT bound.
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if !is_exclusion
+            && multi_cut_is_eligible(
+                self.heuristics,
+                position,
+                node_state,
+                depth,
+                beta,
+                static_eval,
+                in_check,
+            )
+        {
+            self.debug_counters.multi_cut_attempts =
+                self.debug_counters.multi_cut_attempts.saturating_add(1);
+            let mut cutoffs = 0usize;
+            let mut probed = 0usize;
+            let mut candidates =
+                MovePicker::new(self, position, &legal_moves, ordering_hints).ordered();
+            candidates.truncate(MULTI_CUT_MOVE_LIMIT);
+            candidates
+                .retain(|mv| !mv.is_capture() || mv.is_promotion() || position.see(*mv).0 >= 0);
+            let candidate_count = candidates.len();
+
+            for mv in candidates {
+                probed += 1;
+                self.debug_counters.multi_cut_probes =
+                    self.debug_counters.multi_cut_probes.saturating_add(1);
+                let undo = self
+                    .make_search_move::<USE_NNUE>(position, mv)
+                    .expect("multi-cut candidate must be legal");
+                self.set_previous_move(ply + 1, mv);
+                let child_score = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
+                    position,
+                    depth - 1 - MULTI_CUT_REDUCTION,
+                    ply + 1,
+                    -beta,
+                    (-beta).saturating_add(1),
+                    SearchNodeState::after_null_move(),
+                );
+                self.set_previous_move(ply + 1, Move::NONE);
+                self.unmake_search_move::<USE_NNUE>(position, mv, undo);
+                let score = -child_score?;
+                if score >= beta {
+                    cutoffs += 1;
+                    if cutoffs >= MULTI_CUT_REQUIRED_CUTOFFS {
+                        self.debug_counters.multi_cut_prunes =
+                            self.debug_counters.multi_cut_prunes.saturating_add(1);
+                        self.store_tt(TtStoreInput {
+                            key: tt_key,
+                            depth: depth
+                                .saturating_sub(MULTI_CUT_REDUCTION + 1)
+                                .min(u8::MAX as usize) as u8,
+                            ply,
+                            best_move: mv,
+                            static_eval: raw_static_eval.clamp(i16::MIN as i32, i16::MAX as i32)
+                                as i16,
+                            score: beta,
+                            bound: Bound::Lower,
+                        });
+                        return Some(beta);
+                    }
+                }
+
+                // Once too few candidates remain to reach the required consensus, stop paying
+                // for speculative probes and continue with the normal full-depth search.
+                if cutoffs + (candidate_count - probed) < MULTI_CUT_REQUIRED_CUTOFFS {
+                    break;
+                }
+            }
+        }
+
         if !is_exclusion
             && probcut_is_eligible(
                 self.heuristics,
@@ -1373,10 +1519,18 @@ impl<'a> SearchContext<'a> {
                 beta,
                 static_eval,
                 in_check,
+                search_parameter!(self, probcut_base, 180),
+                search_parameter!(self, probcut_slope, 5),
+                search_parameter!(self, probcut_static_offset, 80),
             )
         {
             self.debug_counters.probcut_attempts += 1;
-            let probcut_beta = beta + probcut_margin(depth);
+            let probcut_beta = beta
+                + probcut_margin(
+                    depth,
+                    search_parameter!(self, probcut_base, 180),
+                    search_parameter!(self, probcut_slope, 5),
+                );
             for mv in legal_moves.iter().copied() {
                 if !mv.is_capture() || mv.is_promotion() {
                     continue;
@@ -1454,14 +1608,26 @@ impl<'a> SearchContext<'a> {
             };
 
             if !is_exclusion
-                && futility_pruning_is_eligible(self.heuristics, forward_prune_candidate)
+                && futility_pruning_is_eligible_with_parameters(
+                    self.heuristics,
+                    forward_prune_candidate,
+                    search_parameter!(self, futility_base, 90),
+                    search_parameter!(self, futility_slope, 120),
+                )
             {
                 self.debug_counters.futility_prunes += 1;
                 continue;
             }
 
             if !is_exclusion
-                && late_move_pruning_is_eligible(self.heuristics, forward_prune_candidate)
+                && late_move_pruning_is_eligible_with_parameters(
+                    self.heuristics,
+                    forward_prune_candidate,
+                    search_parameter!(self, futility_base, 90),
+                    search_parameter!(self, futility_slope, 120),
+                    search_parameter!(self, late_move_base, 3_i32) as usize,
+                    search_parameter!(self, late_move_slope, 3_i32) as usize,
+                )
             {
                 self.debug_counters.late_move_prunes += 1;
                 continue;
@@ -1478,6 +1644,7 @@ impl<'a> SearchContext<'a> {
                     is_hash_move,
                     searched_moves,
                     see_score,
+                    search_parameter!(self, see_margin, 70),
                 )
             {
                 self.debug_counters.see_prunes += 1;
@@ -1495,6 +1662,7 @@ impl<'a> SearchContext<'a> {
                     is_hash_move,
                     quiets_searched,
                     history_score,
+                    search_parameter!(self, history_prune_threshold, 2_000),
                 )
             {
                 self.debug_counters.history_prunes += 1;
@@ -1522,15 +1690,20 @@ impl<'a> SearchContext<'a> {
                 ) {
                 self.debug_counters.lmr_reductions += 1;
                 let reduction = if self.heuristics.contextual_lmr {
-                    contextual_lmr_reduction(
+                    contextual_lmr_reduction_with_parameters(
                         depth,
                         quiets_searched,
                         improving,
                         node_state.cut_node,
                         history_score,
+                        search_parameter!(self, lmr_divisor_pct, 150),
                     )
                 } else {
-                    lmr_reduction(depth, quiets_searched)
+                    lmr_reduction_with_parameters(
+                        depth,
+                        quiets_searched,
+                        search_parameter!(self, lmr_divisor_pct, 150),
+                    )
                 };
                 let scout_beta = (-alpha).min(INF);
                 let scout_alpha = scout_beta.saturating_sub(1);
@@ -1871,7 +2044,7 @@ impl<'a> SearchContext<'a> {
             return;
         }
 
-        let bonus = history_bonus(depth);
+        let bonus = history_bonus(depth, search_parameter!(self, history_bonus_scale, 32));
         self.update_quiet_history(position, mv, ply, bonus);
     }
 
@@ -1879,7 +2052,7 @@ impl<'a> SearchContext<'a> {
         if !self.heuristics.history_maluses {
             return;
         }
-        let malus = -history_bonus(depth);
+        let malus = -history_bonus(depth, search_parameter!(self, history_bonus_scale, 32));
         self.update_quiet_history(position, mv, ply, malus);
     }
 
@@ -1920,9 +2093,9 @@ impl<'a> SearchContext<'a> {
             return;
         };
         let bonus = if success {
-            history_bonus(depth)
+            history_bonus(depth, search_parameter!(self, history_bonus_scale, 32))
         } else {
-            -history_bonus(depth)
+            -history_bonus(depth, search_parameter!(self, history_bonus_scale, 32))
         };
         let entry = &mut self.capture_history[color][attacker][mv.to().index()][captured];
         update_history_entry(entry, bonus);
@@ -2164,7 +2337,11 @@ impl<'a> SearchContext<'a> {
             .and_then(|ponder| ponder.hit_at())
             .unwrap_or(self.started);
         let nominal_budget = soft_deadline.saturating_duration_since(timing_started);
-        let adaptive_budget = nominal_budget.mul_f64(stability.soft_budget_factor());
+        #[cfg(not(feature = "spsa-tuning"))]
+        let soft_budget_factor = stability.soft_budget_factor();
+        #[cfg(feature = "spsa-tuning")]
+        let soft_budget_factor = stability.soft_budget_factor_with_parameters(self.parameters);
+        let adaptive_budget = nominal_budget.mul_f64(soft_budget_factor);
         let adaptive_deadline = timing_started
             .checked_add(adaptive_budget)
             .unwrap_or(soft_deadline);
@@ -2249,31 +2426,45 @@ fn singular_probe(
     })
 }
 
-fn lmr_reduction(depth: usize, quiets_searched: usize) -> usize {
+fn lmr_reduction_with_parameters(depth: usize, quiets_searched: usize, divisor_pct: i32) -> usize {
+    #[cfg(not(feature = "spsa-tuning"))]
+    let _ = divisor_pct;
+    #[cfg(not(feature = "spsa-tuning"))]
     static REDUCTIONS: OnceLock<[[u8; MAX_MOVES + 1]; MAX_PLY]> = OnceLock::new();
-    let reductions = REDUCTIONS.get_or_init(|| {
-        let mut table = [[0; MAX_MOVES + 1]; MAX_PLY];
-        for (depth, row) in table.iter_mut().enumerate().skip(1) {
-            for (move_count, reduction) in row.iter_mut().enumerate().skip(1) {
-                let calculated = ((depth as f64).ln() * (move_count as f64).ln() / 1.5)
-                    .floor()
-                    .max(1.0) as usize;
-                *reduction = calculated.min(depth.saturating_sub(1)) as u8;
-            }
-        }
-        table
-    });
+    #[cfg(feature = "spsa-tuning")]
+    static REDUCTIONS: [OnceLock<Box<[[u8; MAX_MOVES + 1]; MAX_PLY]>>; 221] =
+        [const { OnceLock::new() }; 221];
+    #[cfg(not(feature = "spsa-tuning"))]
+    let reductions = REDUCTIONS.get_or_init(|| build_lmr_reductions(150));
+    #[cfg(feature = "spsa-tuning")]
+    let reductions = REDUCTIONS[(divisor_pct - 80).clamp(0, 220) as usize]
+        .get_or_init(|| Box::new(build_lmr_reductions(divisor_pct)));
     reductions[depth.min(MAX_PLY - 1)][quiets_searched.min(MAX_MOVES)] as usize
 }
 
-fn contextual_lmr_reduction(
+fn build_lmr_reductions(divisor_pct: i32) -> [[u8; MAX_MOVES + 1]; MAX_PLY] {
+    let mut table = [[0; MAX_MOVES + 1]; MAX_PLY];
+    for (depth, row) in table.iter_mut().enumerate().skip(1) {
+        for (move_count, reduction) in row.iter_mut().enumerate().skip(1) {
+            let divisor = f64::from(divisor_pct) / 100.0;
+            let calculated = ((depth as f64).ln() * (move_count as f64).ln() / divisor)
+                .floor()
+                .max(1.0) as usize;
+            *reduction = calculated.min(depth.saturating_sub(1)) as u8;
+        }
+    }
+    table
+}
+
+fn contextual_lmr_reduction_with_parameters(
     depth: usize,
     quiets_searched: usize,
     improving: bool,
     cut_node: bool,
     history_score: i32,
+    divisor_pct: i32,
 ) -> usize {
-    let mut reduction = lmr_reduction(depth, quiets_searched) as i32;
+    let mut reduction = lmr_reduction_with_parameters(depth, quiets_searched, divisor_pct) as i32;
     if cut_node {
         reduction += 1;
     }
@@ -2305,7 +2496,54 @@ fn correction_history_update_is_eligible(
             || (!update.best_move.is_capture() && !update.best_move.is_promotion()))
 }
 
-fn reverse_futility_is_eligible(
+#[allow(clippy::too_many_arguments)]
+fn reverse_futility_is_eligible_with_parameters(
+    heuristics: SearchHeuristics,
+    position: &Position,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+    margin_slope: i32,
+) -> bool {
+    heuristics.reverse_futility_pruning
+        && !node_state.is_pv
+        && !in_check
+        && depth <= 2
+        && beta > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD
+        && static_eval >= beta + reverse_futility_margin(depth, margin_slope)
+        && position.has_non_pawn_material(position.side_to_move())
+}
+
+fn reverse_futility_margin(depth: usize, slope: i32) -> i32 {
+    slope * depth as i32
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probcut_is_eligible(
+    heuristics: SearchHeuristics,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+    margin_base: i32,
+    margin_slope: i32,
+    static_offset: i32,
+) -> bool {
+    heuristics.probcut
+        && !node_state.is_pv
+        && !in_check
+        && depth >= 5
+        && beta > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD - probcut_margin(depth, margin_base, margin_slope)
+        && static_eval >= beta - static_offset
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn multi_cut_is_eligible(
     heuristics: SearchHeuristics,
     position: &Position,
     node_state: SearchNodeState,
@@ -2314,44 +2552,27 @@ fn reverse_futility_is_eligible(
     static_eval: i32,
     in_check: bool,
 ) -> bool {
-    heuristics.reverse_futility_pruning
+    heuristics.multi_cut
+        && node_state.cut_node
+        && node_state.null_move_allowed
         && !node_state.is_pv
         && !in_check
-        && depth <= 2
+        && depth >= MULTI_CUT_MIN_DEPTH
         && beta > -MATE_THRESHOLD
         && beta < MATE_THRESHOLD
-        && static_eval >= beta + reverse_futility_margin(depth)
+        && static_eval >= beta - 120
         && position.has_non_pawn_material(position.side_to_move())
 }
 
-fn reverse_futility_margin(depth: usize) -> i32 {
-    140 * depth as i32
+fn probcut_margin(depth: usize, base: i32, slope: i32) -> i32 {
+    (base - slope * depth.min(12) as i32).max(1)
 }
 
-fn probcut_is_eligible(
-    heuristics: SearchHeuristics,
-    node_state: SearchNodeState,
-    depth: usize,
-    beta: i32,
-    static_eval: i32,
-    in_check: bool,
-) -> bool {
-    heuristics.probcut
-        && !node_state.is_pv
-        && !in_check
-        && depth >= 5
-        && beta > -MATE_THRESHOLD
-        && beta < MATE_THRESHOLD - probcut_margin(depth)
-        && static_eval >= beta - 80
-}
-
-fn probcut_margin(depth: usize) -> i32 {
-    180 - 5 * depth.min(12) as i32
-}
-
-fn futility_pruning_is_eligible(
+fn futility_pruning_is_eligible_with_parameters(
     heuristics: SearchHeuristics,
     candidate: ForwardPruneCandidate,
+    margin_base: i32,
+    margin_slope: i32,
 ) -> bool {
     heuristics.futility_pruning
         && !candidate.node_state.is_pv
@@ -2362,12 +2583,17 @@ fn futility_pruning_is_eligible(
         && !candidate.gives_check
         && !candidate.is_hash_move
         && candidate.has_searched_move
-        && candidate.static_eval + futility_margin(candidate.depth) <= candidate.alpha
+        && candidate.static_eval + futility_margin(candidate.depth, margin_base, margin_slope)
+            <= candidate.alpha
 }
 
-fn late_move_pruning_is_eligible(
+fn late_move_pruning_is_eligible_with_parameters(
     heuristics: SearchHeuristics,
     candidate: ForwardPruneCandidate,
+    margin_base: i32,
+    margin_slope: i32,
+    threshold_base: usize,
+    threshold_slope: usize,
 ) -> bool {
     heuristics.late_move_pruning
         && !candidate.node_state.is_pv
@@ -2378,16 +2604,18 @@ fn late_move_pruning_is_eligible(
         && !candidate.gives_check
         && !candidate.is_hash_move
         && candidate.has_searched_move
-        && candidate.static_eval + futility_margin(candidate.depth) <= candidate.alpha
-        && candidate.quiets_searched > late_move_pruning_threshold(candidate.depth)
+        && candidate.static_eval + futility_margin(candidate.depth, margin_base, margin_slope)
+            <= candidate.alpha
+        && candidate.quiets_searched
+            > late_move_pruning_threshold(candidate.depth, threshold_base, threshold_slope)
 }
 
-fn futility_margin(depth: usize) -> i32 {
-    90 + 120 * depth as i32
+fn futility_margin(depth: usize, base: i32, slope: i32) -> i32 {
+    base + slope * depth as i32
 }
 
-fn late_move_pruning_threshold(depth: usize) -> usize {
-    3 + depth * 3
+fn late_move_pruning_threshold(depth: usize, base: usize, slope: usize) -> usize {
+    base + depth * slope
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2401,6 +2629,7 @@ fn see_pruning_is_eligible(
     is_hash_move: bool,
     searched_moves: usize,
     see_score: i32,
+    margin: i32,
 ) -> bool {
     heuristics.see_pruning
         && !node_state.is_pv
@@ -2411,7 +2640,7 @@ fn see_pruning_is_eligible(
         && !gives_check
         && !is_hash_move
         && searched_moves > 0
-        && see_score < -(70 * depth as i32)
+        && see_score < -(margin * depth as i32)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2425,6 +2654,7 @@ fn history_pruning_is_eligible(
     is_hash_move: bool,
     quiets_searched: usize,
     history_score: i32,
+    threshold: i32,
 ) -> bool {
     heuristics.history_pruning
         && !node_state.is_pv
@@ -2434,9 +2664,119 @@ fn history_pruning_is_eligible(
         && !gives_check
         && !is_hash_move
         && quiets_searched > 3 + depth * 2
-        && history_score < -2_000
+        && history_score < -threshold
 }
 
+#[allow(clippy::too_many_arguments)]
+fn null_move_is_eligible_with_parameters(
+    heuristics: SearchHeuristics,
+    position: &Position,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+    static_margin: i32,
+) -> bool {
+    heuristics.null_move_pruning
+        && node_state.null_move_allowed
+        && !node_state.is_pv
+        && !in_check
+        && depth >= 4
+        && beta > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD
+        && static_eval >= beta + static_margin
+        && position.has_non_pawn_material(position.side_to_move())
+}
+
+fn null_move_reduction_with_parameters(
+    depth: usize,
+    static_eval: i32,
+    beta: i32,
+    base_reduction: usize,
+    depth_divisor: usize,
+    eval_divisor: i32,
+) -> usize {
+    let depth_component = depth / depth_divisor;
+    let eval_component = static_eval
+        .saturating_sub(beta)
+        .max(0)
+        .div_euclid(eval_divisor)
+        .min(2) as usize;
+    (base_reduction + depth_component + eval_component).min(depth.saturating_sub(1))
+}
+
+const fn null_move_requires_verification_with_parameters(
+    depth: usize,
+    verification_depth: usize,
+) -> bool {
+    depth >= verification_depth
+}
+
+// Default-value wrappers keep the focused heuristic tests readable and make
+// default equivalence explicit. Live searches use the parameterized variants.
+#[cfg(test)]
+fn lmr_reduction(depth: usize, quiets_searched: usize) -> usize {
+    lmr_reduction_with_parameters(depth, quiets_searched, 150)
+}
+
+#[cfg(test)]
+fn contextual_lmr_reduction(
+    depth: usize,
+    quiets_searched: usize,
+    improving: bool,
+    cut_node: bool,
+    history_score: i32,
+) -> usize {
+    contextual_lmr_reduction_with_parameters(
+        depth,
+        quiets_searched,
+        improving,
+        cut_node,
+        history_score,
+        150,
+    )
+}
+
+#[cfg(test)]
+fn reverse_futility_is_eligible(
+    heuristics: SearchHeuristics,
+    position: &Position,
+    node_state: SearchNodeState,
+    depth: usize,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+) -> bool {
+    reverse_futility_is_eligible_with_parameters(
+        heuristics,
+        position,
+        node_state,
+        depth,
+        beta,
+        static_eval,
+        in_check,
+        140,
+    )
+}
+
+#[cfg(test)]
+fn futility_pruning_is_eligible(
+    heuristics: SearchHeuristics,
+    candidate: ForwardPruneCandidate,
+) -> bool {
+    futility_pruning_is_eligible_with_parameters(heuristics, candidate, 90, 120)
+}
+
+#[cfg(test)]
+fn late_move_pruning_is_eligible(
+    heuristics: SearchHeuristics,
+    candidate: ForwardPruneCandidate,
+) -> bool {
+    late_move_pruning_is_eligible_with_parameters(heuristics, candidate, 90, 120, 3, 3)
+}
+
+#[cfg(test)]
 fn null_move_is_eligible(
     heuristics: SearchHeuristics,
     position: &Position,
@@ -2446,29 +2786,26 @@ fn null_move_is_eligible(
     static_eval: i32,
     in_check: bool,
 ) -> bool {
-    heuristics.null_move_pruning
-        && node_state.null_move_allowed
-        && !node_state.is_pv
-        && !in_check
-        && depth >= 4
-        && beta > -MATE_THRESHOLD
-        && beta < MATE_THRESHOLD
-        && static_eval >= beta + NULL_MOVE_STATIC_MARGIN
-        && position.has_non_pawn_material(position.side_to_move())
+    null_move_is_eligible_with_parameters(
+        heuristics,
+        position,
+        node_state,
+        depth,
+        beta,
+        static_eval,
+        in_check,
+        NULL_MOVE_STATIC_MARGIN,
+    )
 }
 
+#[cfg(test)]
 fn null_move_reduction(depth: usize, static_eval: i32, beta: i32) -> usize {
-    let depth_component = depth / 6;
-    let eval_component = static_eval
-        .saturating_sub(beta)
-        .max(0)
-        .div_euclid(256)
-        .min(2) as usize;
-    (2 + depth_component + eval_component).min(depth.saturating_sub(1))
+    null_move_reduction_with_parameters(depth, static_eval, beta, 2, 6, 256)
 }
 
+#[cfg(test)]
 const fn null_move_requires_verification(depth: usize) -> bool {
-    depth >= 10
+    null_move_requires_verification_with_parameters(depth, 10)
 }
 
 impl SearchContext<'_> {
@@ -2546,8 +2883,8 @@ fn promotion_score(piece_type: crate::core::PieceType) -> i32 {
     see::promotion_gain(piece_type).0 as i32
 }
 
-fn history_bonus(depth: usize) -> i32 {
-    ((depth * depth) as i32 * 32).clamp(32, HISTORY_MAX / 2)
+fn history_bonus(depth: usize, scale: i32) -> i32 {
+    ((depth * depth) as i32 * scale).clamp(scale, HISTORY_MAX / 2)
 }
 
 fn update_history_entry(entry: &mut i16, bonus: i32) {
@@ -2645,14 +2982,15 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Bound, CorrectionUpdate, ForwardPruneCandidate, IterationStability, LmrCandidate, Move,
-        MoveList, MoveOrderHints, PonderState, Position, SearchContext, SearchHeuristics,
-        SearchLimits, SearchNodeState, SearchResources, contextual_lmr_reduction,
-        correction_history_keys, correction_history_update_is_eligible,
-        futility_pruning_is_eligible, late_move_pruning_is_eligible, lmr_is_eligible,
-        lmr_reduction, lmr_requires_full_research, mate_distance_bounds, null_move_is_eligible,
-        null_move_reduction, null_move_requires_verification, reverse_futility_is_eligible,
-        singular_probe, tt_cutoff_score, update_history_entry, validated_tt_move_hint,
+        Bound, CorrectionUpdate, ForwardPruneCandidate, IterationStability, LmrCandidate,
+        MULTI_CUT_MIN_DEPTH, MULTI_CUT_REQUIRED_CUTOFFS, Move, MoveList, MoveOrderHints,
+        PonderState, Position, SearchContext, SearchHeuristics, SearchLimits, SearchNodeState,
+        SearchResources, contextual_lmr_reduction, correction_history_keys,
+        correction_history_update_is_eligible, futility_pruning_is_eligible,
+        late_move_pruning_is_eligible, lmr_is_eligible, lmr_reduction, lmr_requires_full_research,
+        mate_distance_bounds, multi_cut_is_eligible, null_move_is_eligible, null_move_reduction,
+        null_move_requires_verification, reverse_futility_is_eligible, singular_probe,
+        tt_cutoff_score, update_history_entry, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -3637,6 +3975,116 @@ mod tests {
         assert_eq!(null_move_reduction(7, 356, 100), 4);
         assert_eq!(null_move_reduction(7, 612, 100), 5);
         assert_eq!(null_move_reduction(12, 100, 100), 4);
+    }
+
+    #[test]
+    fn multi_cut_respects_cut_node_depth_recursion_and_material_guards() {
+        let position = Position::startpos();
+        let heuristics = SearchHeuristics::phase9_default().with_multi_cut(true);
+
+        assert!(multi_cut_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::cut(),
+            MULTI_CUT_MIN_DEPTH,
+            20,
+            0,
+            false,
+        ));
+        assert!(!multi_cut_is_eligible(
+            SearchHeuristics::phase9_default(),
+            &position,
+            SearchNodeState::cut(),
+            MULTI_CUT_MIN_DEPTH,
+            20,
+            0,
+            false,
+        ));
+        assert!(!multi_cut_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::new(true),
+            MULTI_CUT_MIN_DEPTH,
+            20,
+            0,
+            false,
+        ));
+        assert!(!multi_cut_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::after_null_move(),
+            MULTI_CUT_MIN_DEPTH,
+            20,
+            0,
+            false,
+        ));
+        assert!(!multi_cut_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::cut(),
+            MULTI_CUT_MIN_DEPTH - 1,
+            20,
+            0,
+            false,
+        ));
+        assert!(!multi_cut_is_eligible(
+            heuristics,
+            &position,
+            SearchNodeState::cut(),
+            MULTI_CUT_MIN_DEPTH,
+            20,
+            0,
+            true,
+        ));
+
+        let pawn_ending = Position::from_fen("8/8/8/8/3k4/8/4p3/3K4 b - - 0 1")
+            .expect("pawn-ending FEN must parse");
+        assert!(!multi_cut_is_eligible(
+            heuristics,
+            &pawn_ending,
+            SearchNodeState::cut(),
+            MULTI_CUT_MIN_DEPTH,
+            -500,
+            -500,
+            false,
+        ));
+    }
+
+    #[test]
+    fn multi_cut_isolated_seam_prunes_deterministically_and_restores_position() {
+        let heuristics = SearchHeuristics::phase8_baseline().with_multi_cut(true);
+        let mut expected = None;
+
+        for _ in 0..2 {
+            let limits = SearchLimits::new(8)
+                .without_tt()
+                .with_heuristics(heuristics);
+            let mut context = SearchContext::new(limits);
+            let mut position = Position::startpos();
+            let before = position.to_fen();
+            let score = context
+                .alpha_beta(
+                    &mut position,
+                    MULTI_CUT_MIN_DEPTH,
+                    1,
+                    -1_001,
+                    -1_000,
+                    SearchNodeState::cut(),
+                )
+                .expect("multi-cut search must complete");
+            let counters = context.debug_counters();
+
+            assert_eq!(position.to_fen(), before);
+            assert!(counters.multi_cut_attempts > 0);
+            assert!(counters.multi_cut_probes >= MULTI_CUT_REQUIRED_CUTOFFS as u32);
+            assert!(counters.multi_cut_prunes > 0);
+            let observed = (score, context.nodes, counters);
+            if let Some(expected) = expected {
+                assert_eq!(observed, expected, "T1 Multi-Cut must be deterministic");
+            } else {
+                expected = Some(observed);
+            }
+        }
     }
 
     #[test]

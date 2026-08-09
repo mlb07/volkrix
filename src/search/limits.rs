@@ -16,6 +16,8 @@ pub(crate) struct SearchHeuristics {
     pub(crate) see_pruning: bool,
     pub(crate) history_pruning: bool,
     pub(crate) probcut: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) multi_cut: bool,
     pub(crate) qsearch_tt: bool,
     pub(crate) tt_static_eval: bool,
     pub(crate) history_maluses: bool,
@@ -47,6 +49,8 @@ impl SearchHeuristics {
             see_pruning: false,
             history_pruning: false,
             probcut: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            multi_cut: false,
             qsearch_tt: false,
             tt_static_eval: false,
             history_maluses: false,
@@ -77,6 +81,11 @@ impl SearchHeuristics {
             see_pruning: true,
             history_pruning: true,
             probcut: true,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            // Multi-Cut is implemented as a deliberately conservative experimental seam. Its
+            // probabilistic cutoff must earn promotion through paired SPRT before it may affect
+            // the evidence-backed default search.
+            multi_cut: false,
             qsearch_tt: true,
             tt_static_eval: true,
             history_maluses: true,
@@ -151,6 +160,12 @@ impl SearchHeuristics {
         self
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_multi_cut(mut self, enabled: bool) -> Self {
+        self.multi_cut = enabled;
+        self
+    }
+
     #[allow(dead_code)]
     pub(crate) const fn with_modern_search(mut self, enabled: bool) -> Self {
         self.capture_history = enabled;
@@ -179,6 +194,8 @@ pub struct SearchLimits {
     pub hash_mb: usize,
     pub(crate) node_limit: Option<u64>,
     pub(crate) heuristics: SearchHeuristics,
+    #[cfg(feature = "spsa-tuning")]
+    pub(crate) parameters: super::parameters::SearchParameters,
 }
 
 impl SearchLimits {
@@ -189,6 +206,8 @@ impl SearchLimits {
             hash_mb: super::tt::DEFAULT_HASH_MB,
             node_limit: None,
             heuristics: SearchHeuristics::phase9_default(),
+            #[cfg(feature = "spsa-tuning")]
+            parameters: super::parameters::SearchParameters::DEFAULT,
         }
     }
 
@@ -214,6 +233,15 @@ impl SearchLimits {
 
     pub(crate) const fn with_heuristics(mut self, heuristics: SearchHeuristics) -> Self {
         self.heuristics = heuristics;
+        self
+    }
+
+    #[cfg(feature = "spsa-tuning")]
+    pub(crate) const fn with_parameters(
+        mut self,
+        parameters: super::parameters::SearchParameters,
+    ) -> Self {
+        self.parameters = parameters;
         self
     }
 

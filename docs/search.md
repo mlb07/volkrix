@@ -48,7 +48,7 @@ The default search combines:
 - ProbCut on promising tactical candidates
 - internal iterative reduction when a deeper node has no TT move
 
-Two additional mechanisms remain experimental and default-off:
+Three additional mechanisms remain experimental and default-off:
 
 - correction history reconstructs pawn and per-color non-pawn structure keys
   only when explicitly enabled. It never changes the raw static evaluation stored
@@ -61,7 +61,25 @@ Two additional mechanisms remain experimental and default-off:
   non-tablebase score. Exclusion nodes cannot reuse or publish a TT result for
   the incomplete move set, probe tablebases, recursively exclude another move,
   or apply forward pruning. Only a verified fail-low extends the TT move by one
-  ply. Multi-cut behavior is deliberately not implemented.
+  ply.
+- Multi-Cut probes at most six ordered candidates three plies shallower at
+  guarded non-PV cut nodes. It requires three reduced fail-highs, non-pawn
+  material, an ordinary score window, a plausible static evaluation, and depth
+  7. Probe children suppress recursive Multi-Cut and null-move pruning. A cutoff
+  publishes only the reduced-depth bound. This remains a match-test seam because
+  Multi-Cut is probabilistic forward pruning; the original algorithm and its
+  tradeoffs are described in
+  [Björnsson and Marsland](https://staff.ru.is/yngvi/pdf/BjornssonM01a.pdf).
+  The entire seam, including its heuristic field, counters, branch, and probe
+  code, is compiled only for tests, debug builds, or `internal-testing`; normal
+  release and OpenBench binaries pay no per-node cost for the rejected idea.
+
+The isolated four-position depth-8 Multi-Cut profile was deterministic but did
+not provide a promotion signal: it expanded 564,278 nodes versus 553,304 for the
+default (+1.98%). Runtime was noisy and slightly lower in the median local run,
+which is insufficient evidence for a selective-search change. It therefore
+remains off pending a paired SPRT rather than contaminating the validated
+default.
 
 The initial four-position depth-9 release profile for singular extension reduced
 nodes from 3,447,998 to 1,194,220 and runtime from 4.58 s to 1.94 s, with 99
@@ -142,10 +160,15 @@ Helpers warm the TT and their completed nodes, TT hits, and seldepth are folded
 into the final statistics. A helper panic is contained and accounted for so the
 pool can recover instead of leaving an active-worker count stuck.
 
-Root sharding prevents every helper from beginning with the same root list, but
-this remains shared-TT Lazy SMP rather than split-point work stealing. OS
-scheduling can change which TT entries win races, so multithreaded runs are not a
-fixed-node reproducibility mode.
+With exactly two threads, the adaptive default uses a young-brothers-wait root
+split: the main thread searches the eldest move and releases disjoint sibling
+work only after establishing the iteration bound. Wider configurations retain
+shared-TT Lazy SMP. A local classical depth-6 A/B confirmed why: root split took
+86 ms versus 65 ms at three threads and 98 ms versus 71 ms at four; at fixed
+time it completed fewer aggregate depths at four threads (43 versus 46). The
+explicit root-split seam remains available for future tuning, but these results
+do not justify changing the wider default. OS scheduling can change which TT entries
+win races, so multithreaded runs are not a fixed-node reproducibility mode.
 
 ## Evaluation
 

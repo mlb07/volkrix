@@ -101,7 +101,9 @@ for FastChess, both binaries, the book, and both networks; records host, options
 SPRT bounds, and the exact shell-escaped command; and runs FastChess's UCI
 compliance checker. It uses `-repeat -games 2`, sequential openings, and the
 normalized pentanomial SPRT model. Pass `--dry-run` to inspect the frozen command
-without starting games.
+without starting games. FastChess checkpoints every completed pair, and the
+final `summary.json` classifies abnormal PGN termination tags instead of allowing
+crashes, stalls, time forfeits, or illegal moves to disappear into the score.
 
 The wrapper explicitly freezes and preflights `Threads`, `Hash`, `Move Overhead`,
 `SyzygyPath`, `SyzygyProbeLimit`, and `Syzygy50MoveRule` on both engines. Use
@@ -138,6 +140,12 @@ the `llvm-profdata` from the active Rust toolchain, then rebuilds with
 `-Cprofile-use` and missing-function warnings enabled. The final binary is
 smoke-tested again. `manifest.json` records the toolchain, evaluator checksum,
 profile checksum, build flags, workload, and output checksum.
+It also records the HEAD commit, Cargo lockfile checksum, binary Git-diff
+checksum, untracked path/content checksum, and a composite source-tree identity.
+Dirty builds compile `HEAD-dirty-<digest>` into the engine's source-provenance
+constant instead of recording the clean commit as the complete identity. The
+script verifies that this source identity is unchanged after both PGO stages
+and refuses provenance if another process modified the tree during the build.
 
 Do not distribute a `target-cpu=native` build to different hardware. If
 `--base-rustflags` contains CPU features, build and test a separate artifact for
@@ -153,25 +161,23 @@ inconclusive and the deterministic throughput improvement as hardware-specific.
 ## OpenBench
 
 [`openbench/Makefile`](../openbench/Makefile) satisfies the public-engine contract
-for `make EXE=Engine-ABCDEFGH`, and the default one-thread classical bench prints
-both a deterministic node count and NPS. Copy
-[`openbench/Volkrix.json.example`](../openbench/Volkrix.json.example) into an
-OpenBench server's `Engines/` directory, then:
+for `make EXE=Engine-ABCDEFGH`. When the worker supplies `EVALFILE`, the exact
+network is embedded into the single retained executable, with its SHA-256 and
+size exposed in the default UCI `EvalFile` label. Ordinary Cargo builds remain
+external-network builds. Copy [`openbench/Volkrix.json.example`](../openbench/Volkrix.json.example)
+into an OpenBench server's `Engines/` directory, then:
 
 1. replace `nps` with the value calibrated on that server's reference worker;
-2. upload the named, licensed opening book;
-3. provision stable Rust and Cargo on every eligible worker;
-4. verify the `main` base branch and workload sizes;
-5. run several identical benches before accepting the configuration.
+2. upload and select the checksum-verified production network;
+3. upload the named, licensed opening book;
+4. provision stable Rust and Cargo on every eligible worker;
+5. verify the `main` base branch and workload sizes;
+6. run several identical benches before accepting the configuration.
 
-The checked-in build rejects `EVALFILE` and the example distributes no network,
-so it is deliberately a classical-evaluation configuration. OpenBench's public
-network feature requires `EVALFILE=/path` builds to embed the network in the
-executable. Volkrix currently loads Stockfish-format networks as external runtime
-files and therefore must not claim public-worker NNUE readiness until an
-embedded-network build mode exists.
-NNUE changes should use the local FastChess workflow above or an OpenBench private
-deployment that deliberately distributes and configures the network artifact.
+The full deployment, isolated-binary smoke procedure, STC/LTC/regression policy,
+and resumable external calibration lab are documented in
+[`docs/openbench.md`](openbench.md). CI tests the embedded build contract on
+Linux, Windows, and macOS with a real Stockfish-format network.
 
 The OpenBench requirements and current engine-config schema are documented in
 the [official OpenBench repository](https://github.com/AndyGrant/OpenBench).

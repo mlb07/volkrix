@@ -578,11 +578,32 @@ impl NnueService {
         let file = File::open(path)
             .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
         let mut reader = BufReader::new(file);
-        let prefix = reader
+        let volk_format = reader
             .fill_buf()
-            .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?;
+            .map_err(|error| format!("failed to read EvalFile '{path}': {error}"))?
+            .starts_with(NNUE_MAGIC);
 
-        let backend = if prefix.starts_with(NNUE_MAGIC) {
+        Self::from_reader(path, &mut reader, volk_format)
+    }
+
+    #[cfg(volkrix_embedded_nnue)]
+    pub(crate) fn open_embedded_eval() -> Result<Arc<Self>, String> {
+        let bytes = include_bytes!(env!("VOLKRIX_EMBEDDED_NNUE"));
+        let label = format!(
+            "<embedded:{}:{}>",
+            env!("VOLKRIX_EMBEDDED_NNUE_SHA256"),
+            env!("VOLKRIX_EMBEDDED_NNUE_SIZE")
+        );
+        let mut reader = std::io::Cursor::new(bytes.as_slice());
+        Self::from_reader(&label, &mut reader, bytes.starts_with(NNUE_MAGIC))
+    }
+
+    fn from_reader(
+        path: &str,
+        reader: &mut impl Read,
+        volk_format: bool,
+    ) -> Result<Arc<Self>, String> {
+        let backend = if volk_format {
             let mut bytes = Vec::new();
             reader
                 .read_to_end(&mut bytes)
@@ -591,7 +612,7 @@ impl NnueService {
                 .map_err(|error| format!("failed to load EvalFile '{path}': {error}"))?;
             NnueBackend::Volk(Arc::new(network))
         } else {
-            NnueBackend::Stockfish(StockfishNnueService::from_reader(path, &mut reader)?)
+            NnueBackend::Stockfish(StockfishNnueService::from_reader(path, reader)?)
         };
         Ok(Arc::new(Self { backend }))
     }

@@ -45,6 +45,23 @@ def run(
     return result.stdout.strip() if capture and result.stdout else ""
 
 
+def run_bytes(command: list[str], *, cwd: pathlib.Path = ROOT) -> bytes:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        raise PgoFailure(
+            f"command failed with status {result.returncode}: {command}"
+            + (f"\n{detail}" if detail else "")
+        )
+    return result.stdout
+
+
 def rust_host() -> str:
     for line in run(["rustc", "-vV"], capture=True).splitlines():
         if line.startswith("host: "):
@@ -80,6 +97,57 @@ def sha256(path: pathlib.Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def source_provenance(root: pathlib.Path = ROOT) -> dict[str, object]:
+    """Return a binary-safe identity for the exact Git-visible source tree."""
+    head = run_bytes(["git", "rev-parse", "HEAD"], cwd=root).decode("ascii").strip()
+    tracked_diff = run_bytes(["git", "diff", "--binary", "HEAD", "--", "."], cwd=root)
+    untracked_output = run_bytes(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root
+    )
+    untracked_paths = sorted(path for path in untracked_output.split(b"\0") if path)
+
+    untracked_digest = hashlib.sha256()
+    untracked_digest.update(b"volkrix-untracked-v1\0")
+    for raw_path in untracked_paths:
+        path = root / os.fsdecode(raw_path)
+        if path.is_symlink():
+            kind = b"symlink"
+            content = os.fsencode(os.readlink(path))
+        elif path.is_file():
+            kind = b"file"
+            content = path.read_bytes()
+        else:
+            raise PgoFailure(f"untracked source path is not a file or symlink: {path}")
+        for field in (raw_path, kind, content):
+            untracked_digest.update(len(field).to_bytes(8, "big"))
+            untracked_digest.update(field)
+
+    tracked_diff_sha = hashlib.sha256(tracked_diff).hexdigest()
+    untracked_sha = untracked_digest.hexdigest()
+    source_digest = hashlib.sha256()
+    source_digest.update(b"volkrix-source-tree-v1\0")
+    source_digest.update(head.encode("ascii"))
+    source_digest.update(bytes.fromhex(tracked_diff_sha))
+    source_digest.update(bytes.fromhex(untracked_sha))
+    source_tree_sha = source_digest.hexdigest()
+    dirty = bool(tracked_diff or untracked_paths)
+    source_id = head if not dirty else f"{head}-dirty-{source_tree_sha[:12]}"
+
+    cargo_lock = root / "Cargo.lock"
+    if not cargo_lock.is_file():
+        raise PgoFailure(f"Cargo.lock is missing: {cargo_lock}")
+    return {
+        "source_commit": head,
+        "source_dirty": dirty,
+        "source_id": source_id,
+        "source_tree_sha256": source_tree_sha,
+        "tracked_diff_sha256": tracked_diff_sha,
+        "untracked_sha256": untracked_sha,
+        "untracked_paths": [os.fsdecode(path) for path in untracked_paths],
+        "cargo_lock_sha256": sha256(cargo_lock),
+    }
 
 
 def binary_path(target_dir: pathlib.Path) -> pathlib.Path:
@@ -131,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
                 "so the build is recorded"
             )
         evaluator, evaluator_sha = evaluator_argument(args.evalfile)
+        source = source_provenance()
         output = pathlib.Path(args.output).expanduser().resolve()
         work_dir = pathlib.Path(args.work_dir).expanduser().resolve()
         if output.exists() or output.is_symlink():
@@ -153,6 +222,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "CARGO_TARGET_DIR": str(generate_target),
                 "CARGO_ENCODED_RUSTFLAGS": "\x1f".join(generate_flags),
+                "VOLKRIX_SOURCE_ID": str(source["source_id"]),
             }
         )
         build_command = [
@@ -221,6 +291,7 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "CARGO_TARGET_DIR": str(use_target),
                 "CARGO_ENCODED_RUSTFLAGS": "\x1f".join(use_flags),
+                "VOLKRIX_SOURCE_ID": str(source["source_id"]),
             }
         )
         run(build_command, env=use_env)
@@ -242,12 +313,15 @@ def main(argv: list[str] | None = None) -> int:
                 str(transcript),
             ]
         )
+        if source_provenance() != source:
+            raise PgoFailure("source tree changed during the PGO build; refusing provenance")
         manifest = {
             "schema": "volkrix-pgo-build-v1",
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "platform": platform.platform(),
             "rustc": run(["rustc", "-vV"], capture=True),
             "llvm_profdata": str(llvm_profdata),
+            **source,
             "base_rustflags": base_flags,
             "evaluator": evaluator,
             "evaluator_sha256": evaluator_sha,

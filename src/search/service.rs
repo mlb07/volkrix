@@ -1,6 +1,6 @@
 use std::{
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
-    path::{Path, PathBuf},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -9,6 +9,9 @@ use std::{
     thread::{self, JoinHandle},
     time::Instant,
 };
+
+#[cfg(not(volkrix_embedded_nnue))]
+use std::path::PathBuf;
 
 use crate::core::{Move, MoveList, Position};
 
@@ -25,6 +28,7 @@ use super::{
 
 pub(crate) const DEFAULT_THREADS: usize = 1;
 pub(crate) const MAX_THREADS: usize = 64;
+#[cfg(not(volkrix_embedded_nnue))]
 pub(crate) const STOCKFISH_18_NETWORK_FILE: &str = "nn-c288c895ea92.nnue";
 pub const DEFAULT_DUAL_EVAL_THRESHOLD: i32 = 200;
 pub const MAX_DUAL_EVAL_THRESHOLD: i32 = 2_000;
@@ -336,23 +340,43 @@ impl UciSearchService {
             workers: WorkerPool::new(),
         };
 
-        if let Some(candidate) = default_eval_candidate(environment_path, executable_path) {
-            let display_path = candidate.path.to_string_lossy().into_owned();
-            match NnueService::open_eval_file(&display_path) {
-                Ok(nnue) => {
-                    service.eval_file = display_path;
-                    service.nnue = Some(nnue);
-                }
-                Err(error) => {
-                    service.eval_discovery_diagnostic = Some(format!(
-                        "automatic EvalFile '{}' was ignored; using classical evaluation: {error}",
-                        candidate.path.display()
-                    ));
-                }
-            }
+        #[cfg(volkrix_embedded_nnue)]
+        {
+            // OpenBench retains only the built executable. Its compiled network
+            // is therefore authoritative at startup: ambient host state must
+            // never replace it or turn a bad external path into classical play.
+            let _ = (environment_path, executable_path);
+            let label = format!(
+                "<embedded:{}:{}>",
+                env!("VOLKRIX_EMBEDDED_NNUE_SHA256"),
+                env!("VOLKRIX_EMBEDDED_NNUE_SIZE")
+            );
+            let nnue = NnueService::open_embedded_eval()
+                .expect("build-validated embedded EvalFile must load at startup");
+            service.eval_file = label;
+            service.nnue = Some(nnue);
+            service
         }
 
-        service
+        #[cfg(not(volkrix_embedded_nnue))]
+        {
+            if let Some(candidate) = default_eval_candidate(environment_path, executable_path) {
+                let display_path = candidate.path.to_string_lossy().into_owned();
+                match NnueService::open_eval_file(&display_path) {
+                    Ok(nnue) => {
+                        service.eval_file = display_path;
+                        service.nnue = Some(nnue);
+                    }
+                    Err(error) => {
+                        service.eval_discovery_diagnostic = Some(format!(
+                            "automatic EvalFile '{}' was ignored; using classical evaluation: {error}",
+                            candidate.path.display()
+                        ));
+                    }
+                }
+            }
+            service
+        }
     }
 
     pub(crate) fn hash_mb(&self) -> usize {
@@ -773,10 +797,12 @@ impl UciSearchService {
     }
 }
 
+#[cfg(not(volkrix_embedded_nnue))]
 struct DefaultEvalCandidate {
     path: PathBuf,
 }
 
+#[cfg(not(volkrix_embedded_nnue))]
 fn default_eval_candidate(
     environment_path: Option<&str>,
     executable_path: Option<&Path>,
@@ -993,6 +1019,42 @@ mod tests {
                 .expect("tiny test eval file path must be UTF-8"),
         )
         .expect("tiny deterministic NNUE test net must load")
+    }
+
+    #[cfg(volkrix_embedded_nnue)]
+    #[test]
+    fn embedded_startup_ignores_environment_evalfile_even_when_invalid() {
+        let service = UciSearchService::new_with_eval_discovery(
+            Some("/definitely/missing/ambient-network.nnue"),
+            None,
+        );
+        assert!(service.debug_nnue_is_enabled());
+        assert!(service.debug_nnue_path().starts_with("<embedded:"));
+        assert!(service.eval_discovery_diagnostic().is_none());
+    }
+
+    #[cfg(volkrix_embedded_nnue)]
+    #[test]
+    fn embedded_startup_ignores_sibling_but_explicit_setoption_path_can_replace_it() {
+        let directory = std::env::temp_dir().join(format!(
+            "volkrix-embedded-precedence-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).expect("test directory must create");
+        let sibling = directory.join("nn-c288c895ea92.nnue");
+        std::fs::write(&sibling, b"corrupt ambient sibling").expect("sibling fixture must write");
+
+        let mut service =
+            UciSearchService::new_with_eval_discovery(None, Some(&directory.join("volkrix")));
+        assert!(service.debug_nnue_path().starts_with("<embedded:"));
+        let replacement = tiny_test_evalfile_path();
+        service
+            .set_eval_file(replacement.to_str().expect("test path must be UTF-8"))
+            .expect("explicit UCI evaluator replacement must remain supported");
+        assert_eq!(service.debug_nnue_path(), replacement.to_string_lossy());
+
+        std::fs::remove_file(sibling).expect("sibling fixture must remove");
+        std::fs::remove_dir(directory).expect("test directory must remove");
     }
 
     #[test]

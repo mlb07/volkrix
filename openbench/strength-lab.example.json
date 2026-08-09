@@ -1,0 +1,62 @@
+{
+  "schema": "volkrix-strength-lab-v1",
+  "preflight_timeout_seconds": 30,
+  "fastchess": {
+    "path": "/absolute/path/to/fastchess",
+    "sha256": "REPLACE_WITH_FASTCHESS_SHA256"
+  },
+  "candidate": {
+    "name": "Volkrix",
+    "path": "/absolute/path/to/volkrix",
+    "sha256": "REPLACE_WITH_VOLKRIX_SHA256",
+    "options": {
+      "EvalFile": "/absolute/path/to/nn-c288c895ea92.nnue",
+      "Move Overhead": 10,
+      "SyzygyPath": ""
+    }
+  },
+  "openings": {
+    "path": "/absolute/path/to/UHO_Lichess_4852_v1.epd",
+    "sha256": "REPLACE_WITH_BOOK_SHA256",
+    "format": "epd",
+    "start": 1
+  },
+  "assets": [
+    {
+      "name": "volkrix-big-nnue",
+      "path": "/absolute/path/to/nn-c288c895ea92.nnue",
+      "sha256": "c288c895ea924429ea9092e3f36b2b3c1f00f2a3a4c759ff7e57e79e3b43e4a7"
+    }
+  ],
+  "profiles": [
+    {
+      "name": "STC",
+      "tc": "10+0.1",
+      "pairs": 2000,
+      "concurrency": 4,
+      "time_margin_ms": 1000,
+      "options": {"Threads": 1, "Hash": 64}
+    },
+    {
+      "name": "LTC",
+      "tc": "60+0.6",
+      "pairs": 500,
+      "concurrency": 2,
+      "time_margin_ms": 1000,
+      "options": {"Threads": 1, "Hash": 128}
+    }
+  ],
+  "opponents": [
+    {
+      "name": "OpponentA",
+      "path": "/absolute/path/to/opponent-a",
+      "sha256": "REPLACE_WITH_OPPONENT_SHA256",
+      "rating": 3000,
+      "options": {}
+    }
+  ],
+  "adjudication": {
+    "resign": "movecount=3 score=400",
+    "draw": "movenumber=40 movecount=8 score=10"
+  }
+}

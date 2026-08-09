@@ -17,6 +17,7 @@ APPROVED_LICENSES = {
     "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
     "BSD-2-Clause OR Apache-2.0 OR MIT",
     "MIT",
+    "MIT/Apache-2.0",
     "MIT OR Apache-2.0",
     "Unlicense OR MIT",
     "(MIT OR Apache-2.0) AND Unicode-3.0",
