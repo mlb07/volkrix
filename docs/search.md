@@ -48,7 +48,29 @@ The default search combines:
 - ProbCut on promising tactical candidates
 - internal iterative reduction when a deeper node has no TT move
 
-Three additional mechanisms remain experimental and default-off:
+Four additional mechanisms remain experimental and default-off:
+
+- razoring performs a guarded quiescence verification when a shallow non-PV
+  node's static evaluation is far below alpha. The experiment uses Stockfish
+  18's conservative quadratic margin (`485 + 281 * depth^2`) at depth four or
+  less, but returns early only when quiescence confirms a fail-low. Checks,
+  exclusion searches, PV nodes, and mate-score windows bypass it. Stockfish 18
+  [uses the same fail-low idea and margin](https://github.com/official-stockfish/Stockfish/blob/cb3d4ee9b47d0c5aae855b12379378ea1439675c/src/search.cpp#L870-L874),
+  while Berserk 14 independently
+  [uses quiescence-verified razoring](https://github.com/jhonnold/berserk/blob/8ae895a6151695be4a50d4fb65b0c131659c513a/src/search.c#L524-L529).
+  Volkrix's field, counters, branch, constants, and helpers are compiled only
+  for tests, debug builds, or `internal-testing`, so the production default has
+  no hot-path branch. On the frozen SF18 big network, the four-position depth-8
+  profile fell from 478,607 to 436,626 nodes (-8.77%); all four best moves and
+  scores were unchanged. The resulting held-out, color-reversed 1,000-game STC
+  match nevertheless scored 377 wins, 186 draws, and 437 losses (47.00%,
+  -20.87 Elo, pair-aware 95% CI [-37.50, -4.33], pentanomial
+  `[65, 85, 242, 61, 47]`) with zero abnormal terminations. The predeclared
+  promotion rule therefore rejected razoring, demonstrating why a fixed-depth
+  node reduction is not sufficient strength evidence. An
+  `internal-testing` build advertises the default-false UCI option
+  `ExperimentalRazoring`; changing it clears the TT so both sides of a paired
+  test can safely use the exact same executable.
 
 - correction history reconstructs pawn and per-color non-pawn structure keys
   only when explicitly enabled. It never changes the raw static evaluation stored

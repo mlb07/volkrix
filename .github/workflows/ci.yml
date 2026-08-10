@@ -28,6 +28,7 @@ jobs:
           python scripts/test_uci_smoke.py
           python scripts/test_third_party_audit.py
           python scripts/test_build_pgo.py
+          python scripts/test_openbench_deploy.py
           python scripts/test_strength_lab.py
           python scripts/test_local_spsa.py
       - name: third-party license and provenance audit

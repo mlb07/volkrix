@@ -4,9 +4,9 @@ use volkrix::core::Position;
 use volkrix::search::{
     BenchConfig, SearchLimits,
     internal::{
-        HeuristicProfile, SmpProfile, run_profile_bench, run_smp_profile_bench,
-        run_smp_timed_profile_bench, run_threaded_profile_bench, run_threaded_timed_profile_bench,
-        run_threaded_tiny_nnue_bench,
+        HeuristicProfile, SmpProfile, run_profile_bench, run_profile_bench_with_eval_file,
+        run_profile_position_with_eval_file, run_smp_profile_bench, run_smp_timed_profile_bench,
+        run_threaded_profile_bench, run_threaded_timed_profile_bench, run_threaded_tiny_nnue_bench,
     },
     run_bench, search,
 };
@@ -155,6 +155,67 @@ fn multi_cut_ab_profile_report() {
             result.elapsed_ms,
             result.nps(),
         );
+    }
+}
+
+#[test]
+#[ignore = "manual isolated razoring A/B profile; strength still requires paired SPRT"]
+fn razoring_ab_profile_report() {
+    for profile in [
+        HeuristicProfile::Phase9Default,
+        HeuristicProfile::RazoringEnabled,
+    ] {
+        let result = run_profile_bench(9, profile);
+        println!(
+            "razoring_ab profile {profile:?} nodes {} checksum {:016x} time_ms {} nps {}",
+            result.total_nodes,
+            result.checksum,
+            result.elapsed_ms,
+            result.nps(),
+        );
+    }
+}
+
+#[test]
+#[ignore = "manual NNUE razoring A/B profile; set VOLKRIX_PROFILE_EVALFILE"]
+fn razoring_nnue_ab_profile_report() {
+    let eval_file = std::env::var("VOLKRIX_PROFILE_EVALFILE")
+        .expect("VOLKRIX_PROFILE_EVALFILE must identify the frozen NNUE under test");
+    for profile in [
+        HeuristicProfile::Phase9Default,
+        HeuristicProfile::RazoringEnabled,
+    ] {
+        let result = run_profile_bench_with_eval_file(8, profile, &eval_file);
+        println!(
+            "razoring_nnue_ab profile {profile:?} nodes {} checksum {:016x} time_ms {} nps {} evaluator {}",
+            result.total_nodes,
+            result.checksum,
+            result.elapsed_ms,
+            result.nps(),
+            result.evaluator,
+        );
+    }
+
+    let fens = [
+        volkrix::core::STARTPOS_FEN,
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3",
+        "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+    ];
+    for (index, fen) in fens.iter().enumerate() {
+        for profile in [
+            HeuristicProfile::Phase9Default,
+            HeuristicProfile::RazoringEnabled,
+        ] {
+            let result = run_profile_position_with_eval_file(fen, 8, profile, &eval_file);
+            println!(
+                "razoring_nnue_position {} profile {profile:?} bestmove {:?} score {} nodes {}",
+                index + 1,
+                result.best_move,
+                result.score.0,
+                result.nodes,
+            );
+        }
     }
 }
 

@@ -58,6 +58,12 @@ const MULTI_CUT_MOVE_LIMIT: usize = 6;
 const MULTI_CUT_REQUIRED_CUTOFFS: usize = 3;
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
 const MULTI_CUT_REDUCTION: usize = 3;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const RAZOR_MARGIN_BASE: i32 = 485;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const RAZOR_MARGIN_DEPTH_SQUARED: i32 = 281;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const RAZOR_MAX_DEPTH: usize = 4;
 
 type ContinuationHistory = [[[[[i16; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
 type CaptureHistory = [[[[i16; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
@@ -486,6 +492,10 @@ struct SearchDebugCounters {
     internal_iterative_reductions: u32,
     probcut_attempts: u32,
     probcut_prunes: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    razor_attempts: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    razor_prunes: u32,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     multi_cut_attempts: u32,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
@@ -1288,6 +1298,33 @@ impl<'a> SearchContext<'a> {
         }
         let pv_move_hint = validated_move_hint(&legal_moves, pv_move_hint);
         let tt_move_hint = validated_tt_move_hint(&legal_moves, tt_move_hint);
+
+        // Razoring is a deliberately isolated fail-low experiment. If the static evaluation is
+        // far below alpha at a shallow non-PV node, quiescence can cheaply prove that ordinary
+        // moves cannot raise the bound. Terminal detection remains above this branch, while
+        // checks, exclusion searches, and mate-score windows always take the full search path.
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if !is_exclusion
+            && razoring_is_eligible(
+                self.heuristics,
+                node_state,
+                depth,
+                alpha,
+                beta,
+                static_eval,
+                in_check,
+            )
+        {
+            self.debug_counters.razor_attempts =
+                self.debug_counters.razor_attempts.saturating_add(1);
+            let score = qsearch::qsearch_from_main::<USE_NNUE>(self, position, ply, alpha, beta)?;
+            if score <= alpha {
+                self.debug_counters.razor_prunes =
+                    self.debug_counters.razor_prunes.saturating_add(1);
+                return Some(score);
+            }
+            self.clear_pv(ply);
+        }
 
         let singular_move = if let Some(probe) = singular_probe(
             self.heuristics,
@@ -2387,6 +2424,31 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
         && candidate.quiets_searched > 2
 }
 
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn razoring_is_eligible(
+    heuristics: SearchHeuristics,
+    node_state: SearchNodeState,
+    depth: usize,
+    alpha: i32,
+    beta: i32,
+    static_eval: i32,
+    in_check: bool,
+) -> bool {
+    heuristics.razoring
+        && !node_state.is_pv
+        && !in_check
+        && depth <= RAZOR_MAX_DEPTH
+        && alpha > -MATE_THRESHOLD
+        && beta < MATE_THRESHOLD
+        && static_eval < alpha.saturating_sub(razoring_margin(depth))
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn razoring_margin(depth: usize) -> i32 {
+    let depth = depth.min(RAZOR_MAX_DEPTH) as i32;
+    RAZOR_MARGIN_BASE + RAZOR_MARGIN_DEPTH_SQUARED * depth * depth
+}
+
 fn singular_probe(
     heuristics: SearchHeuristics,
     excluded_move: Option<Move>,
@@ -2989,8 +3051,9 @@ mod tests {
         correction_history_update_is_eligible, futility_pruning_is_eligible,
         late_move_pruning_is_eligible, lmr_is_eligible, lmr_reduction, lmr_requires_full_research,
         mate_distance_bounds, multi_cut_is_eligible, null_move_is_eligible, null_move_reduction,
-        null_move_requires_verification, reverse_futility_is_eligible, singular_probe,
-        tt_cutoff_score, update_history_entry, validated_tt_move_hint,
+        null_move_requires_verification, razoring_is_eligible, razoring_margin,
+        reverse_futility_is_eligible, singular_probe, tt_cutoff_score, update_history_entry,
+        validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -4081,6 +4144,97 @@ mod tests {
             let observed = (score, context.nodes, counters);
             if let Some(expected) = expected {
                 assert_eq!(observed, expected, "T1 Multi-Cut must be deterministic");
+            } else {
+                expected = Some(observed);
+            }
+        }
+    }
+
+    #[test]
+    fn razoring_guards_pv_check_depth_and_mate_windows() {
+        let heuristics = SearchHeuristics::phase8_baseline().with_razoring(true);
+        let alpha = 1_000;
+        let static_eval = alpha - razoring_margin(3) - 1;
+
+        assert!(razoring_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            alpha,
+            alpha + 20,
+            static_eval,
+            false,
+        ));
+        assert!(!razoring_is_eligible(
+            heuristics,
+            SearchNodeState::new(true),
+            3,
+            alpha,
+            alpha + 20,
+            static_eval,
+            false,
+        ));
+        assert!(!razoring_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            alpha,
+            alpha + 20,
+            static_eval,
+            true,
+        ));
+        assert!(!razoring_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            5,
+            alpha,
+            alpha + 20,
+            i32::MIN,
+            false,
+        ));
+        assert!(!razoring_is_eligible(
+            heuristics,
+            SearchNodeState::new(false),
+            3,
+            -super::MATE_THRESHOLD,
+            -super::MATE_THRESHOLD + 1,
+            i32::MIN,
+            false,
+        ));
+    }
+
+    #[test]
+    fn razoring_fail_low_is_deterministic_and_restores_position() {
+        let heuristics = SearchHeuristics::phase8_baseline().with_razoring(true);
+        let mut expected = None;
+
+        for _ in 0..2 {
+            let mut position = Position::startpos();
+            let before = position.to_fen();
+            let mut context = SearchContext::new(
+                SearchLimits::new(4)
+                    .without_tt()
+                    .with_heuristics(heuristics),
+            );
+            let score = context
+                .alpha_beta(
+                    &mut position,
+                    3,
+                    1,
+                    4_000,
+                    4_001,
+                    SearchNodeState::new(false),
+                )
+                .expect("razoring search must complete");
+            let counters = context.debug_counters();
+
+            assert_eq!(position.to_fen(), before);
+            assert!(score <= 4_000);
+            assert_eq!(counters.razor_attempts, 1);
+            assert_eq!(counters.razor_prunes, 1);
+            let observed = (score, context.nodes, counters);
+            if let Some(expected) = expected {
+                assert_eq!(observed, expected, "T1 razoring must be deterministic");
             } else {
                 expected = Some(observed);
             }

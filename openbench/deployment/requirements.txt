@@ -1,0 +1,3 @@
+# Additions to the pinned upstream requirements.txt for a production server.
+gunicorn==26.0.0
+mysqlclient==2.2.8

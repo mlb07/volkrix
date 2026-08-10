@@ -17,6 +17,8 @@ pub(crate) struct SearchHeuristics {
     pub(crate) history_pruning: bool,
     pub(crate) probcut: bool,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) razoring: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) multi_cut: bool,
     pub(crate) qsearch_tt: bool,
     pub(crate) tt_static_eval: bool,
@@ -50,6 +52,8 @@ impl SearchHeuristics {
             history_pruning: false,
             probcut: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            razoring: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             multi_cut: false,
             qsearch_tt: false,
             tt_static_eval: false,
@@ -81,6 +85,10 @@ impl SearchHeuristics {
             see_pruning: true,
             history_pruning: true,
             probcut: true,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            // Razoring is a speculative fail-low shortcut. A held-out 1,000-game paired test
+            // rejected it at 47.00%, so keep the experiment compiled out of production.
+            razoring: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             // Multi-Cut is implemented as a deliberately conservative experimental seam. Its
             // probabilistic cutoff must earn promotion through paired SPRT before it may affect
@@ -157,6 +165,12 @@ impl SearchHeuristics {
     )]
     pub(crate) const fn with_singular_extensions(mut self, enabled: bool) -> Self {
         self.singular_extensions = enabled;
+        self
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_razoring(mut self, enabled: bool) -> Self {
+        self.razoring = enabled;
         self
     }
 

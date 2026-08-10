@@ -161,6 +161,11 @@ def scalar_options(value: Any, label: str) -> dict[str, str]:
         text = str(option_value).lower() if isinstance(option_value, bool) else str(option_value)
         if "\n" in text or "\r" in text:
             raise LabError(f"{label}.{key} contains a newline")
+        if text == "" and key != "SyzygyPath":
+            raise LabError(
+                f"{label}.{key} cannot be empty; FastChess cannot transmit an empty "
+                "option value (only the verified default-empty SyzygyPath is supported)"
+            )
         result[key] = text
     return result
 
@@ -347,6 +352,16 @@ def engine_arguments(engine: dict[str, Any], profile: dict[str, Any], role: str)
         f"dir={pathlib.Path(engine['path']).parent}",
     ]
     for name, value in sorted(options.items()):
+        # FastChess parses each engine token as a non-empty key=value pair and rejects
+        # option.SyzygyPath=. Configuration validation permits only this known
+        # default-empty option, so omitting it preserves the preflighted state.
+        if value == "":
+            if name != "SyzygyPath":
+                raise LabError(
+                    f"cannot transmit empty FastChess option {name!r}; only the verified "
+                    "default-empty SyzygyPath is supported"
+                )
+            continue
         args.append(f"option.{name}={value}")
     # Role is recorded in the manifest even though FastChess does not need it.
     assert role in {"candidate", "opponent"}
@@ -427,6 +442,22 @@ def uci_preflight(
             process.stdin.write("\n".join(lines) + "\n")
             process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
+            # A process may emit a decisive diagnostic and exit between the preceding
+            # protocol response and this write. Give the reader threads a bounded chance
+            # to drain that evidence so scheduling does not turn the same failure into a
+            # nondeterministic generic broken-pipe report.
+            drain_timeout = min(remaining(), 0.25)
+            if stdout_thread is not None:
+                stdout_thread.join(timeout=drain_timeout)
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=drain_timeout)
+            diagnostic = "".join(stdout_lines) + "\n" + "".join(stderr_lines)
+            match = UCI_ERROR_RE.search(diagnostic)
+            if match:
+                raise LabError(
+                    f"UCI preflight for {engine['name']} reported an option/error "
+                    f"diagnostic: {match.group(0).strip()}"
+                ) from error
             raise LabError(f"UCI preflight pipe failed for {engine['name']}: {error}") from error
 
     def wait_for(label: str, predicate: Any) -> None:

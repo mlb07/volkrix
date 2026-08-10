@@ -140,6 +140,42 @@ for command in sys.stdin:
             with self.assertRaisesRegex(lab.LabError, "preflight evidence changed"):
                 lab.verify_lab(output)
 
+    def test_empty_option_is_preflighted_but_omitted_from_fastchess_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "lab"
+            config_path = self.config(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["candidate"]["options"]["SyzygyPath"] = ""
+            config["opponents"][0]["options"]["SyzygyPath"] = ""
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            lab.prepare(config_path, output)
+            manifest = lab.load_lab(output)
+            job, _ = lab.verify_job(output, manifest["jobs"][0])
+            self.assertNotIn("option.SyzygyPath=", job["command"])
+            self.assertEqual(
+                [record["options"]["SyzygyPath"] for record in manifest["preflights"]],
+                ["", ""],
+            )
+            self.assertTrue(
+                all(
+                    "setoption name SyzygyPath value \n" in record["stdin"]
+                    for record in manifest["preflights"]
+                )
+            )
+
+    def test_arbitrary_empty_option_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            config_path = self.config(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["candidate"]["options"]["EvalFile"] = ""
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            with self.assertRaisesRegex(lab.LabError, "only the verified default-empty SyzygyPath"):
+                lab.prepare(config_path, root / "lab")
+
     def test_prepare_rejects_engine_that_reports_option_error(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)

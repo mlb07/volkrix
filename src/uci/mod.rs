@@ -25,6 +25,9 @@ use crate::{
     },
 };
 
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+use crate::search::limits::SearchHeuristics;
+
 #[cfg(feature = "spsa-tuning")]
 use crate::search::parameters::{
     PARAMETER_SPECS, SearchParameters, manifest_lines, parameter_spec,
@@ -73,6 +76,8 @@ enum SetOptionCommand {
     SmallEvalFile,
     DualEvalPolicy(DualEvalPolicy),
     DualEvalThreshold(i32),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalRazoring(bool),
     #[cfg(feature = "spsa-tuning")]
     TuneParameter(&'static str, i32),
     #[cfg(feature = "spsa-tuning")]
@@ -91,6 +96,8 @@ pub struct UciEngine {
     search_service: UciSearchService,
     move_overhead_ms: u64,
     ponder_enabled: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_razoring: bool,
     #[cfg(feature = "spsa-tuning")]
     search_parameters: SearchParameters,
 }
@@ -102,6 +109,8 @@ impl UciEngine {
             search_service: UciSearchService::new(),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             ponder_enabled: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_razoring: false,
             #[cfg(feature = "spsa-tuning")]
             search_parameters: SearchParameters::DEFAULT,
         }
@@ -121,6 +130,8 @@ impl UciEngine {
             ),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             ponder_enabled: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_razoring: false,
             #[cfg(feature = "spsa-tuning")]
             search_parameters: SearchParameters::DEFAULT,
         }
@@ -322,6 +333,10 @@ impl UciEngine {
                         }));
                         lines.push("option name TuneManifest type button".to_owned());
                     }
+                    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                    lines.push(
+                        "option name ExperimentalRazoring type check default false".to_owned(),
+                    );
                     if let Some(diagnostic) = self.search_service.eval_discovery_diagnostic() {
                         lines.push(format!(
                             "info string warning: {}",
@@ -516,6 +531,12 @@ impl UciEngine {
                     Err(error) => vec![format!("info string error: {error}")],
                 }
             }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalRazoring(enabled)) => {
+                self.experimental_razoring = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
             #[cfg(feature = "spsa-tuning")]
             Ok(SetOptionCommand::TuneParameter(name, value)) => {
                 match self.search_parameters.set(name, value) {
@@ -702,6 +723,10 @@ impl UciEngine {
 
     fn search_limits(&self, depth: u8) -> SearchLimits {
         let limits = SearchLimits::new(depth);
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let limits = limits.with_heuristics(
+            SearchHeuristics::phase9_default().with_razoring(self.experimental_razoring),
+        );
         #[cfg(feature = "spsa-tuning")]
         let limits = limits.with_parameters(self.search_parameters);
         limits
@@ -1157,6 +1182,26 @@ fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, Stri
             }
             Ok(SetOptionCommand::DualEvalThreshold(threshold))
         }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalRazoring" => {
+            let Some(value_index) = value_index else {
+                return Err(
+                    "setoption name ExperimentalRazoring requires 'value <true|false>'".to_owned(),
+                );
+            };
+            if value_index + 2 != tokens.len() {
+                return Err(
+                    "setoption name ExperimentalRazoring requires exactly one value".to_owned(),
+                );
+            }
+            match tokens[value_index + 1] {
+                "true" => Ok(SetOptionCommand::ExperimentalRazoring(true)),
+                "false" => Ok(SetOptionCommand::ExperimentalRazoring(false)),
+                value => Err(format!(
+                    "invalid setoption name ExperimentalRazoring value '{value}'; expected true or false"
+                )),
+            }
+        }
         #[cfg(feature = "spsa-tuning")]
         "TuneManifest" => {
             if value_index.is_some() {
@@ -1428,6 +1473,33 @@ pub fn run_stdio() -> io::Result<()> {
 mod tests {
     use super::*;
     use crate::search::nnue::tiny_test_evalfile_path;
+
+    #[test]
+    fn internal_razoring_option_is_explicit_default_off_and_clears_hash() {
+        let mut engine = UciEngine::new();
+        assert!(!engine.search_limits(4).heuristics.razoring);
+        assert!(
+            engine
+                .handle_line("uci")
+                .lines
+                .contains(&"option name ExperimentalRazoring type check default false".to_owned())
+        );
+
+        // Seed the table so the option transition also proves A/B runs cannot inherit bounds
+        // produced by the other search profile.
+        let _ = engine.handle_line("position startpos");
+        let _ = engine.handle_line("go depth 2");
+        assert!(engine.search_service.debug_tt_entry_count() > 0);
+
+        let response = engine.handle_line("setoption name ExperimentalRazoring value true");
+        assert!(response.lines.is_empty());
+        assert!(engine.search_limits(4).heuristics.razoring);
+        assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+
+        let rejected = engine.handle_line("setoption name ExperimentalRazoring value maybe");
+        assert_eq!(rejected.lines.len(), 1);
+        assert!(rejected.lines[0].contains("expected true or false"));
+    }
     use crate::search::tablebase::{MockTablebaseBackend, TablebaseService, WdlOutcome};
     use std::{sync::mpsc, thread, time::Duration};
 

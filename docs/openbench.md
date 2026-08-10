@@ -47,6 +47,54 @@ workers should use the verified large Stockfish 18 SFNNv10 network.
 
 ## Server deployment checklist
 
+The deployment contract was last audited on 2026-08-09 against official
+OpenBench commit `9906bad18e044c4b455539317b8cf037393a7218` (configuration
+schema v17, client 49) and the configured FastChess fork commit
+`90babe434bbfee23a6287f42d791f07b206fc82b` (1.8.1). The immutable record is
+[`openbench/upstream-lock.json`](../openbench/upstream-lock.json). OpenBench does
+not currently ship an official Docker or Compose deployment; its maintained
+instructions use native Python/Django, Gunicorn, Nginx, and MySQL. Pinning is
+essential because the server controls which client source workers download.
+Upstream currently pins Django 4.2.1 even though the 4.2 series lost security
+support on 2026-04-07. Generated Volkrix instances replace that unsafe pin with
+the audited Django 5.2 LTS patch recorded in the lock and replace the two exact
+uses of the removed `django.utils.timezone.utc` API with `timezone.now()`. The
+deployment manifest records and hashes those compatibility edits. It also keeps
+the PGN watcher out of database management commands and delays its first query
+until Django finishes application initialization. Local validation covers
+migrations, configuration loading, static collection, and live HTTP endpoints
+on that supported series. The audited top-level Requests, SciPy, Gunicorn, and
+mysqlclient versions are pinned as well; update them only with a fresh server
+smoke and lock revision.
+
+Audit the local machine, exact upstream checkouts, and production network before
+preparing an instance:
+
+```bash
+python3 scripts/openbench_deploy.py audit \
+  --openbench-root /absolute/path/to/pinned/OpenBench \
+  --fastchess-root /absolute/path/to/pinned/fastchess \
+  --network /absolute/path/to/nn-c288c895ea92.nnue
+```
+
+After the finalized embedded binary has been benchmarked in at least five sets
+on the designated reference worker, create a new, credential-free server tree:
+
+```bash
+python3 /absolute/path/to/volkrix/scripts/openbench_deploy.py prepare \
+  --openbench-root /absolute/path/to/pinned/OpenBench \
+  --output /absolute/path/to/new-volkrix-openbench \
+  --nps REPLACE_WITH_REFERENCE_NPS
+```
+
+Preparation refuses a modified or unpinned OpenBench checkout, unpinned client
+or FastChess refs, an unsafe book name, a pre-existing output, or a Volkrix
+configuration rejected by the exact official schema. It restricts the instance
+to Volkrix and the selected book, enables private viewing/manual registration,
+adds environment-only production settings, and records hashes in
+`VOLKRIX-DEPLOYMENT.json`. Follow the generated `DEPLOYMENT.md` for isolated
+SQLite smoke testing and production MySQL/Gunicorn/Nginx deployment.
+
 1. Deploy a pinned OpenBench server revision and record it.
 2. Copy `openbench/Volkrix.json.example` to `Engines/Volkrix.json`.
 3. Upload `nn-c288c895ea92.nnue` through the network administration page and
@@ -61,6 +109,16 @@ workers should use the verified large Stockfish 18 SFNNv10 network.
    zero crashes, stalls, time forfeits, and illegal moves.
 8. Use STC SPRT for iteration, LTC SPRT plus a held-out book before promotion,
    and regression presets for release candidates. Test SMP changes separately.
+
+On the current Apple M4 host, native worker prerequisites are present: 4
+performance cores plus 6 efficiency cores, 16 GiB RAM, macOS arm64, Cargo/Rust
+1.94, GNU Make, Apple Clang, Git, Python 3.11, and `requests`. Docker/Podman are
+absent, but neither is needed by the official worker. Because OpenBench assumes
+worker threads are comparable, start the reference worker at `-T 4 -N 1` and
+verify simultaneous bench stability instead of mixing the performance and
+efficiency cores. Reduce further if embedded-network processes cause memory
+pressure or thermal throttling. The worker compiles FastChess with Clang and
+Volkrix with Cargo.
 
 Budget worker memory from measurements of the exact deployed binary and
 network. On the Apple M4 validation host, the large-network embedded binary used
@@ -80,9 +138,13 @@ are the production defaults, so merely advertising them does not alter play.
 Do not start SPSA unless that manifest matches the intended baseline and a
 no-change match is neutral.
 
-Actual server creation, account provisioning, opening-book upload, and worker
-connection require infrastructure credentials and machines outside this
-repository. They cannot be completed by a source checkout.
+The source checkout cannot choose or operate the external trust boundary. The
+remaining inputs are: a stable server/domain, MySQL/TLS/backups/monitoring,
+generated secrets, approved OpenBench user and worker accounts, runtime worker
+credentials, production-network upload/selection, final reference NPS, and a
+reviewed opening-book source/license record. The finalized Volkrix commit must
+also be merged and publicly reachable before workers can download it. No tool in
+this repository publishes, creates accounts, or accepts deployment credentials.
 
 ## External calibration gauntlet
 

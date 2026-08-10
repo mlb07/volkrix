@@ -109,7 +109,11 @@ The wrapper explicitly freezes and preflights `Threads`, `Hash`, `Move Overhead`
 `SyzygyPath`, `SyzygyProbeLimit`, and `Syzygy50MoveRule` on both engines. Use
 `--syzygy-probe-limit` and `--syzygy-50-move-rule` when deviating from the
 production defaults; the exact values are preserved in both the command and run
-manifest.
+manifest. FastChess cannot encode an empty `option.Name=` engine token, so an
+explicitly empty value such as the default `SyzygyPath` is retained in the
+manifest and UCI preflight but omitted from the FastChess command. The preflight
+therefore verifies the intended default-empty state without producing an invalid
+FastChess argument.
 
 Use separate `--baseline-evalfile` and `--candidate-evalfile` only when the
 network itself is the declared experiment. Otherwise both sides must use the same

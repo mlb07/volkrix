@@ -1,0 +1,22 @@
+{
+  "audited_utc": "2026-08-09T00:00:00Z",
+  "openbench": {
+    "repository": "https://github.com/AndyGrant/OpenBench",
+    "commit": "9906bad18e044c4b455539317b8cf037393a7218",
+    "config_schema": "v17",
+    "client_version": 49
+  },
+  "fastchess": {
+    "repository": "https://github.com/AndyGrant/fastchess",
+    "commit": "90babe434bbfee23a6287f42d791f07b206fc82b",
+    "minimum_version": "1.8.1"
+  },
+  "validated_server_python": "3.11",
+  "deployment_django": "5.2.16",
+  "deployment_gunicorn": "26.0.0",
+  "deployment_mysqlclient": "2.2.8",
+  "deployment_requests": "2.34.2",
+  "deployment_scipy": "1.17.1",
+  "upstream_django_pin": "4.2.1",
+  "upstream_django_support_ended": "2026-04-07"
+}

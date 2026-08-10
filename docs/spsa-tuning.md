@@ -157,3 +157,42 @@ That result does not support promotion, so all production defaults remain
 unchanged. The local evidence is retained under
 `target/strength-baselines/local-spsa-search-10x8-certified` and
 `target/strength-baselines/local-spsa-confirmation-100`.
+
+## Elite selectivity campaign (2026-08-09)
+
+A larger follow-up tuned the still-unexplored selectivity group:
+`TuneNullVerifyDepth`, late-move base and slope, SEE margin, history-pruning
+threshold, and the three ProbCut controls. The campaign used the checksum-
+frozen large embedded network and tuning engine, one engine thread, 64 MiB
+hash, concurrency four, `0.2+0.02`, 32 iterations, and 32 color-reversed
+opening pairs per iteration. All 2,048 games on openings 24001--25024 ended
+normally. The rounded candidate changed only:
+
+- `TuneSeeMargin`: 70 to 68;
+- `TuneHistoryPruneThreshold`: 2000 to 2048;
+- `TuneProbCutBase`: 180 to 179.
+
+The other five coordinates rounded back to production defaults. The complete
+campaign, including the frozen manifest, every command, PGN, worker log,
+checkpoint, and recommendation, is retained under
+`target/strength-lab/elite-selectivity-spsa-32x32`.
+
+The fixed candidate then passed its predeclared short-control gate on 500 fresh
+paired openings (29001--29500): 457 wins, 146 draws, and 397 losses over 1,000
+games, or +20.871 logistic Elo with a pair-aware approximate 95% interval from
++5.320 to +36.506 Elo. Pentanomial counts were `[46, 35, 292, 67, 60]`, with
+zero failures. That result enabled the required longer-control confirmation;
+it did not authorize changing defaults by itself.
+
+At `1+0.01`, the first 1,000 games were positive but inconclusive (426 wins,
+168 draws, 406 losses; +6.950 Elo, 95% interval -8.465 to +22.392), triggering
+the predeclared 3,000-game extension. Across all 4,000 longer-control games on
+fresh openings 32001--34000, the candidate scored 1,544 wins, 901 draws, and
+1,555 losses: -0.955 Elo with a pair-aware approximate 95% interval of -8.597
+to +6.685 and pentanomial counts `[179, 292, 1073, 273, 183]`. There were zero
+failures.
+
+The longer-control confirmation gate therefore failed. The candidate is
+rejected or deferred, and all production search defaults remain unchanged.
+The verified match labs and frozen combined decision are retained under
+`target/strength-lab/elite-spsa-candidate-*`.

@@ -1,7 +1,7 @@
 use crate::core::{Position, Score};
 
 use super::{
-    BenchConfig, BenchResult, SearchLimits,
+    BenchConfig, BenchResult, SearchLimits, SearchResult,
     bench::TimedBenchResult,
     limits::SearchHeuristics,
     nnue::{NnueService, tiny_test_evalfile_path},
@@ -17,6 +17,8 @@ pub enum HeuristicProfile {
     Phase9Default,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     MultiCutEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    RazoringEnabled,
     CorrectionHistoryEnabled,
     SingularExtensionsEnabled,
 }
@@ -46,6 +48,8 @@ impl HeuristicProfile {
             Self::Phase9Default => SearchHeuristics::phase9_default(),
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             Self::MultiCutEnabled => SearchHeuristics::phase9_default().with_multi_cut(true),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::RazoringEnabled => SearchHeuristics::phase9_default().with_razoring(true),
             Self::CorrectionHistoryEnabled => {
                 SearchHeuristics::phase9_default().with_correction_history(true)
             }
@@ -81,6 +85,43 @@ pub fn no_aspiration_limits(depth: u8) -> SearchLimits {
 #[doc(hidden)]
 pub fn run_profile_bench(depth: u8, profile: HeuristicProfile) -> BenchResult {
     run_bench(BenchConfig::new(depth).with_heuristics(profile.heuristics()))
+}
+
+#[doc(hidden)]
+pub fn run_profile_bench_with_eval_file(
+    depth: u8,
+    profile: HeuristicProfile,
+    eval_file: impl Into<String>,
+) -> BenchResult {
+    run_bench(
+        BenchConfig::new(depth)
+            .with_heuristics(profile.heuristics())
+            .with_eval_file(eval_file),
+    )
+}
+
+#[doc(hidden)]
+pub fn run_profile_position_with_eval_file(
+    fen: &str,
+    depth: u8,
+    profile: HeuristicProfile,
+    eval_file: &str,
+) -> SearchResult {
+    let mut position = Position::from_fen(fen).expect("profile FEN must parse");
+    let mut service = UciSearchService::new();
+    service
+        .set_eval_file(eval_file)
+        .expect("profile NNUE must load");
+    service.search(
+        &mut position,
+        SearchRequest {
+            limits: SearchLimits::new(depth).with_heuristics(profile.heuristics()),
+            soft_deadline: None,
+            hard_deadline: None,
+            stop_flag: None,
+            root_moves: None,
+        },
+    )
 }
 
 #[doc(hidden)]
