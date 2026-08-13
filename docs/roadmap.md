@@ -1,7 +1,7 @@
 # Volkrix Roadmap
 
 The foundational engine is implemented: legal chess, selective PVS, a lock-free
-TT, adaptive two-thread root splitting and wider Lazy SMP, time management,
+TT, adaptive two-thread root splitting and proven wider-thread diversified SMP,
 classical and neural evaluation,
 seven-piece Syzygy probing, offline training/tuning tools, and paired match
 reporting. Future work is prioritized by measured strength and reliability rather
@@ -28,8 +28,8 @@ than numbered phases.
   300-game match scored 46.17% (about -26.7 Elo), so it is not part of the
   default profile. Singular extension is also experimental/default-off after its
   first 200-game match scored 49.0% (about -7 Elo).
-- Improve helper diversification and evaluate whether more sophisticated root or
-  split-point parallelism outperforms the current shared-TT design.
+- Evaluate whether split-point or work-stealing parallelism can beat the promoted
+  deterministic-overlap shared-TT design without sacrificing reliability.
 - Build a larger, diverse, license-clean supervised corpus and train a competitive
   `VOLKNNUE` candidate; the existing small local candidates are not strength
   evidence.

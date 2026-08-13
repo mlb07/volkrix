@@ -22,8 +22,12 @@ use crate::{
             UciSearchService,
         },
         tablebase::MAX_SYZYGY_PIECES,
+        time_policy::{ClockBudgetInput, production_clock_budget},
     },
 };
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+use crate::search::time_policy::candidate_clock_budget;
 
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
 use crate::search::limits::SearchHeuristics;
@@ -78,6 +82,20 @@ enum SetOptionCommand {
     DualEvalThreshold(i32),
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     ExperimentalRazoring(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalCaptureLmr(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalOrderedProbCut(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalCaptureHistory(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalMultiPlyContinuationHistory(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalContextualLmr(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalTimeManagement(bool),
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ExperimentalSmpDiversification(bool),
     #[cfg(feature = "spsa-tuning")]
     TuneParameter(&'static str, i32),
     #[cfg(feature = "spsa-tuning")]
@@ -98,21 +116,64 @@ pub struct UciEngine {
     ponder_enabled: bool,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     experimental_razoring: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_capture_lmr: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_ordered_probcut: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_capture_history: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_multi_ply_continuation_history: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_contextual_lmr: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_time_management: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    experimental_smp_diversification: bool,
     #[cfg(feature = "spsa-tuning")]
     search_parameters: SearchParameters,
 }
 
 impl UciEngine {
     pub fn new() -> Self {
-        Self {
+        let engine = Self {
             position: Position::startpos(),
             search_service: UciSearchService::new(),
             move_overhead_ms: DEFAULT_MOVE_OVERHEAD_MS,
             ponder_enabled: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             experimental_razoring: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_capture_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_ordered_probcut: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_capture_history: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_multi_ply_continuation_history: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_contextual_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_time_management: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_smp_diversification: false,
             #[cfg(feature = "spsa-tuning")]
             search_parameters: SearchParameters::DEFAULT,
+        };
+        // Internal builds advertise the default-false A/B seam, where false means the
+        // legacy wider-thread Lazy policy. Normal production builds expose no seam and
+        // retain the promoted Adaptive policy.
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        {
+            let mut engine = engine;
+            engine
+                .search_service
+                .set_smp_strategy(crate::search::service::SmpStrategy::Lazy);
+            engine
+        }
+        #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+        {
+            engine
         }
     }
 
@@ -122,7 +183,7 @@ impl UciEngine {
         environment_path: Option<&str>,
         executable_path: Option<&Path>,
     ) -> Self {
-        Self {
+        let mut engine = Self {
             position: Position::startpos(),
             search_service: UciSearchService::new_with_eval_discovery(
                 environment_path,
@@ -132,9 +193,27 @@ impl UciEngine {
             ponder_enabled: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             experimental_razoring: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_capture_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_ordered_probcut: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_capture_history: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_multi_ply_continuation_history: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_contextual_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_time_management: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            experimental_smp_diversification: false,
             #[cfg(feature = "spsa-tuning")]
             search_parameters: SearchParameters::DEFAULT,
-        }
+        };
+        engine
+            .search_service
+            .set_smp_strategy(crate::search::service::SmpStrategy::Lazy);
+        engine
     }
 
     pub fn position(&self) -> &Position {
@@ -334,9 +413,39 @@ impl UciEngine {
                         lines.push("option name TuneManifest type button".to_owned());
                     }
                     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
-                    lines.push(
-                        "option name ExperimentalRazoring type check default false".to_owned(),
-                    );
+                    {
+                        lines.push(
+                            "option name ExperimentalRazoring type check default false".to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalCaptureLmr type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalOrderedProbCut type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalCaptureHistory type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalMultiPlyContinuationHistory type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalContextualLmr type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalTimeManagement type check default false"
+                                .to_owned(),
+                        );
+                        lines.push(
+                            "option name ExperimentalSmpDiversification type check default false"
+                                .to_owned(),
+                        );
+                    }
                     if let Some(diagnostic) = self.search_service.eval_discovery_diagnostic() {
                         lines.push(format!(
                             "info string warning: {}",
@@ -537,6 +646,53 @@ impl UciEngine {
                 self.search_service.clear_hash();
                 Vec::new()
             }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalCaptureLmr(enabled)) => {
+                self.experimental_capture_lmr = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalOrderedProbCut(enabled)) => {
+                self.experimental_ordered_probcut = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalCaptureHistory(enabled)) => {
+                self.experimental_capture_history = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalMultiPlyContinuationHistory(enabled)) => {
+                self.experimental_multi_ply_continuation_history = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalContextualLmr(enabled)) => {
+                self.experimental_contextual_lmr = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalTimeManagement(enabled)) => {
+                self.experimental_time_management = enabled;
+                self.search_service.clear_hash();
+                Vec::new()
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Ok(SetOptionCommand::ExperimentalSmpDiversification(enabled)) => {
+                self.experimental_smp_diversification = enabled;
+                self.search_service.set_smp_strategy(if enabled {
+                    crate::search::service::SmpStrategy::Diversified
+                } else {
+                    crate::search::service::SmpStrategy::Lazy
+                });
+                self.search_service.clear_hash();
+                Vec::new()
+            }
             #[cfg(feature = "spsa-tuning")]
             Ok(SetOptionCommand::TuneParameter(name, value)) => {
                 match self.search_parameters.set(name, value) {
@@ -725,7 +881,14 @@ impl UciEngine {
         let limits = SearchLimits::new(depth);
         #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
         let limits = limits.with_heuristics(
-            SearchHeuristics::phase9_default().with_razoring(self.experimental_razoring),
+            SearchHeuristics::phase9_default()
+                .with_razoring(self.experimental_razoring)
+                .with_capture_lmr(self.experimental_capture_lmr)
+                .with_time_management_candidate(self.experimental_time_management)
+                .with_ordered_probcut(self.experimental_ordered_probcut)
+                .with_capture_history_experiment(self.experimental_capture_history)
+                .with_multi_ply_continuation(self.experimental_multi_ply_continuation_history)
+                .with_contextual_lmr(self.experimental_contextual_lmr),
         );
         #[cfg(feature = "spsa-tuning")]
         let limits = limits.with_parameters(self.search_parameters);
@@ -780,31 +943,62 @@ impl UciEngine {
             ),
         };
 
-        let reserve = self.move_overhead_ms.saturating_add(remaining / 100);
-        let available = remaining.saturating_sub(reserve);
-        // Honor the GUI's complete control horizon. Artificially clamping large
-        // `movestogo` values spends too aggressively in tournament controls.
-        let moves_to_go = u64::from(options.movestogo.unwrap_or(25).max(1));
-        let base = available / moves_to_go;
+        let opponent_remaining = match side {
+            Color::White => options.btime_ms,
+            Color::Black => options.wtime_ms,
+        };
+        let input = ClockBudgetInput {
+            remaining_ms: remaining,
+            increment_ms: increment,
+            moves_to_go: options.movestogo,
+            overhead_ms: self.move_overhead_ms,
+            opponent_remaining_ms: opponent_remaining,
+        };
         #[cfg(not(feature = "spsa-tuning"))]
-        let soft = available.min(base.saturating_add(increment.saturating_mul(3) / 4));
+        let budget = {
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            if self.experimental_time_management {
+                candidate_clock_budget(input)
+            } else {
+                production_clock_budget(input)
+            }
+            #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+            production_clock_budget(input)
+        };
         #[cfg(feature = "spsa-tuning")]
-        let soft = available.min(base.saturating_add(
-            increment.saturating_mul(self.search_parameters.time_increment_pct as u64) / 100,
-        ));
-        #[cfg(not(feature = "spsa-tuning"))]
-        let hard = available.min(
-            soft.saturating_mul(3)
-                .saturating_div(2)
-                .max(soft.saturating_add(10)),
-        );
-        #[cfg(feature = "spsa-tuning")]
-        let hard = available.min(
-            soft.saturating_mul(self.search_parameters.time_hard_pct as u64)
-                .saturating_div(100)
-                .max(soft.saturating_add(10)),
-        );
-        Ok((soft, hard))
+        let budget = {
+            let production = production_clock_budget(input);
+            let reserve = remaining.saturating_sub(production.available_ms);
+            let available = remaining.saturating_sub(reserve);
+            let moves_to_go = u64::from(options.movestogo.unwrap_or(25).max(1));
+            let base = available / moves_to_go;
+            let soft = available.min(base.saturating_add(
+                increment.saturating_mul(self.search_parameters.time_increment_pct as u64) / 100,
+            ));
+            let hard = available.min(
+                soft.saturating_mul(self.search_parameters.time_hard_pct as u64)
+                    .saturating_div(100)
+                    .max(soft.saturating_add(10)),
+            );
+            let tuned = crate::search::time_policy::ClockBudget {
+                soft_ms: soft,
+                hard_ms: hard,
+                available_ms: available,
+            };
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            {
+                if self.experimental_time_management {
+                    candidate_clock_budget(input)
+                } else {
+                    tuned
+                }
+            }
+            #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+            {
+                tuned
+            }
+        };
+        Ok((budget.soft_ms, budget.hard_ms))
     }
 }
 
@@ -1202,6 +1396,76 @@ fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, Stri
                 )),
             }
         }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalCaptureLmr" => {
+            let Some(value_index) = value_index else {
+                return Err(
+                    "setoption name ExperimentalCaptureLmr requires 'value <true|false>'"
+                        .to_owned(),
+                );
+            };
+            if value_index + 2 != tokens.len() {
+                return Err(
+                    "setoption name ExperimentalCaptureLmr requires exactly one value".to_owned(),
+                );
+            }
+            match tokens[value_index + 1] {
+                "true" => Ok(SetOptionCommand::ExperimentalCaptureLmr(true)),
+                "false" => Ok(SetOptionCommand::ExperimentalCaptureLmr(false)),
+                value => Err(format!(
+                    "invalid setoption name ExperimentalCaptureLmr value '{value}'; expected true or false"
+                )),
+            }
+        }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalOrderedProbCut" => {
+            parse_experimental_check_value("ExperimentalOrderedProbCut", value_index, tokens)
+                .map(SetOptionCommand::ExperimentalOrderedProbCut)
+        }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalCaptureHistory" => {
+            parse_experimental_check_value("ExperimentalCaptureHistory", value_index, tokens)
+                .map(SetOptionCommand::ExperimentalCaptureHistory)
+        }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalMultiPlyContinuationHistory" => parse_experimental_check_value(
+            "ExperimentalMultiPlyContinuationHistory",
+            value_index,
+            tokens,
+        )
+        .map(SetOptionCommand::ExperimentalMultiPlyContinuationHistory),
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalContextualLmr" => {
+            parse_experimental_check_value("ExperimentalContextualLmr", value_index, tokens)
+                .map(SetOptionCommand::ExperimentalContextualLmr)
+        }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalTimeManagement" => {
+            let Some(value_index) = value_index else {
+                return Err(
+                    "setoption name ExperimentalTimeManagement requires 'value <true|false>'"
+                        .to_owned(),
+                );
+            };
+            if value_index + 2 != tokens.len() {
+                return Err(
+                    "setoption name ExperimentalTimeManagement requires exactly one value"
+                        .to_owned(),
+                );
+            }
+            match tokens[value_index + 1] {
+                "true" => Ok(SetOptionCommand::ExperimentalTimeManagement(true)),
+                "false" => Ok(SetOptionCommand::ExperimentalTimeManagement(false)),
+                value => Err(format!(
+                    "invalid setoption name ExperimentalTimeManagement value '{value}'; expected true or false"
+                )),
+            }
+        }
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        "ExperimentalSmpDiversification" => {
+            parse_experimental_check_value("ExperimentalSmpDiversification", value_index, tokens)
+                .map(SetOptionCommand::ExperimentalSmpDiversification)
+        }
         #[cfg(feature = "spsa-tuning")]
         "TuneManifest" => {
             if value_index.is_some() {
@@ -1230,6 +1494,29 @@ fn parse_setoption(line: &str, tokens: &[&str]) -> Result<SetOptionCommand, Stri
             Ok(SetOptionCommand::TuneParameter(spec.name, value))
         }
         _ => Err(format!("unsupported option '{name}'")),
+    }
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn parse_experimental_check_value(
+    name: &str,
+    value_index: Option<usize>,
+    tokens: &[&str],
+) -> Result<bool, String> {
+    let Some(value_index) = value_index else {
+        return Err(format!(
+            "setoption name {name} requires 'value <true|false>'"
+        ));
+    };
+    if value_index + 2 != tokens.len() {
+        return Err(format!("setoption name {name} requires exactly one value"));
+    }
+    match tokens[value_index + 1] {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        value => Err(format!(
+            "invalid setoption name {name} value '{value}'; expected true or false"
+        )),
     }
 }
 
@@ -1497,6 +1784,157 @@ mod tests {
         assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
 
         let rejected = engine.handle_line("setoption name ExperimentalRazoring value maybe");
+        assert_eq!(rejected.lines.len(), 1);
+        assert!(rejected.lines[0].contains("expected true or false"));
+    }
+
+    #[test]
+    fn internal_capture_lmr_option_is_explicit_default_off_and_clears_hash() {
+        let mut engine = UciEngine::new();
+        assert!(!engine.search_limits(4).heuristics.capture_lmr);
+        assert!(
+            engine.handle_line("uci").lines.contains(
+                &"option name ExperimentalCaptureLmr type check default false".to_owned()
+            )
+        );
+
+        let _ = engine.handle_line("position startpos");
+        let _ = engine.handle_line("go depth 2");
+        assert!(engine.search_service.debug_tt_entry_count() > 0);
+
+        let response = engine.handle_line("setoption name ExperimentalCaptureLmr value true");
+        assert!(response.lines.is_empty());
+        assert!(engine.search_limits(4).heuristics.capture_lmr);
+        assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+
+        let rejected = engine.handle_line("setoption name ExperimentalCaptureLmr value maybe");
+        assert_eq!(rejected.lines.len(), 1);
+        assert!(rejected.lines[0].contains("expected true or false"));
+    }
+
+    #[test]
+    fn internal_search_candidates_are_individually_reachable_and_clear_hash() {
+        let candidates = [
+            ("ExperimentalOrderedProbCut", 0usize),
+            ("ExperimentalCaptureHistory", 1),
+            ("ExperimentalMultiPlyContinuationHistory", 2),
+            ("ExperimentalContextualLmr", 3),
+        ];
+        for (name, index) in candidates {
+            let mut engine = UciEngine::new();
+            assert!(
+                engine
+                    .handle_line("uci")
+                    .lines
+                    .contains(&format!("option name {name} type check default false"))
+            );
+            let heuristics = engine.search_limits(4).heuristics;
+            assert!(
+                ![
+                    heuristics.ordered_probcut,
+                    heuristics.capture_history,
+                    heuristics.multi_ply_continuation,
+                    heuristics.contextual_lmr,
+                ][index]
+            );
+
+            let _ = engine.handle_line("position startpos");
+            let _ = engine.handle_line("go depth 2");
+            assert!(engine.search_service.debug_tt_entry_count() > 0);
+            assert!(
+                engine
+                    .handle_line(&format!("setoption name {name} value true"))
+                    .lines
+                    .is_empty()
+            );
+            let heuristics = engine.search_limits(4).heuristics;
+            assert!(
+                [
+                    heuristics.ordered_probcut,
+                    heuristics.capture_history && heuristics.capture_history_qsearch,
+                    heuristics.multi_ply_continuation,
+                    heuristics.contextual_lmr,
+                ][index]
+            );
+            assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+
+            let rejected = engine.handle_line(&format!("setoption name {name} value maybe"));
+            assert_eq!(rejected.lines.len(), 1);
+            assert!(rejected.lines[0].contains("expected true or false"));
+        }
+    }
+
+    #[test]
+    fn internal_time_management_is_default_off_pair_testable_and_hash_isolated() {
+        let mut engine = UciEngine::new();
+        assert!(!engine.search_limits(4).heuristics.time_management_candidate);
+        assert!(engine.handle_line("uci").lines.contains(
+            &"option name ExperimentalTimeManagement type check default false".to_owned()
+        ));
+        let options = GoOptions {
+            wtime_ms: Some(10_000),
+            btime_ms: Some(25_000),
+            winc_ms: 100,
+            ..GoOptions::default()
+        };
+        assert_eq!(engine.clock_budget_ms(&options), Ok((470, 705)));
+
+        let _ = engine.handle_line("position startpos");
+        let _ = engine.handle_line("go depth 2");
+        assert!(engine.search_service.debug_tt_entry_count() > 0);
+
+        let response = engine.handle_line("setoption name ExperimentalTimeManagement value true");
+        assert!(response.lines.is_empty());
+        assert!(engine.search_limits(4).heuristics.time_management_candidate);
+        assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+        let candidate = engine
+            .clock_budget_ms(&options)
+            .expect("candidate clock budget must build");
+        assert_ne!(candidate, (470, 705));
+        assert!(candidate.0 <= candidate.1);
+
+        let rejected = engine.handle_line("setoption name ExperimentalTimeManagement value maybe");
+        assert_eq!(rejected.lines.len(), 1);
+        assert!(rejected.lines[0].contains("expected true or false"));
+    }
+
+    #[test]
+    fn internal_smp_diversification_is_default_off_pair_testable_and_hash_isolated() {
+        let mut engine = UciEngine::new();
+        assert_eq!(
+            engine.search_service.smp_strategy(),
+            crate::search::service::SmpStrategy::Lazy
+        );
+        assert!(engine.handle_line("uci").lines.contains(
+            &"option name ExperimentalSmpDiversification type check default false".to_owned()
+        ));
+
+        let _ = engine.handle_line("position startpos");
+        let _ = engine.handle_line("go depth 2");
+        assert!(engine.search_service.debug_tt_entry_count() > 0);
+
+        let enabled =
+            engine.handle_line("setoption name ExperimentalSmpDiversification value true");
+        assert!(enabled.lines.is_empty());
+        assert_eq!(
+            engine.search_service.smp_strategy(),
+            crate::search::service::SmpStrategy::Diversified
+        );
+        assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+
+        let _ = engine.handle_line("go depth 2");
+        assert!(engine.search_service.debug_tt_entry_count() > 0);
+        let disabled =
+            engine.handle_line("setoption name ExperimentalSmpDiversification value false");
+        assert!(disabled.lines.is_empty());
+        assert_eq!(
+            engine.search_service.smp_strategy(),
+            crate::search::service::SmpStrategy::Lazy
+        );
+        assert_eq!(engine.search_service.debug_tt_entry_count(), 0);
+
+        let rejected =
+            engine.handle_line("setoption name ExperimentalSmpDiversification value maybe");
         assert_eq!(rejected.lines.len(), 1);
         assert!(rejected.lines[0].contains("expected true or false"));
     }

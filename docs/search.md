@@ -48,7 +48,63 @@ The default search combines:
 - ProbCut on promising tactical candidates
 - internal iterative reduction when a deeper node has no TT move
 
-Four additional mechanisms remain experimental and default-off:
+Nine additional mechanisms remain experimental and default-off. Four new
+candidate families are deliberately compiled only in tests, debug builds, or an
+`internal-testing` build, so a production release has neither their UCI surface
+nor their hot-path branches:
+
+- `ExperimentalOrderedProbCut` replaces raw legal-order probing with a bounded
+  tactical prefix ordered by legal TT/PV priority, capture history, SEE bucket,
+  and victim/attacker value. Promotions and SEE-negative captures are filtered
+  before the eight-candidate limit is applied. The ordinary full-search picker
+  remains unchanged.
+- `ExperimentalCaptureHistory` gives the existing capture table independently
+  tunable success and failure scales, bounded decay interval and retention,
+  periodic saturation control, and guarded quiescence cutoff training. It
+  remains a Stockfish-18-NNUE candidate rather than inheriting the earlier
+  classical fixed-depth rejection.
+- `ExperimentalMultiPlyContinuationHistory` adds independent two- and four-ply
+  continuation tables to the proven one-ply table. Lookup weights are 1, 1/2,
+  and 1/4; training weights are 1, 3/4, and 1/2. Tables are allocated only when
+  the candidate is enabled.
+- `ExperimentalContextualLmr` retains the same full-depth re-search safety rule
+  while exposing bounded cut-node, PV-node, improving, and positive/negative
+  history adjustments to SPSA. The logarithmic base reduction and every search
+  guard remain intact.
+
+Each option is default-false and clears the TT when changed. Fixed-depth profiles
+are screening evidence only; candidates may be promoted one at a time only by
+held-out color-reversed game tests.
+
+- capture LMR extends Volkrix's proven quiet-move reduction/re-search protocol
+  to late captures. Current Stockfish applies its LMR stage to every move after
+  the first and then adjusts the reduction using move-specific evidence
+  ([source](https://github.com/official-stockfish/Stockfish/blob/5062aee519a1ba262d472d8ab139851ced56573e/src/search.cpp#L1324-L1396)).
+  Volkrix starts more conservatively: only non-PV captures at depth 5 or higher,
+  after two moves have already been searched, are eligible. Checks, promotions,
+  hash moves, and nodes in check retain full depth. Non-losing captures lose at
+  most one ply; losing captures lose at most two. Any reduced result that raises
+  alpha is re-searched at full depth. The reduction uses the same active
+  `lmr_divisor_pct` as quiet LMR, including in SPSA builds. The heuristic field,
+  counters, candidate classification, reduction branch, and UCI option are
+  compiled only for tests, debug builds, or `internal-testing`. The default-false
+  `ExperimentalCaptureLmr` option clears the TT whenever it changes.
+
+  Frozen SF18-big-NNUE profiling was deterministic but deliberately treated as
+  screening rather than strength evidence. At depth 8 the candidate expanded
+  520,496 nodes versus 478,607 (+8.75%), with all four curated best moves and
+  scores unchanged. At depth 9 it expanded 4,661,095 versus 4,801,401 (-2.92%);
+  three curated positions retained their move and score, while one high-advantage
+  line changed from `c5d6`/+1408 to `c5e7`/+1470 and collapsed from 9,509,712 to
+  1,680,274 nodes. Because the evidence was mixed, the predeclared decision test
+  used 500 color-reversed pairs at `1+0.01`, openings 34001 through 34500, the
+  same frozen native-M4 binary and big network on both sides, and only the
+  experimental option differing. The authoritative 1,000-game run scored 366
+  wins, 272 draws, and 362 losses (50.20%, +1.39 Elo, pair-aware 95% CI
+  [-14.192, +16.977], pentanomial `[45, 78, 251, 80, 46]`) with zero crashes,
+  stalls, illegal moves, time forfeits, or other abnormal terminations. This is
+  neutral evidence, not a promotion signal, so capture LMR remains default-off
+  and does not advance to LTC or PGO testing.
 
 - razoring performs a guarded quiescence verification when a shallow non-PV
   node's static evaluation is far below alpha. The experiment uses Stockfish
@@ -184,13 +240,25 @@ pool can recover instead of leaving an active-worker count stuck.
 
 With exactly two threads, the adaptive default uses a young-brothers-wait root
 split: the main thread searches the eldest move and releases disjoint sibling
-work only after establishing the iteration bound. Wider configurations retain
-shared-TT Lazy SMP. A local classical depth-6 A/B confirmed why: root split took
-86 ms versus 65 ms at three threads and 98 ms versus 71 ms at four; at fixed
-time it completed fewer aggregate depths at four threads (43 versus 46). The
-explicit root-split seam remains available for future tuning, but these results
-do not justify changing the wider default. OS scheduling can change which TT entries
-win races, so multithreaded runs are not a fixed-node reproducibility mode.
+work only after establishing the iteration bound. At three or more threads,
+Adaptive assigns helpers deterministic overlapping circular root windows while
+the main thread remains authoritative. A held-out 1,000-game SF18 STC match at
+four threads scored 446 wins, 174 draws, and 380 losses (53.30%, +22.964 Elo,
+pair-aware 95% CI [+7.670, +38.348], pentanomial `[35, 57, 275, 73, 60]`) with
+zero abnormal terminations or time forfeits. Independent LTC then used 2,000
+held-out color-reversed pairs at `1+0.01`. Across both frozen stages the new
+policy scored 1,811 wins, 660 draws, and 1,529 losses (53.525%, +24.535 Elo,
+pair-aware 95% CI [+16.004, +33.095], pentanomial
+`[195, 230, 983, 282, 310]`) with zero crashes, stalls, illegal moves, or time
+forfeits. It therefore cleared the fixed-candidate promotion policy and is the
+production wider-thread default.
+
+The internal-only `ExperimentalSmpDiversification` seam remains semantically
+explicit for identical-binary regression matches: its advertised default
+`false` selects legacy Lazy SMP, while `true` selects Diversified. Production
+builds expose no experimental option and use Adaptive directly. OS scheduling
+can change which TT entries win races, so multithreaded runs are not a fixed-node
+reproducibility mode.
 
 ## Evaluation
 
@@ -271,6 +339,23 @@ never beyond—the hard deadline. The previous iteration cost is used to avoid
 starting work unlikely to finish in the remaining adaptive budget. Fixed
 `movetime` searches are deliberately exempt from this contraction. Integer
 arithmetic is saturating and deadlines are checked for overflow.
+
+An internal-only `ExperimentalTimeManagement` candidate keeps this production
+policy unchanged by default while testing a richer deterministic policy. Its
+clock allocator accounts for increment, explicit moves-to-go, the opponent's
+clock, and a separate emergency reserve; every derived budget is capped by the
+usable clock even for overflowing UCI inputs. The companion search-instability
+model tracks completed-iteration best-move and PV churn, rolling score
+volatility, second-best margin, aspiration re-search cost, and observed
+iteration growth. Its aspiration windows widen fail-low more aggressively than
+fail-high. These behavior changes require paired clock-match evidence at the
+intended controls before any production default can change.
+
+A four-position depth-8 classical screening run preserved every final score and
+three of four best moves; the equal-scored start position selected a different
+move. Aggregate nodes fell from 721,194 to 709,296 (-1.65%). This verifies that
+the candidate is connected, deterministic, and modest in search-tree impact;
+it is not evidence that the clock policy gains Elo.
 
 `go nodes N` uses one exact atomic budget shared by the main thread and every
 helper. It can be combined with a depth or time limit; the first exhausted limit

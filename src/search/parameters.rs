@@ -95,6 +95,65 @@ tuning_parameters!(
         250
     ),
     (history_bonus_scale, "TuneHistoryBonusScale", 32, 8, 96, 4),
+    (
+        capture_history_bonus_scale,
+        "TuneCaptureHistoryBonusScale",
+        24,
+        4,
+        96,
+        4
+    ),
+    (
+        capture_history_malus_scale,
+        "TuneCaptureHistoryMalusScale",
+        32,
+        4,
+        128,
+        4
+    ),
+    (
+        capture_history_decay_interval,
+        "TuneCaptureHistoryDecayInterval",
+        4096,
+        512,
+        16384,
+        512
+    ),
+    (
+        capture_history_retention_pct,
+        "TuneCaptureHistoryRetentionPct",
+        94,
+        75,
+        100,
+        1
+    ),
+    (lmr_cut_adjust, "TuneLmrCutAdjust", 1, 0, 2, 1),
+    (lmr_pv_adjust, "TuneLmrPvAdjust", 1, 0, 2, 1),
+    (lmr_improving_adjust, "TuneLmrImprovingAdjust", 1, 0, 2, 1),
+    (
+        lmr_history_threshold,
+        "TuneLmrHistoryThreshold",
+        4000,
+        500,
+        8000,
+        250
+    ),
+    (
+        lmr_bad_history_adjust,
+        "TuneLmrBadHistoryAdjust",
+        1,
+        0,
+        2,
+        1
+    ),
+    (
+        lmr_good_history_adjust,
+        "TuneLmrGoodHistoryAdjust",
+        1,
+        0,
+        2,
+        1
+    ),
     (probcut_base, "TuneProbCutBase", 180, 80, 300, 10),
     (probcut_slope, "TuneProbCutSlope", 5, 0, 15, 1),
     (

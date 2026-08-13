@@ -28,6 +28,7 @@ use super::{
 
 pub(crate) const DEFAULT_THREADS: usize = 1;
 pub(crate) const MAX_THREADS: usize = 64;
+const DEFAULT_SMP_DIVERSIFICATION_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
 #[cfg(not(volkrix_embedded_nnue))]
 pub(crate) const STOCKFISH_18_NETWORK_FILE: &str = "nn-c288c895ea92.nnue";
 pub const DEFAULT_DUAL_EVAL_THRESHOLD: i32 = 200;
@@ -55,8 +56,11 @@ pub(crate) enum SmpStrategy {
     Lazy,
     /// Young-brothers-wait root splitting with disjoint helper sibling shards.
     RootSplit,
+    /// Deterministic overlap between helper root subsets, retained explicitly
+    /// so internal builds can compare it with the legacy Lazy policy.
+    Diversified,
     /// Use root splitting where it measured stronger (two total threads) and
-    /// retain high-throughput Lazy SMP on wider machines.
+    /// deterministic diversified helper overlap at three or more threads.
     #[default]
     Adaptive,
 }
@@ -65,6 +69,7 @@ impl SmpStrategy {
     const fn resolve(self, threads: usize) -> Self {
         match self {
             Self::Adaptive if threads == 2 => Self::RootSplit,
+            Self::Adaptive if threads >= 3 => Self::Diversified,
             Self::Adaptive => Self::Lazy,
             strategy => strategy,
         }
@@ -109,6 +114,7 @@ struct HelperSearchSpec<'a> {
     node_budget: Option<Arc<NodeBudget>>,
     root_moves: Option<Vec<Move>>,
     strategy: SmpStrategy,
+    diversification_seed: u64,
     root_split: Option<Arc<RootSplitCoordinator>>,
 }
 
@@ -167,6 +173,7 @@ impl WorkerPool {
             spec.root_moves.as_deref(),
             spec.helper_count,
             spec.strategy,
+            spec.diversification_seed,
         );
         let mut dispatched = 0usize;
 
@@ -304,6 +311,7 @@ pub struct UciSearchService {
     tablebases: Option<Arc<TablebaseService>>,
     classical_weights: Option<eval::ClassicalEvalWeights>,
     smp_strategy: SmpStrategy,
+    smp_diversification_seed: u64,
     workers: WorkerPool,
 }
 
@@ -337,6 +345,7 @@ impl UciSearchService {
             tablebases: None,
             classical_weights: None,
             smp_strategy: SmpStrategy::default(),
+            smp_diversification_seed: DEFAULT_SMP_DIVERSIFICATION_SEED,
             workers: WorkerPool::new(),
         };
 
@@ -461,6 +470,16 @@ impl UciSearchService {
 
     pub(crate) fn set_smp_strategy(&mut self, strategy: SmpStrategy) {
         self.smp_strategy = strategy;
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn smp_strategy(&self) -> SmpStrategy {
+        self.smp_strategy
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn set_smp_diversification_seed(&mut self, seed: u64) {
+        self.smp_diversification_seed = seed;
     }
 
     #[cfg(feature = "offline-tools")]
@@ -675,6 +694,7 @@ impl UciSearchService {
             node_budget: node_budget.clone(),
             root_moves: request.root_moves.clone(),
             strategy: active_strategy,
+            diversification_seed: self.smp_diversification_seed,
             root_split: root_split.clone(),
         });
 
@@ -886,6 +906,7 @@ fn helper_root_move_sets(
     requested_root_moves: Option<&[Move]>,
     helper_count: usize,
     strategy: SmpStrategy,
+    diversification_seed: u64,
 ) -> Vec<Option<Vec<Move>>> {
     if helper_count == 0 {
         return Vec::new();
@@ -923,6 +944,36 @@ fn helper_root_move_sets(
             .collect();
     }
 
+    if strategy == SmpStrategy::Diversified {
+        if root_moves.len() <= 1 || helper_count == 1 {
+            return (0..helper_count)
+                .map(|_| requested_root_moves.map(|moves| moves.to_vec()))
+                .collect();
+        }
+
+        // Each helper receives a deterministic circular window.  The window
+        // spans two ordinary shards, so adjacent helpers overlap while the
+        // union still covers every legal/requested move.  Different seeds
+        // change only helper work allocation; the main thread remains the
+        // sole authority for the reported PV and best move.
+        let move_count = root_moves.len();
+        let window_len = move_count
+            .saturating_mul(2)
+            .div_ceil(helper_count)
+            .clamp(1, move_count);
+        let seed_offset = mix_smp_seed(diversification_seed) as usize % move_count;
+        return (0..helper_count)
+            .map(|helper_index| {
+                let start = (seed_offset + helper_index * move_count / helper_count) % move_count;
+                Some(
+                    (0..window_len)
+                        .map(|offset| root_moves[(start + offset) % move_count])
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+
     // The main thread owns the eldest generated move. The release gate in
     // `root` ensures helpers do not start siblings before main establishes a
     // bound. Main remains authoritative and eventually verifies all moves, so
@@ -947,6 +998,14 @@ fn helper_root_move_sets(
             Some(shard)
         })
         .collect()
+}
+
+const fn mix_smp_seed(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 fn rewrite_info_statistics(
@@ -1141,7 +1200,13 @@ mod tests {
     #[test]
     fn helper_root_shards_cover_each_legal_move_once() {
         let position = Position::startpos();
-        let shards = helper_root_move_sets(&position, None, 3, SmpStrategy::Lazy);
+        let shards = helper_root_move_sets(
+            &position,
+            None,
+            3,
+            SmpStrategy::Lazy,
+            DEFAULT_SMP_DIVERSIFICATION_SEED,
+        );
         assert_eq!(shards.len(), 3);
 
         let mut all_moves = Vec::new();
@@ -1174,7 +1239,13 @@ mod tests {
         scratch.generate_legal_moves(&mut legal_moves);
         let requested = &legal_moves.as_slice()[..2];
 
-        let shards = helper_root_move_sets(&position, Some(requested), 4, SmpStrategy::Lazy);
+        let shards = helper_root_move_sets(
+            &position,
+            Some(requested),
+            4,
+            SmpStrategy::Lazy,
+            DEFAULT_SMP_DIVERSIFICATION_SEED,
+        );
         assert_eq!(shards.len(), 4);
         assert!(shards.iter().all(|shard| {
             shard
@@ -1191,7 +1262,13 @@ mod tests {
         scratch.generate_legal_moves(&mut legal_moves);
         let eldest = legal_moves.as_slice()[0];
 
-        let shards = helper_root_move_sets(&position, None, 64, SmpStrategy::RootSplit);
+        let shards = helper_root_move_sets(
+            &position,
+            None,
+            64,
+            SmpStrategy::RootSplit,
+            DEFAULT_SMP_DIVERSIFICATION_SEED,
+        );
         assert_eq!(shards.len(), legal_moves.len() - 1);
 
         let mut siblings = Vec::new();
@@ -1203,6 +1280,81 @@ mod tests {
             siblings.push(shard[0]);
         }
         assert_eq!(siblings.len(), legal_moves.len() - 1);
+    }
+
+    #[test]
+    fn diversified_helpers_overlap_deterministically_and_cover_the_root() {
+        let position = Position::startpos();
+        let shards = helper_root_move_sets(&position, None, 3, SmpStrategy::Diversified, 7);
+        let repeat = helper_root_move_sets(&position, None, 3, SmpStrategy::Diversified, 7);
+        assert_eq!(shards, repeat, "a frozen seed must reproduce helper work");
+
+        let mut scratch = position.clone();
+        let mut legal_moves = MoveList::new();
+        scratch.generate_legal_moves(&mut legal_moves);
+        let mut coverage = legal_moves
+            .as_slice()
+            .iter()
+            .copied()
+            .map(|mv| (mv, 0usize))
+            .collect::<Vec<_>>();
+        for shard in &shards {
+            let shard = shard
+                .as_deref()
+                .expect("diversified helpers must receive explicit root windows");
+            assert!(!shard.is_empty());
+            for mv in shard {
+                let (_, count) = coverage
+                    .iter_mut()
+                    .find(|(legal, _)| legal == mv)
+                    .expect("helper windows must contain only legal root moves");
+                *count += 1;
+            }
+        }
+        assert!(coverage.iter().all(|(_, count)| *count >= 1));
+        assert!(coverage.iter().any(|(_, count)| *count >= 2));
+
+        let alternate = helper_root_move_sets(&position, None, 3, SmpStrategy::Diversified, 11);
+        assert_ne!(shards, alternate, "the seed must control helper allocation");
+    }
+
+    #[test]
+    fn adaptive_resolves_by_proven_thread_count_policy() {
+        assert_eq!(SmpStrategy::Adaptive.resolve(1), SmpStrategy::Lazy);
+        assert_eq!(SmpStrategy::Adaptive.resolve(2), SmpStrategy::RootSplit);
+        for threads in [3usize, 4, 8, MAX_THREADS] {
+            assert_eq!(
+                SmpStrategy::Adaptive.resolve(threads),
+                SmpStrategy::Diversified
+            );
+        }
+    }
+
+    #[test]
+    fn diversified_smp_honors_aggregate_nodes_and_preserves_root_state() {
+        let mut service = UciSearchService::new();
+        service.set_threads(4);
+        service.set_smp_strategy(SmpStrategy::Diversified);
+        service.set_smp_diversification_seed(0x5eed);
+        let mut position = Position::startpos();
+        let before = position.to_fen();
+
+        let result = service.search(
+            &mut position,
+            SearchRequest {
+                limits: SearchLimits::new(127).with_node_limit(Some(4_001)),
+                soft_deadline: None,
+                hard_deadline: None,
+                stop_flag: None,
+                root_moves: None,
+            },
+        );
+
+        assert_eq!(result.nodes, 4_001);
+        assert!(result.best_move.is_some());
+        assert_eq!(position.to_fen(), before);
+        assert_eq!(service.debug_active_helper_count(), 0);
+        assert_eq!(service.debug_helper_panic_count(), 0);
     }
 
     #[test]

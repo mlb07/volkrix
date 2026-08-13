@@ -91,6 +91,29 @@ impl MovePicker {
         ordered
     }
 
+    /// Returns a bounded tactical prefix for speculative ProbCut probes.
+    ///
+    /// Promotions remain on the normal full-search path. Capture stages retain TT/PV priority,
+    /// then use SEE and capture-history scores, so the most credible fail-highs are paid for
+    /// first without changing the main move picker's ordering contract.
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) fn ordered_probcut_candidates(
+        mut self,
+        position: &Position,
+        limit: usize,
+    ) -> Vec<Move> {
+        let mut candidates = Vec::with_capacity(limit.min(self.len));
+        while candidates.len() < limit {
+            let Some(mv) = self.next() else {
+                break;
+            };
+            if mv.is_capture() && !mv.is_promotion() && position.see(mv).0 >= 0 {
+                candidates.push(mv);
+            }
+        }
+        candidates
+    }
+
     fn best_index_for_stage(&self, target: MoveStage) -> Option<usize> {
         let mut best = None;
         let mut best_score = i32::MIN;
@@ -183,5 +206,37 @@ mod tests {
         assert_eq!(picker.next(), Some(tt));
         let remaining = picker.ordered();
         assert!(remaining.contains(&quiet));
+    }
+
+    #[test]
+    fn probcut_prefix_filters_before_bounding_and_is_deterministic() {
+        let mut position = Position::from_fen("6k1/8/8/5r2/3N4/8/4p3/6K1 w - - 0 1")
+            .expect("FEN parse must succeed");
+        let mut legal_moves = crate::core::MoveList::new();
+        position.generate_legal_moves(&mut legal_moves);
+        let tt = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("d4f5").expect("parse must succeed")))
+            .expect("winning TT capture must exist");
+        let hints = MoveOrderHints {
+            ply: 0,
+            quiescence_only: false,
+            pv_move: None,
+            tt_move: Some(tt),
+        };
+        let context = SearchContext::new(SearchLimits::new(3));
+
+        let first = MovePicker::new(&context, &position, &legal_moves, hints)
+            .ordered_probcut_candidates(&position, 1);
+        let second = MovePicker::new(&context, &position, &legal_moves, hints)
+            .ordered_probcut_candidates(&position, 1);
+        assert_eq!(first, second);
+        assert_eq!(first, vec![tt]);
+        assert!(
+            first
+                .iter()
+                .all(|mv| { mv.is_capture() && !mv.is_promotion() && position.see(*mv).0 >= 0 })
+        );
     }
 }

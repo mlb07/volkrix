@@ -129,6 +129,10 @@ fn qsearch_core<const USE_NNUE: bool>(
 
     let mut best_move = Move::NONE;
     let mut best_score = alpha;
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    let mut searched_captures = [Move::NONE; crate::core::movelist::MAX_MOVES];
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    let mut searched_capture_count = 0usize;
     let mut move_picker = MovePicker::new(context, position, &legal_moves, ordering_hints);
     while let Some(mv) = move_picker.next() {
         if !in_check && delta_pruning_is_eligible(position, mv, stand_pat.unwrap_or(alpha), alpha) {
@@ -142,7 +146,7 @@ fn qsearch_core<const USE_NNUE: bool>(
         let undo = context
             .make_search_move::<USE_NNUE>(position, mv)
             .expect("quiescence move must be legal");
-        context.set_previous_move(ply + 1, mv);
+        context.set_previous_move_from_position(position, ply + 1, mv);
         let Some(score) = qsearch_core::<USE_NNUE>(context, position, ply + 1, -beta, -alpha, true)
         else {
             context.set_previous_move(ply + 1, crate::core::Move::NONE);
@@ -153,12 +157,29 @@ fn qsearch_core<const USE_NNUE: bool>(
         context.unmake_search_move::<USE_NNUE>(position, mv, undo);
         let score = -score;
 
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if mv.is_capture() {
+            debug_assert!(searched_capture_count < searched_captures.len());
+            searched_captures[searched_capture_count] = mv;
+            searched_capture_count += 1;
+        }
+
         if score > alpha {
             alpha = score;
             best_score = score;
             best_move = mv;
             context.update_pv(ply, mv);
             if alpha >= beta {
+                #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                if mv.is_capture() && context.qsearch_capture_history_enabled() {
+                    context.record_qsearch_capture_history(position, mv, true);
+                    for failed in searched_captures[..searched_capture_count.saturating_sub(1)]
+                        .iter()
+                        .copied()
+                    {
+                        context.record_qsearch_capture_history(position, failed, false);
+                    }
+                }
                 break;
             }
         }
@@ -204,8 +225,8 @@ fn delta_pruning_margin() -> i32 {
 mod tests {
     use super::qsearch;
     use crate::{
-        core::Position,
-        search::{SearchLimits, root::SearchContext},
+        core::{ParsedMove, Position},
+        search::{SearchLimits, limits::SearchHeuristics, root::SearchContext},
     };
 
     #[test]
@@ -221,5 +242,30 @@ mod tests {
 
         assert_eq!(second, first);
         assert_eq!(context.nodes, 1, "the TT hit must avoid move expansion");
+    }
+
+    #[test]
+    fn capture_history_candidate_trains_a_qsearch_cutoff() {
+        let mut position = Position::from_fen("6k1/8/8/5r2/3N4/8/8/6K1 w - - 0 1")
+            .expect("FEN parse must succeed");
+        let mut legal_moves = crate::core::MoveList::new();
+        position.generate_legal_noisy_moves(&mut legal_moves);
+        let capture = legal_moves
+            .iter()
+            .copied()
+            .find(|mv| mv.matches_parsed(ParsedMove::parse("d4f5").expect("parse must succeed")))
+            .expect("winning capture must exist");
+        let before = position.to_fen();
+        let heuristics = SearchHeuristics::phase9_default().with_capture_history_experiment(true);
+        let mut context = SearchContext::new(
+            SearchLimits::new(1)
+                .without_tt()
+                .with_heuristics(heuristics),
+        );
+
+        qsearch::<false>(&mut context, &mut position, 1, -500, -100)
+            .expect("quiescence search must complete");
+        assert_eq!(position.to_fen(), before);
+        assert!(context.debug_capture_history_score(&position, capture) > 0);
     }
 }

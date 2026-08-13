@@ -17,12 +17,28 @@ pub(crate) struct SearchHeuristics {
     pub(crate) history_pruning: bool,
     pub(crate) probcut: bool,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) ordered_probcut: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) capture_history_qsearch: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) multi_ply_continuation: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) capture_lmr: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) time_management_candidate: bool,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) razoring: bool,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     pub(crate) multi_cut: bool,
     pub(crate) qsearch_tt: bool,
     pub(crate) tt_static_eval: bool,
     pub(crate) history_maluses: bool,
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "internal-testing",
+        feature = "spsa-tuning"
+    ))]
     pub(crate) contextual_lmr: bool,
     pub(crate) correction_history: bool,
     pub(crate) singular_extensions: bool,
@@ -52,12 +68,28 @@ impl SearchHeuristics {
             history_pruning: false,
             probcut: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            ordered_probcut: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            capture_history_qsearch: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            multi_ply_continuation: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            capture_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            time_management_candidate: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             razoring: false,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             multi_cut: false,
             qsearch_tt: false,
             tt_static_eval: false,
             history_maluses: false,
+            #[cfg(any(
+                test,
+                debug_assertions,
+                feature = "internal-testing",
+                feature = "spsa-tuning"
+            ))]
             contextual_lmr: false,
             correction_history: false,
             singular_extensions: false,
@@ -86,6 +118,20 @@ impl SearchHeuristics {
             history_pruning: true,
             probcut: true,
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            // Candidate ordering can reduce wasted ProbCut probes, but changes which tactical
+            // move is tested first. Keep it isolated until paired testing proves the tradeoff.
+            ordered_probcut: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            capture_history_qsearch: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            multi_ply_continuation: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            // Modern engines reduce late captures as well as quiet moves. Keep the conservative
+            // Volkrix adaptation isolated until fixed-depth evidence earns a paired match.
+            capture_lmr: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            time_management_candidate: false,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             // Razoring is a speculative fail-low shortcut. A held-out 1,000-game paired test
             // rejected it at 47.00%, so keep the experiment compiled out of production.
             razoring: false,
@@ -97,6 +143,12 @@ impl SearchHeuristics {
             qsearch_tt: true,
             tt_static_eval: true,
             history_maluses: true,
+            #[cfg(any(
+                test,
+                debug_assertions,
+                feature = "internal-testing",
+                feature = "spsa-tuning"
+            ))]
             // The contextual adjustment remains available for match testing, but the isolated
             // depth-7 profile expanded the tree slightly. The logarithmic reduction table is the
             // proven default until this extra adjustment passes SPRT.
@@ -180,6 +232,63 @@ impl SearchHeuristics {
         self
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_capture_lmr(mut self, enabled: bool) -> Self {
+        self.capture_lmr = enabled;
+        self
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_time_management_candidate(mut self, enabled: bool) -> Self {
+        self.time_management_candidate = enabled;
+        self
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_ordered_probcut(mut self, enabled: bool) -> Self {
+        self.ordered_probcut = enabled;
+        self
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_capture_history_experiment(mut self, enabled: bool) -> Self {
+        self.capture_history = enabled;
+        self.capture_history_qsearch = enabled;
+        self
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) const fn with_multi_ply_continuation(mut self, enabled: bool) -> Self {
+        self.multi_ply_continuation = enabled;
+        self
+    }
+
+    #[cfg(any(
+        test,
+        debug_assertions,
+        feature = "internal-testing",
+        feature = "spsa-tuning"
+    ))]
+    #[cfg_attr(
+        all(
+            feature = "spsa-tuning",
+            not(any(test, debug_assertions, feature = "internal-testing"))
+        ),
+        allow(dead_code)
+    )]
+    pub(crate) const fn with_contextual_lmr(mut self, enabled: bool) -> Self {
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "internal-testing",
+            feature = "spsa-tuning"
+        ))]
+        {
+            self.contextual_lmr = enabled;
+        }
+        self
+    }
+
     #[allow(dead_code)]
     pub(crate) const fn with_modern_search(mut self, enabled: bool) -> Self {
         self.capture_history = enabled;
@@ -190,7 +299,15 @@ impl SearchHeuristics {
         self.qsearch_tt = enabled;
         self.tt_static_eval = enabled;
         self.history_maluses = enabled;
-        self.contextual_lmr = enabled;
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "internal-testing",
+            feature = "spsa-tuning"
+        ))]
+        {
+            self.contextual_lmr = enabled;
+        }
         self
     }
 }

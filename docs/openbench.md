@@ -11,6 +11,11 @@ Neither tool downloads third-party engines or opening books. The operator is
 responsible for acquiring them under compatible licenses and preserving their
 source and license records.
 
+After deployment, use the fail-closed campaign workflow in
+[`openbench-operations.md`](openbench-operations.md) to freeze no-change, STC,
+LTC, and SPSA workloads; audit the server/reference worker; export verified
+results; and produce an auditable promotion decision.
+
 ## Production NNUE OpenBench builds
 
 Current OpenBench workers download the configured network and invoke the engine
@@ -167,9 +172,12 @@ python3 scripts/strength_lab.py verify \
   --lab /absolute/path/to/new-volkrix-gauntlet
 ```
 
-Preparation resolves all paths, verifies optional expected SHA-256 values, and
-freezes a matrix of profile/opponent commands. Relative `EvalFile` values become
-verified absolute paths. Before accepting the lab, it launches every distinct
+Preparation resolves all paths, verifies optional expected SHA-256 values, copies
+every executable, network, and opening book into a content-addressed `inputs/`
+directory inside the lab, and freezes a matrix of profile/opponent commands.
+Runtime commands and relative `EvalFile` values are rewritten to those verified
+self-contained copies, so deleting or moving the original sources cannot make a
+completed lab unverifiable. Before accepting the lab, it launches every distinct
 engine/effective-option vector through `uci`, `setoption`, `isready`, and a
 depth-one search; missing protocol acknowledgements, option errors, timeouts,
 and nonzero exits fail preparation. The exact preflight input, transcript, and

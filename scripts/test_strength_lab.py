@@ -66,6 +66,20 @@ for command in sys.stdin:
             output = root / "lab"
             lab.prepare(self.config(root), output)
             manifest = lab.load_lab(output)
+            self.assertEqual(manifest["input_storage"], "self-contained-copy-v1")
+            self.assertTrue(
+                pathlib.Path(manifest["openings"]["path"]).is_relative_to(
+                    (output / "inputs").resolve()
+                )
+            )
+            self.assertEqual(
+                pathlib.Path(manifest["openings"]["path"]).stat().st_mode & 0o222,
+                0,
+            )
+            self.assertNotEqual(
+                pathlib.Path(manifest["candidate"]["path"]).stat().st_mode & 0o111,
+                0,
+            )
             self.assertEqual([job["id"] for job in manifest["jobs"]], ["STC__Rival", "LTC__Rival"])
             self.assertEqual(len(manifest["preflights"]), 2)
             self.assertEqual(len(manifest["preflights"][0]["contexts"]), 2)
@@ -79,9 +93,40 @@ for command in sys.stdin:
             self.assertNotIn("movecount=3 score=400", command)
             self.assertNotIn("fi=true", command)
             lab.verify_inputs(manifest)
-            pathlib.Path(manifest["openings"]["path"]).write_bytes(b"changed")
+            frozen_openings = pathlib.Path(manifest["openings"]["path"])
+            frozen_openings.chmod(0o644)
+            frozen_openings.write_bytes(b"changed")
             with self.assertRaisesRegex(lab.LabError, "frozen input changed"):
                 lab.verify_inputs(manifest)
+
+    def test_prepared_lab_survives_deletion_of_every_source_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "lab"
+            config_path = self.config(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            network = self.make_file(root, "network.nnue", b"frozen-network")
+            config["candidate"]["options"]["EvalFile"] = str(network)
+            config["assets"] = [{"name": "network", "path": str(network)}]
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            source_paths = [
+                pathlib.Path(config["fastchess"]["path"]),
+                pathlib.Path(config["candidate"]["path"]),
+                pathlib.Path(config["openings"]["path"]),
+                pathlib.Path(config["opponents"][0]["path"]),
+                network,
+            ]
+
+            lab.prepare(config_path, output)
+            manifest = lab.load_lab(output)
+            for path in source_paths:
+                path.unlink()
+
+            lab.verify_inputs(manifest)
+            lab.verify_preflights(output, manifest)
+            job, _ = lab.verify_job(output, manifest["jobs"][0])
+            for source_path in source_paths:
+                self.assertNotIn(str(source_path), job["command"])
 
     def test_relative_evalfile_is_frozen_as_config_absolute_not_engine_relative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

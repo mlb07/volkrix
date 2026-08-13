@@ -21,7 +21,7 @@ SPEC.loader.exec_module(deploy)
 class OpenBenchDeploymentTests(unittest.TestCase):
     def fake_upstream(self, root: pathlib.Path) -> pathlib.Path:
         upstream = root / "OpenBench"
-        for directory in ("OpenBench", "OpenSite", "Config", "Books", "Engines"):
+        for directory in ("OpenBench", "OpenSite", "Config", "Books", "Engines", "Client"):
             (upstream / directory).mkdir(parents=True, exist_ok=True)
         (upstream / "OpenBench/__init__.py").write_text("", encoding="utf-8")
         (upstream / "OpenSite/__init__.py").write_text("", encoding="utf-8")
@@ -63,6 +63,18 @@ def verify_engine_datagen_preset(value): assert isinstance(value, dict)
             "        # Loop until we are shutdown by the atexit.register()\n"
             "        while not self.stop_event.is_set():\n"
             "            pass\n",
+            encoding="utf-8",
+        )
+        (upstream / "Client/utils.py").write_text(
+            "import argparse\nimport hashlib\nimport os\nimport platform\nimport requests\n"
+            "import shutil\nimport subprocess\n\n"
+            "IS_WINDOWS = False\nIS_LINUX = True\n\n"
+            "def kill_process_by_name(process_name):\n\n"
+            "    process_name = os.path.basename(process_name)\n\n"
+            "    if IS_LINUX:\n"
+            "        subprocess.run(['pkill', '-KILL', '-f', process_name])\n\n"
+            "    if IS_WINDOWS:\n"
+            "        subprocess.run(['taskkill', '/f', '/im', process_name])\n",
             encoding="utf-8",
         )
         config = {
@@ -127,6 +139,31 @@ def verify_engine_datagen_preset(value): assert isinstance(value, dict)
             with self.assertRaisesRegex(deploy.DeployError, "duplicate JSON key"):
                 deploy.strict_json(path)
 
+    def test_audit_emits_versioned_complete_top_level_schema(self) -> None:
+        args = argparse.Namespace(openbench_root=None, fastchess_root=None, network=None)
+
+        def fake_version(tool: str) -> tuple[str, tuple[int, ...]]:
+            return f"/{tool}: {tool} 99.0", (99, 0)
+
+        with (
+            mock.patch.object(deploy, "command_version", side_effect=fake_version),
+            mock.patch.object(
+                deploy,
+                "core_layout",
+                return_value={"logical": 4, "physical": 4, "performance": None, "efficiency": None},
+            ),
+            mock.patch.object(deploy, "machine_memory_bytes", return_value=8 * 1024**3),
+            mock.patch.object(deploy.platform, "system", return_value="Linux"),
+            mock.patch.object(deploy.platform, "machine", return_value="x86_64"),
+        ):
+            report = deploy.audit(args)
+
+        self.assertEqual(report["schema"], "volkrix-openbench-deployment-audit-v1")
+        self.assertEqual(
+            set(report),
+            {"schema", "ready", "blockers", "warnings", "facts", "external_remaining"},
+        )
+
     def test_prepare_copies_pinned_instance_without_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
@@ -172,6 +209,7 @@ def verify_engine_datagen_preset(value): assert isinstance(value, dict)
                     "OpenBench/workloads/view_workload.py",
                     "OpenBench/apps.py",
                     "OpenBench/pgn_watcher.py",
+                    "Client/utils.py",
                 ],
             )
             for relative in manifest["compatibility_patches"][:2]:
@@ -186,6 +224,10 @@ def verify_engine_datagen_preset(value): assert isinstance(value, dict)
                 "self.stop_event.wait(timeout=1)",
                 (output / "OpenBench/pgn_watcher.py").read_text(encoding="utf-8"),
             )
+            client_utils = (output / "Client/utils.py").read_text(encoding="utf-8")
+            self.assertIn("psutil.Process().children(recursive=True)", client_utils)
+            self.assertNotIn("subprocess.run(['pkill'", client_utils)
+            self.assertNotIn("subprocess.run(['taskkill'", client_utils)
             self.assertTrue((output / "OpenSite/volkrix_settings.py").is_file())
             self.assertFalse(any(output.rglob("credentials.*")))
             self.assertIn("openbench.env.example", manifest["files"])

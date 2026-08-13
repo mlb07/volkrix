@@ -1,0 +1,53 @@
+{
+  "schema": "volkrix-openbench-workload-v1",
+  "kind": "stc",
+  "campaign": "REPLACE_WITH_CAMPAIGN_NAME",
+  "engine": "Volkrix",
+  "source_repo": "https://github.com/mlb07/volkrix",
+  "dev": {
+    "commit": "REPLACE_WITH_40_CHARACTER_CANDIDATE_COMMIT",
+    "bench": 0,
+    "network_sha256": "c288c895ea924429ea9092e3f36b2b3c1f00f2a3a4c759ff7e57e79e3b43e4a7",
+    "options": "Threads=1 Hash=16"
+  },
+  "base": {
+    "commit": "REPLACE_WITH_40_CHARACTER_BASE_COMMIT",
+    "bench": 0,
+    "network_sha256": "c288c895ea924429ea9092e3f36b2b3c1f00f2a3a4c759ff7e57e79e3b43e4a7",
+    "options": "Threads=1 Hash=16"
+  },
+  "test": {
+    "mode": "SPRT",
+    "book": {
+      "name": "UHO_Lichess_4852_v1.epd",
+      "sha256": "7a7f6470615a69c6cf23d565417701d38732876f480af90d67b42abade35644a"
+    },
+    "time_control": "10.0+0.1",
+    "upload_pgns": "COMPACT",
+    "workload_size": 32,
+    "bounds": [0.0, 3.0],
+    "confidence": [0.05, 0.05],
+    "scale": {"method": "BOTH", "nps": 1000000},
+    "adjudication": {
+      "syzygy_wdl": "DISABLED",
+      "syzygy_adj": "DISABLED",
+      "win": "None",
+      "draw": "None"
+    }
+  },
+  "server": {
+    "openbench_commit": "9906bad18e044c4b455539317b8cf037393a7218",
+    "fastchess_commit": "90babe434bbfee23a6287f42d791f07b206fc82b",
+    "client_version": 49,
+    "network_name": "nn-c288c895ea92.nnue",
+    "reference_nps": 1000000
+  },
+  "worker": {
+    "threads": 4,
+    "sockets": 1,
+    "focus": "Volkrix",
+    "min_bench_samples": 5,
+    "max_bench_cv": 0.03,
+    "max_nps_deviation": 0.03
+  }
+}

@@ -47,6 +47,23 @@ unsafe fn dot_u8_i8_dotprod(input: &[u8], weights: &[i8]) -> i32 {
         vaddq_s32(accumulators[0], accumulators[1]),
         vaddq_s32(accumulators[2], accumulators[3]),
     );
+    let mut combined = combined;
+    // The first layer is normally wide enough for the four-way loop above,
+    // while the later SFNN layers are only 16--32 inputs wide.  Keep those
+    // layers on DotProd too instead of dropping their entire calculation to
+    // the scalar tail.
+    while i + 16 <= n {
+        let values = vreinterpretq_s8_u8(vld1q_u8(input.as_ptr().add(i)));
+        let row = vld1q_s8(weights.as_ptr().add(i));
+        std::arch::asm!(
+            "sdot {acc:v}.4s, {values:v}.16b, {row:v}.16b",
+            acc = inout(vreg) combined,
+            values = in(vreg) values,
+            row = in(vreg) row,
+            options(pure, nomem, nostack),
+        );
+        i += 16;
+    }
     let mut sum = vaddvq_s32(combined);
     while i < n {
         sum += input[i] as i32 * weights[i] as i32;
@@ -575,6 +592,48 @@ mod tests {
             assert_eq!(actual, expected);
             sub_i16(&mut actual, &weights16);
             assert_eq!(actual, initial);
+        }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "manual Apple-Silicon DotProd microprofile"]
+    fn aarch64_small_dotprod_profile_report() {
+        use std::{hint::black_box, time::Instant};
+
+        let mut seed = 0x51a7_0f93_6d2c_b841;
+        for len in [16usize, 30, 32] {
+            let input = (0..len)
+                .map(|_| (next(&mut seed) & 0x7f) as u8)
+                .collect::<Vec<_>>();
+            let weights = (0..len).map(|_| next(&mut seed) as i8).collect::<Vec<_>>();
+            let iterations = 2_000_000u64;
+
+            let scalar_started = Instant::now();
+            let mut scalar_checksum = 0i64;
+            for _ in 0..iterations {
+                scalar_checksum = scalar_checksum.wrapping_add(i64::from(dot_u8_i8_scalar(
+                    black_box(&input),
+                    black_box(&weights),
+                )));
+            }
+            let scalar_ns = scalar_started.elapsed().as_nanos();
+
+            let dotprod_started = Instant::now();
+            let mut dotprod_checksum = 0i64;
+            for _ in 0..iterations {
+                dotprod_checksum = dotprod_checksum.wrapping_add(i64::from(dot_u8_i8(
+                    black_box(&input),
+                    black_box(&weights),
+                )));
+            }
+            let dotprod_ns = dotprod_started.elapsed().as_nanos();
+
+            assert_eq!(dotprod_checksum, scalar_checksum);
+            println!(
+                "aarch64_small_dotprod len {len} iterations {iterations} scalar_ns {scalar_ns} dotprod_ns {dotprod_ns} speedup_x {:.3} checksum {dotprod_checksum}",
+                scalar_ns as f64 / dotprod_ns as f64,
+            );
         }
     }
 }

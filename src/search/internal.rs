@@ -19,6 +19,16 @@ pub enum HeuristicProfile {
     MultiCutEnabled,
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     RazoringEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    CaptureLmrEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    OrderedProbCutEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    CaptureHistoryEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    MultiPlyContinuationEnabled,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    ContextualLmrEnabled,
     CorrectionHistoryEnabled,
     SingularExtensionsEnabled,
 }
@@ -28,6 +38,8 @@ pub enum HeuristicProfile {
 pub enum SmpProfile {
     Lazy,
     RootSplit,
+    Diversified,
+    Adaptive,
 }
 
 impl SmpProfile {
@@ -35,6 +47,8 @@ impl SmpProfile {
         match self {
             Self::Lazy => SmpStrategy::Lazy,
             Self::RootSplit => SmpStrategy::RootSplit,
+            Self::Diversified => SmpStrategy::Diversified,
+            Self::Adaptive => SmpStrategy::Adaptive,
         }
     }
 }
@@ -50,6 +64,24 @@ impl HeuristicProfile {
             Self::MultiCutEnabled => SearchHeuristics::phase9_default().with_multi_cut(true),
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             Self::RazoringEnabled => SearchHeuristics::phase9_default().with_razoring(true),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::CaptureLmrEnabled => SearchHeuristics::phase9_default().with_capture_lmr(true),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::OrderedProbCutEnabled => {
+                SearchHeuristics::phase9_default().with_ordered_probcut(true)
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::CaptureHistoryEnabled => {
+                SearchHeuristics::phase9_default().with_capture_history_experiment(true)
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::MultiPlyContinuationEnabled => {
+                SearchHeuristics::phase9_default().with_multi_ply_continuation(true)
+            }
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            Self::ContextualLmrEnabled => {
+                SearchHeuristics::phase9_default().with_contextual_lmr(true)
+            }
             Self::CorrectionHistoryEnabled => {
                 SearchHeuristics::phase9_default().with_correction_history(true)
             }

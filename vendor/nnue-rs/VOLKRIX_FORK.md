@@ -16,7 +16,9 @@ integration and execution features:
 - compact caller-supplied board deltas;
 - lazy accumulator materialization support;
 - separate PSQT and positional evaluation components;
-- AArch64 NEON and ARM dot-product kernels with scalar parity tests.
+- AArch64 NEON and ARM dot-product kernels, including a DotProd remainder
+  path for the 16--32-element later network layers, with scalar parity tests
+  and an ignored Apple-Silicon microprofile.
 
 No Stockfish GPL source code is included in or copied into this fork. External
 network data retains its own license and checksum requirements.

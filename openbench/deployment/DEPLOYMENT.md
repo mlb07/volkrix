@@ -9,9 +9,12 @@ Django 5.2 LTS patch recorded in that lock file. It also applies and hashes two
 exact `timezone.now()` compatibility edits required by Django 5.2, prevents the
 PGN watcher from running during explicitly marked management commands, and
 delays its first production query until application initialization completes.
-Do not restore the upstream pin, alter those patches, or upgrade across a
-Django feature series without rerunning migrations, checks, and endpoint tests
-in a fresh environment.
+The generated client also replaces upstream's host-global `pkill`/`taskkill`
+cleanup with process-tree-scoped cleanup. Without that patch, two workers on
+one host can terminate each other's identically named match runners and engines
+at batch boundaries. Do not restore the upstream pin, alter those patches, or
+upgrade across a Django feature series without rerunning migrations, checks,
+endpoint tests, and a two-client no-change workload in a fresh environment.
 
 ## Isolated local server smoke
 
@@ -86,10 +89,13 @@ database or secret for deployment.
 
 ## Worker
 
-Workers need Python `requests`, Make, a C++ compiler for FastChess, Git, and
-Cargo 1.85 or newer. Clone the exact OpenBench commit from
-`VOLKRIX-DEPLOYMENT.json`, install `requests` in a dedicated environment, and
-provide credentials only at runtime:
+Workers need Python `requests`, `psutil`, `py-cpuinfo`, Make, a C++ compiler for
+FastChess, Git, and Cargo 1.85 or newer. Start from the generated instance's
+`Client/` directory, whose process-cleanup compatibility patch is identified
+and hashed by `VOLKRIX-DEPLOYMENT.json`. Do not replace it with the raw upstream
+client when more than one worker may share a host. Install
+`Client/requirements.txt` in a dedicated environment and provide credentials
+only at runtime:
 
 ```bash
 export OPENBENCH_USERNAME=REPLACE
@@ -112,3 +118,15 @@ speeds before trusting time-scaled results.
 Before accepting results, run a no-change STC workload and require a neutral
 result, identical bench node counts, and zero crashes, stalls, time forfeits, or
 illegal moves. Then validate an intentionally harmless source change end to end.
+
+For a disposable multi-client proof, use two separate copies of the generated
+`Client/` directory and distinct `-I` identities. Split only the measured
+physical-core budget between them. OpenBench reports results periodically and
+stops a fixed-game workload after the first pair-complete report that reaches
+the target, so concurrent workers may produce a small, auditable overshoot.
+Preserve the SQLite database, `Media/*.pgn.bz2`, deployment manifest, worker
+logs, and artifact hashes before teardown. Stop workers first, then stop the
+development server with `SIGINT`/`SIGTERM`. Recovery is simply to restart the
+server with the same disposable settings and relaunch each worker; delete the
+entire generated server and worker directories only after evidence has been
+copied elsewhere.

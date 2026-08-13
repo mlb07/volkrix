@@ -17,6 +17,7 @@ pub mod service;
 pub(crate) mod service;
 mod stockfish_nnue;
 pub(crate) mod tablebase;
+pub(crate) mod time_policy;
 mod tt;
 
 pub use bench::{BenchConfig, BenchResult, DualBenchStats, run_bench};

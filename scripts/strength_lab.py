@@ -17,6 +17,7 @@ import os
 import pathlib
 import queue
 import re
+import shutil
 import shlex
 import socket
 import subprocess
@@ -92,6 +93,66 @@ def write_new_atomic(path: pathlib.Path, data: bytes, mode: int = 0o444) -> None
         os.link(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def copy_new_verified(source: pathlib.Path, destination: pathlib.Path, digest: str) -> None:
+    """Copy one immutable input without buffering large books or networks in memory."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    descriptor = os.open(destination, flags, 0o600)
+    try:
+        with source.open("rb") as input_file, os.fdopen(descriptor, "wb") as output_file:
+            shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    if sha256_file(destination) != digest:
+        destination.unlink(missing_ok=True)
+        raise LabError(f"frozen input copy changed while reading: {source}")
+
+
+def freeze_inputs(manifest: dict[str, Any], output: pathlib.Path) -> None:
+    """Make a prepared lab self-contained and rewrite every runtime path to its copy."""
+    inputs = output / "inputs"
+    inputs.mkdir()
+    assets = [
+        manifest["fastchess"],
+        manifest["candidate"],
+        manifest["openings"],
+        *manifest["opponents"],
+        *manifest.get("assets", []),
+    ]
+    executable_paths = {
+        manifest["fastchess"]["path"],
+        manifest["candidate"]["path"],
+        *(engine["path"] for engine in manifest["opponents"]),
+    }
+    path_map: dict[str, str] = {}
+    frozen_by_digest: dict[str, pathlib.Path] = {}
+    for asset in assets:
+        source_text = asset["path"]
+        source = pathlib.Path(source_text)
+        digest = asset["sha256"]
+        destination = frozen_by_digest.get(digest)
+        if destination is None:
+            destination = inputs / digest
+            copy_new_verified(source, destination, digest)
+            frozen_by_digest[digest] = destination
+        path_map[source_text] = str(destination.resolve())
+
+    for destination in frozen_by_digest.values():
+        destination.chmod(0o444)
+    for source_text in executable_paths:
+        pathlib.Path(path_map[source_text]).chmod(0o555)
+    for asset in assets:
+        asset["path"] = path_map[asset["path"]]
+
+    for owner in [manifest["candidate"], *manifest["opponents"], *manifest["profiles"]]:
+        for option_name, option_value in owner["options"].items():
+            if option_value in path_map:
+                owner["options"][option_name] = path_map[option_value]
+    manifest["input_storage"] = "self-contained-copy-v1"
 
 
 def require_object(value: Any, label: str) -> dict[str, Any]:
@@ -634,6 +695,7 @@ def prepare(config_path: pathlib.Path, output: pathlib.Path) -> None:
                 "python": sys.version,
             }
         )
+        freeze_inputs(manifest, output)
         manifest["preflights"] = prepare_preflights(manifest, output)
         jobs: list[dict[str, Any]] = []
         jobs_root = output / "jobs"

@@ -18,6 +18,9 @@ use super::{
     tt::{self, Bound, TtHit, TtStore},
 };
 
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+use super::time_policy::{AspirationWindow, IterationInstability, IterationSignals};
+
 #[cfg(feature = "spsa-tuning")]
 use super::parameters::SearchParameters;
 
@@ -64,9 +67,26 @@ const RAZOR_MARGIN_BASE: i32 = 485;
 const RAZOR_MARGIN_DEPTH_SQUARED: i32 = 281;
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
 const RAZOR_MAX_DEPTH: usize = 4;
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const PROBCUT_CANDIDATE_LIMIT: usize = 8;
 
 type ContinuationHistory = [[[[[i16; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
 type CaptureHistory = [[[[i16; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2];
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const CONTINUATION_HISTORY_LEN: usize = 2 * PIECE_TYPE_COUNT * 64 * PIECE_TYPE_COUNT * 64;
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+const fn continuation_history_index(
+    color: usize,
+    previous_piece: usize,
+    previous_to: usize,
+    piece: usize,
+    to: usize,
+) -> usize {
+    ((((color * PIECE_TYPE_COUNT + previous_piece) * 64 + previous_to) * PIECE_TYPE_COUNT + piece)
+        * 64)
+        + to
+}
 pub(crate) type InfoReporter<'a> = Option<Box<dyn FnMut(&str) + 'a>>;
 
 struct CorrectionHistory {
@@ -461,7 +481,15 @@ pub(crate) struct SearchContext<'a> {
     killer_moves: [[Move; 2]; MAX_PLY],
     quiet_history: [[[i16; 64]; 64]; 2],
     continuation_history: Box<ContinuationHistory>,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    continuation_history_2: Option<Box<[i16]>>,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    continuation_history_4: Option<Box<[i16]>>,
     capture_history: Box<CaptureHistory>,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    capture_history_updates: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    previous_move_pieces: [Option<PieceType>; MAX_PLY],
     correction_history: Option<CorrectionHistory>,
     static_evals: [i32; MAX_PLY],
     static_eval_valid: [bool; MAX_PLY],
@@ -476,12 +504,20 @@ pub(crate) struct SearchContext<'a> {
     tablebases: Option<Arc<TablebaseService>>,
     info_reporter: InfoReporter<'a>,
     debug_counters: SearchDebugCounters,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    root_second_best_margin_cp: Option<i32>,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    aspiration_researches: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct SearchDebugCounters {
     lmr_reductions: u32,
     lmr_researches: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    capture_lmr_reductions: u32,
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    capture_lmr_researches: u32,
     pvs_scout_searches: u32,
     pvs_full_researches: u32,
     reverse_futility_prunes: u32,
@@ -557,6 +593,18 @@ struct LmrCandidate {
     gives_check: bool,
     is_hash_move: bool,
     quiets_searched: usize,
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CaptureLmrCandidate {
+    depth: usize,
+    is_pv: bool,
+    in_check: bool,
+    mv: Move,
+    gives_check: bool,
+    is_hash_move: bool,
+    searched_moves: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -691,7 +739,21 @@ impl<'a> SearchContext<'a> {
             continuation_history: Box::new(
                 [[[[[0; 64]; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2],
             ),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            continuation_history_2: limits
+                .heuristics
+                .multi_ply_continuation
+                .then(|| vec![0; CONTINUATION_HISTORY_LEN].into_boxed_slice()),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            continuation_history_4: limits
+                .heuristics
+                .multi_ply_continuation
+                .then(|| vec![0; CONTINUATION_HISTORY_LEN].into_boxed_slice()),
             capture_history: Box::new([[[[0; PIECE_TYPE_COUNT]; 64]; PIECE_TYPE_COUNT]; 2]),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            capture_history_updates: 0,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            previous_move_pieces: [None; MAX_PLY],
             correction_history: limits
                 .heuristics
                 .correction_history
@@ -716,6 +778,10 @@ impl<'a> SearchContext<'a> {
             tablebases: resources.tablebases,
             info_reporter,
             debug_counters: SearchDebugCounters::default(),
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            root_second_best_margin_cp: None,
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            aspiration_researches: 0,
         }
     }
 
@@ -758,6 +824,10 @@ impl<'a> SearchContext<'a> {
         let mut info_lines = Vec::new();
         let mut stability = IterationStability::default();
         let mut last_iteration_elapsed = None;
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let mut previous_iteration_elapsed = None;
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let mut instability = IterationInstability::default();
         let fallback_best_move = self
             .control
             .can_interrupt()
@@ -773,13 +843,28 @@ impl<'a> SearchContext<'a> {
         }
 
         for depth in 1..=depth_limit {
-            if self.hard_stop_requested()
-                || (completed_depth > 0
-                    && self.adaptive_soft_stop_requested(stability, last_iteration_elapsed))
-            {
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            let adaptive_stop = if self.heuristics.time_management_candidate {
+                self.candidate_soft_stop_requested(
+                    instability,
+                    previous_iteration_elapsed,
+                    last_iteration_elapsed,
+                )
+            } else {
+                self.adaptive_soft_stop_requested(stability, last_iteration_elapsed)
+            };
+            #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+            let adaptive_stop =
+                self.adaptive_soft_stop_requested(stability, last_iteration_elapsed);
+            if self.hard_stop_requested() || (completed_depth > 0 && adaptive_stop) {
                 break;
             }
             let iteration_started = Instant::now();
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            {
+                self.root_second_best_margin_cp = None;
+                self.aspiration_researches = 0;
+            }
             if self.control.role.is_main()
                 && let Some(tt) = self.tt.as_ref()
             {
@@ -793,6 +878,10 @@ impl<'a> SearchContext<'a> {
                     position,
                     depth as usize,
                     best_score,
+                    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                    instability.score_volatility_cp(),
+                    #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+                    0,
                 )
             } else {
                 self.search_root_core::<USE_TABLEBASES, USE_NNUE>(
@@ -817,6 +906,18 @@ impl<'a> SearchContext<'a> {
             best_score = depth_score;
             completed_depth = depth;
             stability.record(best_move, best_score);
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            {
+                let pv_signature = self.pv_signature();
+                instability.record(IterationSignals {
+                    best_move: best_move.map(Move::raw),
+                    pv_signature,
+                    score_cp: best_score,
+                    second_best_margin_cp: self.root_second_best_margin_cp,
+                    aspiration_researches: self.aspiration_researches,
+                });
+                previous_iteration_elapsed = last_iteration_elapsed;
+            }
             last_iteration_elapsed = Some(iteration_started.elapsed());
 
             let pv = self.collect_pv(0);
@@ -923,10 +1024,19 @@ impl<'a> SearchContext<'a> {
         position: &mut Position,
         depth: usize,
         guess: i32,
+        _volatility_cp: i32,
     ) -> RootSearchOutcome {
         let mut delta = search_parameter!(self, aspiration_delta, ASPIRATION_DELTA);
-        let mut alpha = (guess - delta).max(-INF);
-        let mut beta = (guess + delta).min(INF);
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let (mut alpha, mut beta) = if self.heuristics.time_management_candidate {
+            let window = AspirationWindow::initial(guess, delta, depth as u8, _volatility_cp);
+            delta = window.delta;
+            (window.alpha.max(-INF), window.beta.min(INF))
+        } else {
+            ((guess - delta).max(-INF), (guess + delta).min(INF))
+        };
+        #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+        let (mut alpha, mut beta) = ((guess - delta).max(-INF), (guess + delta).min(INF));
         loop {
             if self.hard_stop_requested() {
                 return RootSearchOutcome::Aborted(None);
@@ -937,13 +1047,39 @@ impl<'a> SearchContext<'a> {
                 return RootSearchOutcome::Aborted(None);
             };
             if score <= alpha && alpha > -INF {
-                delta = (delta * 2).min(INF / 2);
-                alpha = (alpha - delta).max(-INF);
+                #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                if self.heuristics.time_management_candidate {
+                    let widened = (AspirationWindow { alpha, beta, delta }).widen_low();
+                    alpha = candidate_aspiration_lower_bound(alpha, widened.alpha);
+                    delta = widened.delta.min(INF / 2);
+                    self.aspiration_researches = self.aspiration_researches.saturating_add(1);
+                } else {
+                    delta = (delta * 2).min(INF / 2);
+                    alpha = (alpha - delta).max(-INF);
+                }
+                #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+                {
+                    delta = (delta * 2).min(INF / 2);
+                    alpha = (alpha - delta).max(-INF);
+                }
                 continue;
             }
             if score >= beta && beta < INF {
-                delta = (delta * 2).min(INF / 2);
-                beta = (beta + delta).min(INF);
+                #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                if self.heuristics.time_management_candidate {
+                    let widened = (AspirationWindow { alpha, beta, delta }).widen_high();
+                    beta = candidate_aspiration_upper_bound(beta, widened.beta);
+                    delta = widened.delta.min(INF / 2);
+                    self.aspiration_researches = self.aspiration_researches.saturating_add(1);
+                } else {
+                    delta = (delta * 2).min(INF / 2);
+                    beta = (beta + delta).min(INF);
+                }
+                #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+                {
+                    delta = (delta * 2).min(INF / 2);
+                    beta = (beta + delta).min(INF);
+                }
                 continue;
             }
             return RootSearchOutcome::Complete(best_move, score);
@@ -997,6 +1133,10 @@ impl<'a> SearchContext<'a> {
         }
 
         let mut best_move = None;
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let mut best_root_score = -INF;
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        let mut second_root_score = -INF;
 
         let mut move_picker = MovePicker::new(self, position, &legal_moves, ordering_hints);
         while let Some(mv) = move_picker.next() {
@@ -1006,7 +1146,7 @@ impl<'a> SearchContext<'a> {
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("root move must be legal during search");
-            self.set_previous_move(1, mv);
+            self.set_previous_move_from_position(position, 1, mv);
             let score_result = if best_move.is_none() {
                 self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
@@ -1057,6 +1197,14 @@ impl<'a> SearchContext<'a> {
             self.set_previous_move(1, Move::NONE);
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
 
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            if score > best_root_score {
+                second_root_score = best_root_score;
+                best_root_score = score;
+            } else if score > second_root_score {
+                second_root_score = score;
+            }
+
             if score > alpha || best_move.is_none() {
                 alpha = score;
                 best_move = Some(mv);
@@ -1070,6 +1218,11 @@ impl<'a> SearchContext<'a> {
             }
         }
 
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        {
+            self.root_second_best_margin_cp = (second_root_score > -INF)
+                .then(|| best_root_score.saturating_sub(second_root_score).max(0));
+        }
         RootSearchOutcome::Complete(best_move, alpha)
     }
 
@@ -1090,7 +1243,7 @@ impl<'a> SearchContext<'a> {
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("helper root move must be legal during search");
-            self.set_previous_move(1, mv);
+            self.set_previous_move_from_position(position, 1, mv);
             let score_result = if best_move.is_none() {
                 self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
@@ -1269,6 +1422,12 @@ impl<'a> SearchContext<'a> {
         let static_eval = self.correct_static_eval(position, raw_static_eval, in_check);
         self.static_evals[ply] = static_eval;
         self.static_eval_valid[ply] = !in_check;
+        #[cfg(any(
+            test,
+            debug_assertions,
+            feature = "internal-testing",
+            feature = "spsa-tuning"
+        ))]
         let improving =
             ply >= 2 && self.static_eval_valid[ply - 2] && static_eval > self.static_evals[ply - 2];
 
@@ -1507,7 +1666,7 @@ impl<'a> SearchContext<'a> {
                 let undo = self
                     .make_search_move::<USE_NNUE>(position, mv)
                     .expect("multi-cut candidate must be legal");
-                self.set_previous_move(ply + 1, mv);
+                self.set_previous_move_from_position(position, ply + 1, mv);
                 let child_score = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth - 1 - MULTI_CUT_REDUCTION,
@@ -1568,7 +1727,18 @@ impl<'a> SearchContext<'a> {
                     search_parameter!(self, probcut_base, 180),
                     search_parameter!(self, probcut_slope, 5),
                 );
-            for mv in legal_moves.iter().copied() {
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            let probcut_candidates = if self.heuristics.ordered_probcut {
+                MovePicker::new(self, position, &legal_moves, ordering_hints)
+                    .ordered_probcut_candidates(position, PROBCUT_CANDIDATE_LIMIT)
+            } else {
+                legal_moves.iter().copied().collect()
+            };
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            let probcut_candidates = probcut_candidates.into_iter();
+            #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+            let probcut_candidates = legal_moves.iter().copied();
+            for mv in probcut_candidates {
                 if !mv.is_capture() || mv.is_promotion() {
                     continue;
                 }
@@ -1578,7 +1748,7 @@ impl<'a> SearchContext<'a> {
                 let undo = self
                     .make_search_move::<USE_NNUE>(position, mv)
                     .expect("probcut move must be legal");
-                self.set_previous_move(ply + 1, mv);
+                self.set_previous_move_from_position(position, ply + 1, mv);
                 let score = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                     position,
                     depth.saturating_sub(4),
@@ -1706,34 +1876,72 @@ impl<'a> SearchContext<'a> {
                 continue;
             }
 
+            let quiet_lmr_eligible = lmr_is_eligible(
+                self.heuristics,
+                LmrCandidate {
+                    depth,
+                    is_pv: child_is_pv,
+                    in_check,
+                    mv,
+                    gives_check,
+                    is_hash_move,
+                    quiets_searched,
+                },
+            );
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            let capture_lmr_eligible = capture_lmr_is_eligible(
+                self.heuristics,
+                CaptureLmrCandidate {
+                    depth,
+                    is_pv: child_is_pv,
+                    in_check,
+                    mv,
+                    gives_check,
+                    is_hash_move,
+                    searched_moves,
+                },
+            );
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            let late_move_reduction_eligible = quiet_lmr_eligible || capture_lmr_eligible;
+            #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+            let late_move_reduction_eligible = quiet_lmr_eligible;
+
             let undo = self
                 .make_search_move::<USE_NNUE>(position, mv)
                 .expect("searched move must be legal");
-            self.previous_moves[ply + 1] = mv;
+            self.set_previous_move_from_position(position, ply + 1, mv);
             let child_depth = depth - 1 + usize::from(singular_move == Some(mv));
 
-            let score_result = if !is_exclusion
-                && lmr_is_eligible(
-                    self.heuristics,
-                    LmrCandidate {
-                        depth,
-                        is_pv: child_is_pv,
-                        in_check,
-                        mv,
-                        gives_check,
-                        is_hash_move,
-                        quiets_searched,
-                    },
-                ) {
+            let score_result = if !is_exclusion && late_move_reduction_eligible {
                 self.debug_counters.lmr_reductions += 1;
-                let reduction = if self.heuristics.contextual_lmr {
+                #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                if capture_lmr_eligible {
+                    self.debug_counters.capture_lmr_reductions =
+                        self.debug_counters.capture_lmr_reductions.saturating_add(1);
+                }
+                #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                let reduction = if capture_lmr_eligible {
+                    capture_lmr_reduction(
+                        depth,
+                        searched_moves,
+                        see_score,
+                        search_parameter!(self, lmr_divisor_pct, 150),
+                    )
+                } else if self.heuristics.contextual_lmr {
                     contextual_lmr_reduction_with_parameters(
                         depth,
                         quiets_searched,
                         improving,
                         node_state.cut_node,
+                        node_state.is_pv,
                         history_score,
                         search_parameter!(self, lmr_divisor_pct, 150),
+                        search_parameter!(self, lmr_cut_adjust, 1),
+                        search_parameter!(self, lmr_pv_adjust, 1),
+                        search_parameter!(self, lmr_improving_adjust, 1),
+                        search_parameter!(self, lmr_history_threshold, 4_000),
+                        search_parameter!(self, lmr_bad_history_adjust, 1),
+                        search_parameter!(self, lmr_good_history_adjust, 1),
                     )
                 } else {
                     lmr_reduction_with_parameters(
@@ -1742,6 +1950,42 @@ impl<'a> SearchContext<'a> {
                         search_parameter!(self, lmr_divisor_pct, 150),
                     )
                 };
+                #[cfg(all(
+                    not(any(test, debug_assertions, feature = "internal-testing")),
+                    feature = "spsa-tuning"
+                ))]
+                let reduction = if self.heuristics.contextual_lmr {
+                    contextual_lmr_reduction_with_parameters(
+                        depth,
+                        quiets_searched,
+                        improving,
+                        node_state.cut_node,
+                        node_state.is_pv,
+                        history_score,
+                        search_parameter!(self, lmr_divisor_pct, 150),
+                        search_parameter!(self, lmr_cut_adjust, 1),
+                        search_parameter!(self, lmr_pv_adjust, 1),
+                        search_parameter!(self, lmr_improving_adjust, 1),
+                        search_parameter!(self, lmr_history_threshold, 4_000),
+                        search_parameter!(self, lmr_bad_history_adjust, 1),
+                        search_parameter!(self, lmr_good_history_adjust, 1),
+                    )
+                } else {
+                    lmr_reduction_with_parameters(
+                        depth,
+                        quiets_searched,
+                        search_parameter!(self, lmr_divisor_pct, 150),
+                    )
+                };
+                #[cfg(all(
+                    not(any(test, debug_assertions, feature = "internal-testing")),
+                    not(feature = "spsa-tuning")
+                ))]
+                let reduction = lmr_reduction_with_parameters(
+                    depth,
+                    quiets_searched,
+                    search_parameter!(self, lmr_divisor_pct, 150),
+                );
                 let scout_beta = (-alpha).min(INF);
                 let scout_alpha = scout_beta.saturating_sub(1);
                 let Some(reduced_score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
@@ -1758,6 +2002,11 @@ impl<'a> SearchContext<'a> {
                 let reduced_score = -reduced_score;
                 if lmr_requires_full_research(reduced_score, alpha) {
                     self.debug_counters.lmr_researches += 1;
+                    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+                    if capture_lmr_eligible {
+                        self.debug_counters.capture_lmr_researches =
+                            self.debug_counters.capture_lmr_researches.saturating_add(1);
+                    }
                     let Some(full_depth_score) = self.alpha_beta_core::<USE_TABLEBASES, USE_NNUE>(
                         position,
                         child_depth,
@@ -1766,7 +2015,7 @@ impl<'a> SearchContext<'a> {
                         scout_beta,
                         SearchNodeState::cut(),
                     ) else {
-                        self.previous_moves[ply + 1] = Move::NONE;
+                        self.set_previous_move(ply + 1, Move::NONE);
                         self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                         return None;
                     };
@@ -1810,7 +2059,7 @@ impl<'a> SearchContext<'a> {
                     scout_beta,
                     SearchNodeState::cut(),
                 ) else {
-                    self.previous_moves[ply + 1] = Move::NONE;
+                    self.set_previous_move(ply + 1, Move::NONE);
                     self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                     return None;
                 };
@@ -1832,7 +2081,7 @@ impl<'a> SearchContext<'a> {
             };
 
             let Some(score) = score_result else {
-                self.previous_moves[ply + 1] = Move::NONE;
+                self.set_previous_move(ply + 1, Move::NONE);
                 self.unmake_search_move::<USE_NNUE>(position, mv, undo);
                 return None;
             };
@@ -1844,7 +2093,7 @@ impl<'a> SearchContext<'a> {
                 searched_captures[searched_capture_count] = mv;
                 searched_capture_count += 1;
             }
-            self.previous_moves[ply + 1] = Move::NONE;
+            self.set_previous_move(ply + 1, Move::NONE);
             self.unmake_search_move::<USE_NNUE>(position, mv, undo);
 
             if score > alpha {
@@ -1951,6 +2200,16 @@ impl<'a> SearchContext<'a> {
         self.pv_table[ply][ply..end].to_vec()
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    fn pv_signature(&self) -> u64 {
+        let mut signature = 0xcbf2_9ce4_8422_2325_u64;
+        for mv in &self.pv_table[0][..self.pv_length[0]] {
+            signature ^= u64::from(mv.raw());
+            signature = signature.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        signature
+    }
+
     fn capture_completed_pv(&mut self, pv: &[Move]) {
         self.previous_iteration_pv.fill(Move::NONE);
         self.previous_iteration_pv_length = pv.len();
@@ -2042,6 +2301,11 @@ impl<'a> SearchContext<'a> {
         self.capture_history[color][attacker][mv.to().index()][captured] as i32
     }
 
+    #[cfg(test)]
+    pub(crate) fn debug_capture_history_score(&self, position: &Position, mv: Move) -> i32 {
+        self.capture_history_score(position, mv)
+    }
+
     fn history_score(&self, position: &Position, mv: Move) -> i32 {
         let color = position.side_to_move().index();
         self.quiet_history[color][mv.from().index()][mv.to().index()] as i32
@@ -2055,8 +2319,42 @@ impl<'a> SearchContext<'a> {
             return 0;
         };
         let color = position.side_to_move().index();
-        self.continuation_history[color][prev_piece][prev_to.index()][piece.piece_type().index()]
-            [mv.to().index()] as i32
+        let piece = piece.piece_type().index();
+        #[allow(unused_mut)]
+        let mut score = self.continuation_history[color][prev_piece][prev_to.index()][piece]
+            [mv.to().index()] as i32;
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if self.heuristics.multi_ply_continuation {
+            if let (Some(table), Some((context_piece, context_to))) = (
+                self.continuation_history_2.as_ref(),
+                self.previous_move_context_at_distance(ply, 2),
+            ) {
+                score += i32::from(
+                    table[continuation_history_index(
+                        color,
+                        context_piece,
+                        context_to.index(),
+                        piece,
+                        mv.to().index(),
+                    )],
+                ) / 2;
+            }
+            if let (Some(table), Some((context_piece, context_to))) = (
+                self.continuation_history_4.as_ref(),
+                self.previous_move_context_at_distance(ply, 4),
+            ) {
+                score += i32::from(
+                    table[continuation_history_index(
+                        color,
+                        context_piece,
+                        context_to.index(),
+                        piece,
+                        mv.to().index(),
+                    )],
+                ) / 4;
+            }
+        }
+        score
     }
 
     fn previous_move_context(
@@ -2074,6 +2372,21 @@ impl<'a> SearchContext<'a> {
         }
         let piece = position.piece_at(prev.to())?;
         Some((piece.piece_type().index(), prev.to()))
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    fn previous_move_context_at_distance(
+        &self,
+        ply: usize,
+        distance: usize,
+    ) -> Option<(usize, crate::core::Square)> {
+        let index = ply.checked_add(1)?.checked_sub(distance)?;
+        let mv = *self.previous_moves.get(index)?;
+        if mv.is_none() {
+            return None;
+        }
+        let piece = self.previous_move_pieces.get(index)?.as_ref()?;
+        Some((piece.index(), mv.to()))
     }
 
     fn record_quiet_cutoff(&mut self, position: &Position, mv: Move, ply: usize, depth: usize) {
@@ -2114,6 +2427,37 @@ impl<'a> SearchContext<'a> {
         let entry = &mut self.continuation_history[color][prev_piece][prev_to.index()]
             [piece.piece_type().index()][mv.to().index()];
         update_history_entry(entry, bonus);
+
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if self.heuristics.multi_ply_continuation {
+            let piece = piece.piece_type().index();
+            if let Some((context_piece, context_to)) =
+                self.previous_move_context_at_distance(ply, 2)
+                && let Some(table) = self.continuation_history_2.as_mut()
+            {
+                let entry = &mut table[continuation_history_index(
+                    color,
+                    context_piece,
+                    context_to.index(),
+                    piece,
+                    mv.to().index(),
+                )];
+                update_history_entry(entry, bonus * 3 / 4);
+            }
+            if let Some((context_piece, context_to)) =
+                self.previous_move_context_at_distance(ply, 4)
+                && let Some(table) = self.continuation_history_4.as_mut()
+            {
+                let entry = &mut table[continuation_history_index(
+                    color,
+                    context_piece,
+                    context_to.index(),
+                    piece,
+                    mv.to().index(),
+                )];
+                update_history_entry(entry, bonus / 2);
+            }
+        }
     }
 
     fn record_capture_history(
@@ -2130,12 +2474,62 @@ impl<'a> SearchContext<'a> {
             return;
         };
         let bonus = if success {
-            history_bonus(depth, search_parameter!(self, history_bonus_scale, 32))
+            history_bonus(
+                depth,
+                search_parameter!(self, capture_history_bonus_scale, 24),
+            )
         } else {
-            -history_bonus(depth, search_parameter!(self, history_bonus_scale, 32))
+            -history_bonus(
+                depth,
+                search_parameter!(self, capture_history_malus_scale, 32),
+            )
         };
         let entry = &mut self.capture_history[color][attacker][mv.to().index()][captured];
         update_history_entry(entry, bonus);
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        {
+            self.capture_history_updates = self.capture_history_updates.saturating_add(1);
+            let interval =
+                search_parameter!(self, capture_history_decay_interval, 4_096).max(1) as u32;
+            if self.capture_history_updates.is_multiple_of(interval) {
+                self.decay_capture_history(search_parameter!(
+                    self,
+                    capture_history_retention_pct,
+                    94
+                ));
+            }
+        }
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    fn decay_capture_history(&mut self, retention_pct: i32) {
+        let retention_pct = retention_pct.clamp(0, 100);
+        for color in self.capture_history.iter_mut() {
+            for attacker in color.iter_mut() {
+                for destination in attacker.iter_mut() {
+                    for entry in destination.iter_mut() {
+                        *entry = (i32::from(*entry) * retention_pct / 100) as i16;
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) fn qsearch_capture_history_enabled(&self) -> bool {
+        self.heuristics.capture_history && self.heuristics.capture_history_qsearch
+    }
+
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    pub(crate) fn record_qsearch_capture_history(
+        &mut self,
+        position: &Position,
+        mv: Move,
+        success: bool,
+    ) {
+        if self.qsearch_capture_history_enabled() {
+            self.record_capture_history(position, mv, 1, success);
+        }
     }
 
     fn record_killer(&mut self, ply: usize, mv: Move) {
@@ -2298,7 +2692,27 @@ impl<'a> SearchContext<'a> {
     pub(crate) fn set_previous_move(&mut self, ply: usize, mv: Move) {
         if ply < MAX_PLY {
             self.previous_moves[ply] = mv;
+            #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+            {
+                self.previous_move_pieces[ply] = None;
+            }
         }
+    }
+
+    pub(crate) fn set_previous_move_from_position(
+        &mut self,
+        position: &Position,
+        ply: usize,
+        mv: Move,
+    ) {
+        self.set_previous_move(ply, mv);
+        #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+        if ply < MAX_PLY && !mv.is_none() {
+            self.previous_move_pieces[ply] =
+                position.piece_at(mv.to()).map(|piece| piece.piece_type());
+        }
+        #[cfg(not(any(test, debug_assertions, feature = "internal-testing")))]
+        let _ = position;
     }
 
     fn excluded_move(&self, ply: usize) -> Option<Move> {
@@ -2398,6 +2812,53 @@ impl<'a> SearchContext<'a> {
         })
     }
 
+    #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+    fn candidate_soft_stop_requested(
+        &self,
+        instability: IterationInstability,
+        previous_iteration_elapsed: Option<std::time::Duration>,
+        last_iteration_elapsed: Option<std::time::Duration>,
+    ) -> bool {
+        let Some(soft_deadline) = self.effective_deadline(self.control.soft_deadline) else {
+            return false;
+        };
+        let hard_deadline = self.effective_deadline(self.control.hard_deadline);
+        let now = Instant::now();
+        if hard_deadline.is_none_or(|hard| hard <= soft_deadline) {
+            // Preserve fixed-movetime semantics exactly.
+            return now >= soft_deadline;
+        }
+
+        let timing_started = self
+            .control
+            .ponder_state
+            .as_ref()
+            .and_then(|ponder| ponder.hit_at())
+            .unwrap_or(self.started);
+        let nominal_budget = soft_deadline.saturating_duration_since(timing_started);
+        let adaptive_budget = nominal_budget.mul_f64(instability.soft_budget_factor());
+        let adaptive_deadline = timing_started
+            .checked_add(adaptive_budget)
+            .unwrap_or(soft_deadline);
+        let effective_deadline =
+            hard_deadline.map_or(adaptive_deadline, |hard| adaptive_deadline.min(hard));
+        if now >= effective_deadline {
+            return true;
+        }
+
+        let Some(latest) = last_iteration_elapsed else {
+            return false;
+        };
+        let millis =
+            |duration: std::time::Duration| duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        let remaining_ms = millis(effective_deadline.saturating_duration_since(now));
+        !instability.should_start_next_iteration(
+            previous_iteration_elapsed.map(millis),
+            millis(latest),
+            remaining_ms,
+        )
+    }
+
     fn effective_deadline(&self, deadline: Option<Instant>) -> Option<Instant> {
         let deadline = deadline?;
         match self.control.ponder_state.as_ref() {
@@ -2422,6 +2883,37 @@ fn lmr_is_eligible(heuristics: SearchHeuristics, candidate: LmrCandidate) -> boo
         && !candidate.gives_check
         && !candidate.is_hash_move
         && candidate.quiets_searched > 2
+}
+
+/// Conservative late-capture reduction experiment.
+///
+/// The normal LMR path deliberately excludes every capture. This seam targets captures that
+/// appear after already-searched moves at a non-PV node. Promotions, checking moves, hash moves,
+/// shallow nodes, and the first two moves retain full depth. Non-losing captures are limited to
+/// a one-ply reduction; losing captures may lose a second ply when the LMR table calls for it.
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn capture_lmr_is_eligible(heuristics: SearchHeuristics, candidate: CaptureLmrCandidate) -> bool {
+    heuristics.capture_lmr
+        && heuristics.late_move_reductions
+        && !candidate.is_pv
+        && !candidate.in_check
+        && candidate.depth >= 5
+        && candidate.mv.is_capture()
+        && !candidate.mv.is_promotion()
+        && !candidate.gives_check
+        && !candidate.is_hash_move
+        && candidate.searched_moves >= 2
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn capture_lmr_reduction(
+    depth: usize,
+    searched_moves: usize,
+    see_score: i32,
+    divisor_pct: i32,
+) -> usize {
+    let ceiling = if see_score < 0 { 2 } else { 1 };
+    lmr_reduction_with_parameters(depth, searched_moves + 1, divisor_pct).min(ceiling)
 }
 
 #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
@@ -2518,31 +3010,61 @@ fn build_lmr_reductions(divisor_pct: i32) -> [[u8; MAX_MOVES + 1]; MAX_PLY] {
     table
 }
 
+#[allow(clippy::too_many_arguments)]
+#[cfg(any(
+    test,
+    debug_assertions,
+    feature = "internal-testing",
+    feature = "spsa-tuning"
+))]
 fn contextual_lmr_reduction_with_parameters(
     depth: usize,
     quiets_searched: usize,
     improving: bool,
     cut_node: bool,
+    pv_node: bool,
     history_score: i32,
     divisor_pct: i32,
+    cut_adjust: i32,
+    pv_adjust: i32,
+    improving_adjust: i32,
+    history_threshold: i32,
+    bad_history_adjust: i32,
+    good_history_adjust: i32,
 ) -> usize {
     let mut reduction = lmr_reduction_with_parameters(depth, quiets_searched, divisor_pct) as i32;
     if cut_node {
-        reduction += 1;
+        reduction += cut_adjust;
+    }
+    if pv_node {
+        reduction -= pv_adjust;
     }
     if improving {
-        reduction -= 1;
+        reduction -= improving_adjust;
     }
-    if history_score < -4_000 {
-        reduction += 1;
-    } else if history_score > 4_000 {
-        reduction -= 1;
+    let history_threshold = history_threshold.max(1);
+    if history_score < -history_threshold {
+        reduction += bad_history_adjust;
+    } else if history_score > history_threshold {
+        reduction -= good_history_adjust;
     }
     reduction.clamp(1, depth.saturating_sub(1) as i32) as usize
 }
 
 fn lmr_requires_full_research(reduced_score: i32, alpha: i32) -> bool {
     reduced_score > alpha
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn candidate_aspiration_lower_bound(current: i32, widened: i32) -> i32 {
+    let widened = widened.max(-INF);
+    if widened >= current { -INF } else { widened }
+}
+
+#[cfg(any(test, debug_assertions, feature = "internal-testing"))]
+fn candidate_aspiration_upper_bound(current: i32, widened: i32) -> i32 {
+    let widened = widened.min(INF);
+    if widened <= current { INF } else { widened }
 }
 
 fn correction_history_update_is_eligible(
@@ -2795,8 +3317,15 @@ fn contextual_lmr_reduction(
         quiets_searched,
         improving,
         cut_node,
+        false,
         history_score,
         150,
+        1,
+        1,
+        1,
+        4_000,
+        1,
+        1,
     )
 }
 
@@ -3044,16 +3573,16 @@ fn validated_tt_move_hint(legal_moves: &MoveList, tt_move_hint: Option<Move>) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Bound, CorrectionUpdate, ForwardPruneCandidate, IterationStability, LmrCandidate,
-        MULTI_CUT_MIN_DEPTH, MULTI_CUT_REQUIRED_CUTOFFS, Move, MoveList, MoveOrderHints,
-        PonderState, Position, SearchContext, SearchHeuristics, SearchLimits, SearchNodeState,
-        SearchResources, contextual_lmr_reduction, correction_history_keys,
-        correction_history_update_is_eligible, futility_pruning_is_eligible,
-        late_move_pruning_is_eligible, lmr_is_eligible, lmr_reduction, lmr_requires_full_research,
-        mate_distance_bounds, multi_cut_is_eligible, null_move_is_eligible, null_move_reduction,
-        null_move_requires_verification, razoring_is_eligible, razoring_margin,
-        reverse_futility_is_eligible, singular_probe, tt_cutoff_score, update_history_entry,
-        validated_tt_move_hint,
+        Bound, CaptureLmrCandidate, CorrectionUpdate, ForwardPruneCandidate, IterationStability,
+        LmrCandidate, MULTI_CUT_MIN_DEPTH, MULTI_CUT_REQUIRED_CUTOFFS, Move, MoveList,
+        MoveOrderHints, PonderState, Position, SearchContext, SearchHeuristics, SearchLimits,
+        SearchNodeState, SearchResources, capture_lmr_is_eligible, capture_lmr_reduction,
+        contextual_lmr_reduction, correction_history_keys, correction_history_update_is_eligible,
+        futility_pruning_is_eligible, late_move_pruning_is_eligible, lmr_is_eligible,
+        lmr_reduction, lmr_requires_full_research, mate_distance_bounds, multi_cut_is_eligible,
+        null_move_is_eligible, null_move_reduction, null_move_requires_verification,
+        razoring_is_eligible, razoring_margin, reverse_futility_is_eligible, singular_probe,
+        tt_cutoff_score, update_history_entry, validated_tt_move_hint,
     };
     use crate::core::{ParsedMove, Square, chess_move::FLAG_CAPTURE};
     use crate::search::tablebase::{self, MockTablebaseBackend, TablebaseService, WdlOutcome};
@@ -3590,6 +4119,57 @@ mod tests {
     }
 
     #[test]
+    fn multi_ply_continuation_combines_two_and_four_ply_contexts() {
+        let position = Position::startpos();
+        let mv = Move::new(square("e2"), square("e4"));
+        let heuristics = SearchHeuristics::phase9_default().with_multi_ply_continuation(true);
+        let mut context = SearchContext::new(SearchLimits::new(3).with_heuristics(heuristics));
+        context.previous_moves[4] = Move::new(square("a1"), square("a2"));
+        context.previous_moves[3] = Move::new(square("b1"), square("b2"));
+        context.previous_move_pieces[3] = Some(crate::core::PieceType::Knight);
+        context.previous_moves[1] = Move::new(square("c1"), square("c2"));
+        context.previous_move_pieces[1] = Some(crate::core::PieceType::Bishop);
+
+        let color = position.side_to_move().index();
+        let current_piece = crate::core::PieceType::Pawn.index();
+        context
+            .continuation_history_2
+            .as_mut()
+            .expect("two-ply table must be allocated")[super::continuation_history_index(
+            color,
+            crate::core::PieceType::Knight.index(),
+            square("b2").index(),
+            current_piece,
+            mv.to().index(),
+        )] = 4_000;
+        context
+            .continuation_history_4
+            .as_mut()
+            .expect("four-ply table must be allocated")[super::continuation_history_index(
+            color,
+            crate::core::PieceType::Bishop.index(),
+            square("c2").index(),
+            current_piece,
+            mv.to().index(),
+        )] = 4_000;
+
+        assert_eq!(context.continuation_score(&position, mv, 4), 3_000);
+    }
+
+    #[test]
+    fn capture_history_decay_is_bounded_and_deterministic() {
+        let heuristics = SearchHeuristics::phase9_default().with_capture_history_experiment(true);
+        let mut context = SearchContext::new(SearchLimits::new(3).with_heuristics(heuristics));
+        context.capture_history[0][0][0][0] = 1_000;
+        context.capture_history[1][5][63][5] = -1_000;
+        context.decay_capture_history(75);
+        assert_eq!(context.capture_history[0][0][0][0], 750);
+        assert_eq!(context.capture_history[1][5][63][5], -750);
+        context.decay_capture_history(200);
+        assert_eq!(context.capture_history[0][0][0][0], 750);
+    }
+
+    #[test]
     fn previous_iteration_pv_hint_extends_below_root_when_prefix_matches() {
         let mut root = Position::startpos();
         let mut root_moves = MoveList::new();
@@ -3799,6 +4379,130 @@ mod tests {
         assert_eq!(lmr_reduction(4, 3), 1);
         assert_eq!(lmr_reduction(7, 5), 2);
         assert_eq!(lmr_reduction(10, 9), 3);
+    }
+
+    #[test]
+    fn capture_lmr_requires_a_late_guarded_non_pv_capture() {
+        let capture = Move::new(square("d4"), square("e2")).with_flags(FLAG_CAPTURE);
+        let heuristics = SearchHeuristics::phase9_default().with_capture_lmr(true);
+        let candidate = CaptureLmrCandidate {
+            depth: 6,
+            is_pv: false,
+            in_check: false,
+            mv: capture,
+            gives_check: false,
+            is_hash_move: false,
+            searched_moves: 2,
+        };
+
+        assert!(capture_lmr_is_eligible(heuristics, candidate));
+        assert!(!capture_lmr_is_eligible(
+            SearchHeuristics::phase9_default(),
+            candidate
+        ));
+        assert!(!capture_lmr_is_eligible(
+            SearchHeuristics::phase9_default()
+                .with_late_move_reductions(false)
+                .with_capture_lmr(true),
+            candidate
+        ));
+        for rejected in [
+            CaptureLmrCandidate {
+                depth: 4,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                is_pv: true,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                in_check: true,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                gives_check: true,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                is_hash_move: true,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                searched_moves: 1,
+                ..candidate
+            },
+            CaptureLmrCandidate {
+                mv: Move::new(square("a2"), square("a3")),
+                ..candidate
+            },
+        ] {
+            assert!(!capture_lmr_is_eligible(heuristics, rejected));
+        }
+
+        let promotion_capture = capture.with_promotion(crate::core::PieceType::Queen);
+        assert!(!capture_lmr_is_eligible(
+            heuristics,
+            CaptureLmrCandidate {
+                mv: promotion_capture,
+                ..candidate
+            }
+        ));
+        assert_eq!(capture_lmr_reduction(5, 2, -1, 150), 1);
+        assert_eq!(capture_lmr_reduction(12, 12, -1, 150), 2);
+        assert_eq!(capture_lmr_reduction(12, 12, 0, 150), 1);
+        #[cfg(feature = "spsa-tuning")]
+        {
+            assert_eq!(capture_lmr_reduction(6, 2, -1, 80), 2);
+            assert_eq!(capture_lmr_reduction(6, 2, -1, 220), 1);
+        }
+    }
+
+    #[test]
+    fn capture_lmr_live_search_is_deterministic_and_restores_position() {
+        let heuristics = SearchHeuristics::phase9_default().with_capture_lmr(true);
+        let fens = [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r2q1rk1/ppp2ppp/2npbn2/2b1p3/2B1P3/2NP1N2/PPP2PPP/R1BQ1RK1 w - - 0 8",
+        ];
+        let mut first = Vec::new();
+        let mut first_reductions = 0u32;
+        let mut first_researches = 0u32;
+
+        for fen in fens {
+            let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+            let before = position.to_fen();
+            let limits = SearchLimits::new(6).with_heuristics(heuristics);
+            let mut context = SearchContext::new(limits);
+            let score = context
+                .alpha_beta(&mut position, 6, 1, -50, 50, SearchNodeState::cut())
+                .expect("search must complete");
+            assert_eq!(position.to_fen(), before);
+            first_reductions =
+                first_reductions.saturating_add(context.debug_counters().capture_lmr_reductions);
+            first_researches =
+                first_researches.saturating_add(context.debug_counters().capture_lmr_researches);
+            first.push((score, context.nodes));
+        }
+        assert!(
+            first_reductions > 0,
+            "live search must exercise capture LMR"
+        );
+        assert!(
+            first_researches > 0,
+            "an alpha-improving reduced capture must receive a full-depth re-search"
+        );
+
+        let mut second = Vec::new();
+        for fen in fens {
+            let mut position = Position::from_fen(fen).expect("FEN parse must succeed");
+            let limits = SearchLimits::new(6).with_heuristics(heuristics);
+            let mut context = SearchContext::new(limits);
+            let score = context
+                .alpha_beta(&mut position, 6, 1, -50, 50, SearchNodeState::cut())
+                .expect("search must complete");
+            second.push((score, context.nodes));
+        }
+        assert_eq!(first, second, "T1 capture LMR must be deterministic");
     }
 
     #[test]
@@ -4363,6 +5067,10 @@ mod tests {
         let base = contextual_lmr_reduction(10, 12, false, false, 0);
         assert!(contextual_lmr_reduction(10, 12, false, true, -5_000) > base);
         assert!(contextual_lmr_reduction(10, 12, true, false, 5_000) < base);
+        let pv = super::contextual_lmr_reduction_with_parameters(
+            10, 12, false, false, true, 0, 150, 1, 1, 1, 4_000, 1, 1,
+        );
+        assert!(pv < base);
     }
 
     #[test]
@@ -4502,6 +5210,83 @@ mod tests {
             context.effective_deadline(context.control.hard_deadline),
             Some(hit_at + hard_budget)
         );
+    }
+
+    #[test]
+    fn time_management_candidate_preserves_completed_search_semantics() {
+        let fen = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+        let mut baseline_position = Position::from_fen(fen).expect("FEN must parse");
+        let mut candidate_position = baseline_position.clone();
+        let before = baseline_position.to_fen();
+        let baseline = super::search(&mut baseline_position, SearchLimits::new(5));
+        let candidate = super::search(
+            &mut candidate_position,
+            SearchLimits::new(5).with_heuristics(
+                SearchHeuristics::phase9_default().with_time_management_candidate(true),
+            ),
+        );
+
+        assert_eq!(candidate.score, baseline.score);
+        assert_eq!(candidate.best_move, baseline.best_move);
+        assert_eq!(baseline_position.to_fen(), before);
+        assert_eq!(candidate_position.to_fen(), before);
+        assert!(candidate.best_move.is_some());
+    }
+
+    #[test]
+    fn candidate_aspiration_saturation_reaches_exact_bounds_without_a_deadline() {
+        // The experimental window intentionally stops at the ordinary-score band. Once that
+        // clamp can no longer make progress, the root loop must switch to the exact infinite
+        // bound so mate/tablebase-like scores cannot trigger an unbounded re-search loop in
+        // fixed-depth or fixed-node modes, where there is no clock deadline to interrupt it.
+        assert_eq!(
+            super::candidate_aspiration_lower_bound(-31_000, -31_000),
+            -super::INF
+        );
+        assert_eq!(
+            super::candidate_aspiration_upper_bound(31_000, 31_000),
+            super::INF
+        );
+        assert_eq!(super::candidate_aspiration_lower_bound(-100, -200), -200);
+        assert_eq!(super::candidate_aspiration_upper_bound(100, 200), 200);
+    }
+
+    #[test]
+    #[ignore = "manual fixed-depth aspiration screening; clock strength requires paired games"]
+    fn time_management_candidate_profile_report() {
+        let fens = [
+            crate::core::STARTPOS_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/5N2/PPP2PPP/RNBQKB1R b KQkq - 2 3",
+            "2kr3r/ppp2ppp/2n1bn2/2b1p3/4P3/2NP1N2/PPP2PPP/R1B2RK1 b - - 0 9",
+        ];
+        for (name, enabled) in [("production", false), ("candidate", true)] {
+            let started = Instant::now();
+            let mut nodes = 0u64;
+            let mut checksum = 0u64;
+            for fen in fens {
+                let mut position = Position::from_fen(fen).expect("profile FEN must parse");
+                let result = super::search(
+                    &mut position,
+                    SearchLimits::new(8).with_heuristics(
+                        SearchHeuristics::phase9_default().with_time_management_candidate(enabled),
+                    ),
+                );
+                nodes = nodes.saturating_add(result.nodes);
+                checksum = checksum.rotate_left(9)
+                    ^ result.nodes
+                    ^ (result.score.0 as i64 as u64)
+                    ^ result.best_move.map_or(0, |mv| u64::from(mv.raw()));
+                println!(
+                    "time_policy {name}: fen {fen} best {:?} score {} nodes {}",
+                    result.best_move, result.score.0, result.nodes
+                );
+            }
+            println!(
+                "time_policy {name}: nodes {nodes} checksum {checksum:016x} time_ms {}",
+                started.elapsed().as_millis()
+            );
+        }
     }
 
     #[test]

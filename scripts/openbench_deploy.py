@@ -285,7 +285,14 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "review and retain the opening-book source and license record",
         "supply worker credentials at runtime without committing them",
     ]
-    return {"ready": not blockers, "blockers": blockers, "warnings": warnings, "facts": facts, "external_remaining": external}
+    return {
+        "schema": "volkrix-openbench-deployment-audit-v1",
+        "ready": not blockers,
+        "blockers": blockers,
+        "warnings": warnings,
+        "facts": facts,
+        "external_remaining": external,
+    }
 
 
 def copy_instance(source: pathlib.Path, output: pathlib.Path) -> None:
@@ -346,6 +353,44 @@ WATCHER_PATCHES = {
     ),
 }
 
+CLIENT_PROCESS_PATCHES = {
+    pathlib.Path("Client/utils.py"): (
+        "import platform\nimport requests\n",
+        "import platform\nimport psutil\nimport requests\n",
+        "def kill_process_by_name(process_name):\n\n"
+        "    process_name = os.path.basename(process_name)\n\n"
+        "    if IS_LINUX:\n"
+        "        subprocess.run(['pkill', '-KILL', '-f', process_name])\n\n"
+        "    if IS_WINDOWS:\n"
+        "        subprocess.run(['taskkill', '/f', '/im', process_name])\n",
+        "def kill_process_by_name(process_name):\n\n"
+        "    # A host may run multiple OpenBench clients with identical engine\n"
+        "    # names. Global pkill/taskkill would terminate sibling workers.\n"
+        "    target_name = os.path.normcase(os.path.basename(process_name))\n"
+        "    try:\n"
+        "        descendants = psutil.Process().children(recursive=True)\n"
+        "    except psutil.Error:\n"
+        "        descendants = []\n\n"
+        "    victims = {}\n"
+        "    for process in descendants:\n"
+        "        try:\n"
+        "            command = process.cmdline()\n"
+        "            candidate = command[0] if command else process.name()\n"
+        "            if os.path.normcase(os.path.basename(candidate)) != target_name:\n"
+        "                continue\n"
+        "            for child in process.children(recursive=True):\n"
+        "                victims[child.pid] = child\n"
+        "            victims[process.pid] = process\n"
+        "        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):\n"
+        "            continue\n\n"
+        "    for process in reversed(list(victims.values())):\n"
+        "        try:\n"
+        "            process.kill()\n"
+        "        except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):\n"
+        "            pass\n",
+    ),
+}
+
 
 def validate_django_timezone_compatibility(instance: pathlib.Path) -> None:
     for relative in TIMEZONE_FILES:
@@ -364,6 +409,17 @@ def validate_watcher_compatibility(instance: pathlib.Path) -> None:
             if contents.count(obsolete) != 1:
                 raise DeployError(
                     f"expected exactly one audited watcher compatibility site in {relative}; "
+                    "re-audit the pinned OpenBench revision"
+                )
+
+
+def validate_client_process_compatibility(instance: pathlib.Path) -> None:
+    for relative, patches in CLIENT_PROCESS_PATCHES.items():
+        contents = (instance / relative).read_text(encoding="utf-8")
+        for obsolete in patches[::2]:
+            if contents.count(obsolete) != 1:
+                raise DeployError(
+                    f"expected exactly one audited process-cleanup site in {relative}; "
                     "re-audit the pinned OpenBench revision"
                 )
 
@@ -393,6 +449,18 @@ def harden_watcher_compatibility(instance: pathlib.Path) -> list[pathlib.Path]:
             contents = contents.replace(obsolete, replacement)
         path.write_text(contents, encoding="utf-8")
     return list(WATCHER_PATCHES)
+
+
+def harden_client_process_compatibility(instance: pathlib.Path) -> list[pathlib.Path]:
+    """Restrict worker cleanup to descendants of the current client process."""
+    validate_client_process_compatibility(instance)
+    for relative, patches in CLIENT_PROCESS_PATCHES.items():
+        path = instance / relative
+        contents = path.read_text(encoding="utf-8")
+        for obsolete, replacement in zip(patches[::2], patches[1::2]):
+            contents = contents.replace(obsolete, replacement)
+        path.write_text(contents, encoding="utf-8")
+    return list(CLIENT_PROCESS_PATCHES)
 
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
@@ -432,6 +500,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
             )
     validate_django_timezone_compatibility(source)
     validate_watcher_compatibility(source)
+    validate_client_process_compatibility(source)
 
     source_book_config = source / "Books" / f"{args.book}.json"
     if not source_book_config.is_file():
@@ -441,6 +510,7 @@ def prepare(args: argparse.Namespace) -> dict[str, Any]:
     harden_requirements(output / "requirements.txt", lock)
     compatibility_files = harden_django_timezone_compatibility(output)
     compatibility_files.extend(harden_watcher_compatibility(output))
+    compatibility_files.extend(harden_client_process_compatibility(output))
     config_path = output / "Config" / "config.json"
     config = strict_json(config_path)
     config.update(
