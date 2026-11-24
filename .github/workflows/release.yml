@@ -4,9 +4,12 @@ on:
   release:
     types:
       - published
+  push:
+    branches:
+      - codex/full-revamp
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -33,6 +36,8 @@ jobs:
             rustflags: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,6 +59,7 @@ jobs:
           mkdir -p "$bundle_dir"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" "$bundle_dir/${{ matrix.binary }}"
           cp README.md THIRD_PARTY_NOTICES.md LICENSE-MIT LICENSE-APACHE "$bundle_dir/"
+          cp docs/ccrl-blitz.md "$bundle_dir/"
           mkdir -p "$bundle_dir/scripts"
           cp scripts/fetch-stockfish18-net.sh "$bundle_dir/scripts/"
           chmod +x "$bundle_dir/scripts/fetch-stockfish18-net.sh"
@@ -63,6 +69,21 @@ jobs:
           scripts/fetch-stockfish18-net.sh \
             "$bundle_dir/nn-c288c895ea92.nnue"
           test -s "$bundle_dir/nn-c288c895ea92.nnue"
+          {
+            printf 'Source commit %s\nTarget %s\n' "$GITHUB_SHA" "${{ matrix.target }}"
+            rustc -Vv
+          } > "$bundle_dir/build-info.txt"
+
+      - name: Verify default network discovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset VOLKRIX_EVAL_FILE
+          bundle="volkrix-${{ matrix.target }}"
+          printf 'uci\nisready\nquit\n' | "$bundle/${{ matrix.binary }}" |
+            tee "$bundle/network-discovery.log"
+          grep -q '^option name EvalFile type string default .*nn-c288c895ea92\.nnue' "$bundle/network-discovery.log"
+          grep -q '^readyok' "$bundle/network-discovery.log"
 
       - name: Smoke-test packaged binary and network
         run: >-
@@ -70,6 +91,70 @@ jobs:
           --engine "volkrix-${{ matrix.target }}/${{ matrix.binary }}"
           --evalfile "volkrix-${{ matrix.target }}/nn-c288c895ea92.nnue"
           --transcript "volkrix-${{ matrix.target }}/uci-smoke.log"
+
+      - name: Smoke-test four-thread search
+        run: >-
+          python scripts/uci_smoke.py
+          --engine "volkrix-${{ matrix.target }}/${{ matrix.binary }}"
+          --evalfile "volkrix-${{ matrix.target }}/nn-c288c895ea92.nnue"
+          --threads 4
+          --transcript "volkrix-${{ matrix.target }}/uci-smoke-threads4.log"
+
+      - name: Check full-network accumulator parity
+        if: runner.os == 'Linux' || runner.os == 'Windows'
+        shell: bash
+        run: |
+          network_path="$PWD/volkrix-${{ matrix.target }}/nn-c288c895ea92.nnue"
+          test -s "$network_path"
+          if command -v cygpath >/dev/null 2>&1; then
+            network_path="$(cygpath -m "$network_path")"
+          fi
+          export VOLKRIX_SFNNUE_TEST_NET="$network_path"
+          cargo test --locked --release --lib stockfish_nnue::tests -- --test-threads=1
+          if [[ "${{ runner.os }}" == Linux && "${{ github.event_name }}" == push ]]; then
+            set -o pipefail
+            cargo test --locked --release --lib stockfish_sfnnv10_refresh_profile_report \
+              -- --ignored --nocapture | tee "volkrix-${{ matrix.target }}/x86-64-nnue-refresh.log"
+          fi
+
+      - name: Compare x86-64 search throughput with the previous branch tip
+        if: runner.os == 'Linux' && github.event_name == 'push'
+        shell: bash
+        env:
+          BASE_REVISION: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "$BASE_REVISION^{commit}"; then
+            echo "Previous branch tip is unavailable"
+            exit 0
+          fi
+          git worktree add --detach "$RUNNER_TEMP/volkrix-baseline" "$BASE_REVISION"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/volkrix-baseline-target" cargo build --locked --release \
+            --manifest-path "$RUNNER_TEMP/volkrix-baseline/Cargo.toml" --package volkrix --bin volkrix
+          bundle="$PWD/volkrix-${{ matrix.target }}"
+          baseline="$RUNNER_TEMP/volkrix-baseline-target/release/volkrix"
+          candidate="$bundle/volkrix"
+          network="$bundle/nn-c288c895ea92.nnue"
+          cpu_log="$bundle/x86-64-bench.log"
+          {
+            lscpu
+            rustc -Vv
+            printf 'baseline %s\ncandidate %s\n' "$BASE_REVISION" "$GITHUB_SHA"
+            for trial in 0 1 2 3 4 5 6 7; do
+              order=("$baseline" "$candidate")
+              if (( trial % 2 )); then
+                order=("$candidate" "$baseline")
+              fi
+              for engine in "${order[@]}"; do
+                label=baseline
+                if [[ "$engine" == "$candidate" ]]; then
+                  label=candidate
+                fi
+                printf '\ntrial %s %s\n' "$trial" "$label"
+                time -p "$engine" bench --depth 8 --threads 1 --hash-mb 64 --evalfile "$network"
+              done
+            done
+          } 2>&1 | tee "$cpu_log"
 
       - name: Create tarball
         if: runner.os != 'Windows'
@@ -91,9 +176,140 @@ jobs:
             shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
           fi
 
-      - name: Upload release asset
+      - name: Upload candidate package
+        uses: actions/upload-artifact@v4
+        with:
+          name: volkrix-${{ matrix.target }}
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+          if-no-files-found: error
+
+  cutoff-match:
+    name: Play CCRL cutoff opponent on Linux x86-64
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: ATheofanis/aspen-chess
+          ref: 8ed0a6d100768617983de140a4a9be9c229f74c9 # v2.3.0
+          path: target/cutoff-aspen
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: volkrix-x86_64-unknown-linux-gnu
+          path: target/cutoff
+      - name: Prepare pinned match inputs
+        shell: bash
+        working-directory: target/cutoff
+        run: |
+          set -euo pipefail
+          lscpu > host.txt
+          grep -qw avx2 host.txt
+          sha256sum -c volkrix-x86_64-unknown-linux-gnu.tar.gz.sha256
+          tar -xzf volkrix-x86_64-unknown-linux-gnu.tar.gz
+
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/Disservin/fastchess/releases/download/v1.8.2-alpha/fastchess-linux-x86-64.tar \
+            -o fastchess.tar
+          echo '1003f920bebe841acdab5e6d7871e93171a4586857b3ec91c21ef5777f26ff96  fastchess.tar' | sha256sum -c -
+          tar -xf fastchess.tar fastchess-linux-x86-64/fastchess
+
+          curl --fail --silent --show-error --location --retry 3 \
+            https://raw.githubusercontent.com/AndyGrant/openbench-books/b3dc46e5fa537c8c4cdd916fcb6bb2ec45d3f72a/8moves_v3.epd.zip \
+            -o openings.zip
+          unzip -p openings.zip 8moves_v3.epd > 8moves_v3.epd
+          echo 'acc9b34512ffd1595f0799b994c7164e6b486f858d484504fe21bb61d92bcf95  8moves_v3.epd' | sha256sum -c -
+
+          # Aspen's network is embedded from a path relative to src/nnue.
+          (
+            cd ../cutoff-aspen/src/nnue
+            g++ -std=gnu++20 -O3 -DNDEBUG -mavx2 -mpopcnt -pthread -I../.. \
+              ../*.cpp ./*.cpp -o ../../../cutoff/aspen
+          )
+          python3 - <<'PY'
+          import json
+          import random
+          from pathlib import Path
+
+          bundle = Path('volkrix-x86_64-unknown-linux-gnu').resolve()
+          network = str(bundle / 'nn-c288c895ea92.nnue')
+          book = list(dict.fromkeys(Path('8moves_v3.epd').read_bytes().splitlines()))
+          openings = random.Random(20261124).sample(book, 24)[:10]
+          Path('cutoff-openings.epd').write_bytes(b'\n'.join(openings) + b'\n')
+          config = {
+              'schema': 'volkrix-strength-lab-v1',
+              'fastchess': {'path': 'fastchess-linux-x86-64/fastchess'},
+              'openings': {'path': 'cutoff-openings.epd', 'format': 'epd'},
+              'assets': [{'name': 'sf18-c288', 'path': network}],
+              'candidate': {'name': 'Volkrix', 'path': str(bundle / 'volkrix'),
+                            'options': {'Threads': 1, 'Move Overhead': 30, 'EvalFile': network}},
+              'opponents': [{'name': 'Aspen-2.3.0', 'path': 'aspen', 'rating': 3258}],
+              'profiles': [{'name': 'cutoff-x86', 'tc': '20+0.2', 'pairs': 10,
+                            'concurrency': 2, 'options': {'Hash': 128}}],
+              'strict_warnings': False,
+              'adjudication': {'resign': None, 'draw': None},
+          }
+          Path('match.json').write_text(json.dumps(config, indent=2) + '\n', encoding='utf-8')
+          PY
+          echo '0066192aa1dc94efca7f228a12e7f21e413e9613e29160a08acc55c205fc22b4  cutoff-openings.epd' | sha256sum -c -
+
+      - name: Play and verify twenty color-paired games
+        shell: bash
+        run: |
+          set -euo pipefail
+          lab=target/cutoff/lab
+          python3 scripts/strength_lab.py prepare --config target/cutoff/match.json --output "$lab"
+          python3 scripts/strength_lab.py run --lab "$lab"
+          python3 scripts/strength_lab.py verify --lab "$lab"
+          python3 - "$lab/report.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path(sys.argv[1]).read_text())
+          print(json.dumps(report, indent=2))
+          totals = report['totals']
+          if totals['games'] != 20 or any(totals['failures'].values()):
+              raise SystemExit('The x86-64 match did not finish with 20 normal games')
+          PY
+
+      - name: Upload x86-64 match evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccrl-cutoff-linux-x86_64
+          path: |
+            target/cutoff/host.txt
+            target/cutoff/cutoff-openings.epd
+            target/cutoff/match.json
+            target/cutoff/lab/manifest.*
+            target/cutoff/lab/report.json
+            target/cutoff/lab/preflight/
+            target/cutoff/lab/jobs/
+
+  publish:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: volkrix-*
+          merge-multiple: true
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: >-
-          gh release upload "${{ github.event.release.tag_name }}"
-          "${{ matrix.archive }}" "${{ matrix.archive }}.sha256" --clobber
+          gh release upload "$RELEASE_TAG"
+          --repo "${{ github.repository }}"
+          volkrix-*.tar.gz volkrix-*.zip volkrix-*.sha256 --clobber

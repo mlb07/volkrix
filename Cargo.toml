@@ -3,7 +3,7 @@ members = [".", "tools/volkrix-nnue"]
 
 [package]
 name = "volkrix"
-version = "0.2.3"
+version = "0.2.4-rc.1"
 edition = "2024"
 authors = ["Monty Bognar"]
 license = "MIT OR Apache-2.0"

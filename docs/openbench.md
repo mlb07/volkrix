@@ -198,6 +198,14 @@ a pair-aware approximate 95% interval. If an opponent has an optional `rating`,
 the report also gives the corresponding estimated candidate rating; record the
 rating list, pool, hardware, and date because that calibration is not universal.
 
+For matches that should finish by the rules of chess, set the config's
+`adjudication.resign` and `adjudication.draw` fields to JSON `null`. Omitting
+either field selects the lab's default score-based rule for that field.
+Set `strict_warnings` to `false` for external engines that emit diagnostics
+such as a legal best move differing from the last reported principal variation.
+The default stops on FastChess warnings. Both settings log warnings and report
+illegal moves, time forfeits and other abnormal game terminations.
+
 External gauntlets calibrate Volkrix's approximate competitive level; they are
 not promotion tests because opponents, hardware efficiency, and evaluation
 networks differ. Promote an internal change only with paired same-engine SPRTs

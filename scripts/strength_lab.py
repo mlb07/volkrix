@@ -287,6 +287,9 @@ def resolve_config(config_path: pathlib.Path) -> dict[str, Any]:
     config = require_object(raw, "config")
     if config.get("schema") != SCHEMA:
         raise LabError(f"config.schema must be {SCHEMA!r}")
+    strict_warnings = config.get("strict_warnings", True)
+    if not isinstance(strict_warnings, bool):
+        raise LabError("strict_warnings must be a boolean")
     base = config_path.resolve().parent
     fastchess = resolve_asset(require_object(config.get("fastchess"), "fastchess"), "fastchess", base, True)
     candidate = resolve_engine(config.get("candidate"), "candidate", base)
@@ -366,18 +369,19 @@ def resolve_config(config_path: pathlib.Path) -> dict[str, Any]:
         profiles.append(resolved_profile)
 
     adjudication = require_object(config.get("adjudication", {}), "adjudication")
-    resign = single_line_string(
-        adjudication.get("resign", "movecount=3 score=400"),
-        "adjudication.resign",
-    )
-    draw = single_line_string(
-        adjudication.get("draw", "movenumber=40 movecount=8 score=10"),
-        "adjudication.draw",
-    )
     # Validate the FastChess field grammar before launching any UCI preflights
     # or creating a prepared-lab directory.
-    adjudication_fields(resign, "adjudication.resign")
-    adjudication_fields(draw, "adjudication.draw")
+    resolved_adjudication: dict[str, str | None] = {}
+    for name, default in (
+        ("resign", "movecount=3 score=400"),
+        ("draw", "movenumber=40 movecount=8 score=10"),
+    ):
+        value = adjudication.get(name, default)
+        if value is not None:
+            label = f"adjudication.{name}"
+            value = single_line_string(value, label)
+            adjudication_fields(value, label)
+        resolved_adjudication[name] = value
     return {
         "schema": SCHEMA,
         "fastchess": fastchess,
@@ -386,10 +390,8 @@ def resolve_config(config_path: pathlib.Path) -> dict[str, Any]:
         "opponents": opponents,
         "assets": extra_assets,
         "profiles": profiles,
-        "adjudication": {
-            "resign": resign,
-            "draw": draw,
-        },
+        "adjudication": resolved_adjudication,
+        "strict_warnings": strict_warnings,
         "preflight_timeout_seconds": positive_number(
             config.get("preflight_timeout_seconds", 30),
             "preflight_timeout_seconds",
@@ -443,18 +445,22 @@ def job_command(manifest: dict[str, Any], profile: dict[str, Any], opponent: dic
     openings = manifest["openings"]
     command = [
         manifest["fastchess"]["path"], "-recover", "-repeat", "-games", "2",
-        "-rounds", str(profile["pairs"]), "-strict", "-report", "penta=true",
+        "-rounds", str(profile["pairs"]), "-report", "penta=true",
         "-variant", "standard", "-concurrency", str(profile["concurrency"]),
         "-ratinginterval", "1", "-scoreinterval", "1", "-autosaveinterval", "2",
         "-openings", f"file={openings['path']}", f"format={openings['format']}",
         "order=sequential", f"start={openings['start']}",
     ]
+    if manifest.get("strict_warnings", True):
+        command.append("-strict")
     command += engine_arguments(manifest["candidate"], profile, "candidate")
     command += engine_arguments(opponent, profile, "opponent")
+    command += ["-each", f"tc={profile['tc']}", "proto=uci", f"timemargin={profile['time_margin_ms']}"]
+    for name in ("resign", "draw"):
+        value = manifest["adjudication"][name]
+        if value is not None:
+            command += [f"-{name}", *adjudication_fields(value, f"adjudication.{name}")]
     command += [
-        "-each", f"tc={profile['tc']}", "proto=uci", f"timemargin={profile['time_margin_ms']}",
-        "-resign", *adjudication_fields(manifest["adjudication"]["resign"], "adjudication.resign"),
-        "-draw", *adjudication_fields(manifest["adjudication"]["draw"], "adjudication.draw"),
         "-pgnout", f"file={job_dir / 'games.pgn'}", "append=false",
         "-log", f"file={job_dir / 'fastchess.log'}", "level=info", "engine=true", "append=false",
         "-config", f"outname={job_dir / 'recovery.json'}", "stats=true",

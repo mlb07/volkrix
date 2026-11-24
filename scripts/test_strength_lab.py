@@ -86,6 +86,7 @@ for command in sys.stdin:
             job, _ = lab.verify_job(output, manifest["jobs"][0])
             command = job["command"]
             self.assertIn("-repeat", command)
+            self.assertIn("-strict", command)
             self.assertIn("2", command)
             self.assertIn("order=sequential", command)
             self.assertIn("-autosaveinterval", command)
@@ -127,6 +128,23 @@ for command in sys.stdin:
             job, _ = lab.verify_job(output, manifest["jobs"][0])
             for source_path in source_paths:
                 self.assertNotIn(str(source_path), job["command"])
+
+    def test_calibration_can_disable_adjudication_and_keep_warnings_nonfatal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            config_path = self.config(root)
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["adjudication"] = {"resign": None, "draw": None}
+            config["strict_warnings"] = False
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            output = root / "lab"
+            lab.prepare(config_path, output)
+            manifest = lab.load_lab(output)
+            job, _ = lab.verify_job(output, manifest["jobs"][0])
+            self.assertNotIn("-resign", job["command"])
+            self.assertNotIn("-draw", job["command"])
+            self.assertNotIn("-strict", job["command"])
+            self.assertIn("-recover", job["command"])
 
     def test_relative_evalfile_is_frozen_as_config_absolute_not_engine_relative(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

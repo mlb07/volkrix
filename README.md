@@ -235,6 +235,9 @@ Windows x86-64. Each archive contains the executable, licenses and notices, the
 fetch helper, and the checksum-verified large Stockfish 18 network beside the
 executable. The workflow also publishes a SHA-256 sidecar for every archive.
 
+Candidate archives and the CCRL Blitz setup are described in
+[`docs/ccrl-blitz.md`](docs/ccrl-blitz.md).
+
 The network remains a separate CC0 data artifact: it is neither compiled nor
 linked into Volkrix. Syzygy files are not included; production deployments must
 provision them separately and set `SyzygyPath`.
