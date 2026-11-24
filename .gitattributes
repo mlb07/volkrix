@@ -1,0 +1,5 @@
+# The provenance audit hashes vendored files byte for byte on every platform.
+/vendor/** -text
+
+# Git Bash runs these scripts directly on Windows release runners.
+*.sh text eol=lf

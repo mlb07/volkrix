@@ -134,7 +134,10 @@ def validate_metadata(metadata: dict[str, Any]) -> list[str]:
 
 def tree_sha256(directory: pathlib.Path) -> str:
     digest = hashlib.sha256()
-    files = sorted(path for path in directory.rglob("*") if path.is_file())
+    files = sorted(
+        (path for path in directory.rglob("*") if path.is_file()),
+        key=lambda path: path.relative_to(directory).as_posix(),
+    )
     if not files:
         raise AuditFailure(f"vendored tree is empty: {directory}")
     for path in files:

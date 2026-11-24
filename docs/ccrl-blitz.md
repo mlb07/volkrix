@@ -24,8 +24,9 @@ throughout.
 
 The release workflow creates checksum-verified Windows x86-64, Linux x86-64,
 and macOS arm64 candidate archives on pushes to `codex/full-revamp`. The Linux
-candidate archive also includes the interleaved x86-64 search benchmark and
-the cached-versus-fresh NNUE profile. The same workflow runs a 20-game native
+candidate archive also includes the interleaved x86-64 search benchmark against
+the published v0.2.3 branch tip `7257bc9` and the cached-versus-fresh NNUE profile.
+The same workflow runs a 20-game native
 Linux x86-64 match against upstream Aspen 2.3.0 from the first ten local
 calibration openings at 20+0.2. The archives and Linux match evidence remain
 attached to the workflow run. Publishing a GitHub Release uploads the platform

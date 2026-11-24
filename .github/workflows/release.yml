@@ -117,17 +117,13 @@ jobs:
               -- --ignored --nocapture | tee "volkrix-${{ matrix.target }}/x86-64-nnue-refresh.log"
           fi
 
-      - name: Compare x86-64 search throughput with the previous branch tip
+      - name: Compare x86-64 search throughput with the published v0.2.3 baseline
         if: runner.os == 'Linux' && github.event_name == 'push'
         shell: bash
         env:
-          BASE_REVISION: ${{ github.event.before }}
+          BASE_REVISION: 7257bc9f2b851432fe0040926569283ba9f8fdaf
         run: |
           set -euo pipefail
-          if ! git cat-file -e "$BASE_REVISION^{commit}"; then
-            echo "Previous branch tip is unavailable"
-            exit 0
-          fi
           git worktree add --detach "$RUNNER_TEMP/volkrix-baseline" "$BASE_REVISION"
           CARGO_TARGET_DIR="$RUNNER_TEMP/volkrix-baseline-target" cargo build --locked --release \
             --manifest-path "$RUNNER_TEMP/volkrix-baseline/Cargo.toml" --package volkrix --bin volkrix
