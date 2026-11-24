@@ -192,6 +192,7 @@ pub struct Network {
 /// [`Network::update`] as moves are made. Evaluate it with
 /// [`Network::evaluate_accumulator`].
 #[derive(Clone)]
+#[cfg_attr(test, derive(PartialEq, Eq))]
 pub struct Accumulator {
     white: Vec<i16>,
     black: Vec<i16>,
@@ -199,6 +200,29 @@ pub struct Accumulator {
     psqt_black: [i32; PSQT_BUCKETS],
     piece_count: usize,
     threat_pairs: Vec<u32>,
+}
+
+/// Reuses a perspective's most recent accumulator at each exact king square.
+/// A cache belongs to one search state and its fixed network.
+pub(crate) struct RefreshCache {
+    // Keep the index off the search state's stack and fill its entries lazily.
+    entries: Box<[[Option<Box<RefreshEntry>>; 64]; 2]>,
+}
+
+impl Default for RefreshCache {
+    fn default() -> Self {
+        Self {
+            entries: Box::new(std::array::from_fn(|_| [const { None }; 64])),
+        }
+    }
+}
+
+struct RefreshEntry {
+    pieces: [u8; 64],
+    occupied: u64,
+    threats: Vec<u32>,
+    values: Vec<i16>,
+    psqt: [i32; PSQT_BUCKETS],
 }
 
 fn read_u32(reader: &mut impl Read) -> io::Result<u32> {
@@ -570,6 +594,15 @@ impl Network {
     /// Call at the root of a search; [`Network::update`] calls it internally
     /// when a king moves.
     pub fn refresh(&self, board: &impl Board, acc: &mut Accumulator) {
+        self.refresh_with_cache(board, acc, None);
+    }
+
+    pub(crate) fn refresh_with_cache(
+        &self,
+        board: &impl Board,
+        acc: &mut Accumulator,
+        mut cache: Option<&mut RefreshCache>,
+    ) {
         if self.arch == Arch::Sfnnv10 {
             let pos = threats::PosInfo::from_board(board);
             threats::threat_pairs(&pos, &mut acc.threat_pairs);
@@ -581,8 +614,15 @@ impl Network {
                 threat_pairs,
                 ..
             } = acc;
-            self.refresh_side_v10(&pos, Color::White, threat_pairs, white, psqt_white);
-            self.refresh_side_v10(&pos, Color::Black, threat_pairs, black, psqt_black);
+            self.refresh_side_v10(
+                &pos,
+                Color::White,
+                threat_pairs,
+                white,
+                psqt_white,
+                cache.as_deref_mut(),
+            );
+            self.refresh_side_v10(&pos, Color::Black, threat_pairs, black, psqt_black, cache);
             acc.piece_count = pos.occ.count_ones() as usize;
             return;
         }
@@ -592,6 +632,76 @@ impl Network {
     }
 
     fn refresh_side_v10(
+        &self,
+        pos: &threats::PosInfo,
+        color: Color,
+        pairs: &[u32],
+        acc: &mut [i16],
+        psqt: &mut [i32; PSQT_BUCKETS],
+        cache: Option<&mut RefreshCache>,
+    ) {
+        let Some(cache) = cache else {
+            self.refresh_side_v10_uncached(pos, color, pairs, acc, psqt);
+            return;
+        };
+        let king = pos.kings[color.index()];
+        let slot = &mut cache.entries[color.index()][king as usize];
+        let entry = slot.get_or_insert_with(|| {
+            Box::new(RefreshEntry {
+                pieces: [0; 64],
+                occupied: 0,
+                threats: Vec::new(),
+                values: vec![0; self.l1],
+                psqt: [0; PSQT_BUCKETS],
+            })
+        });
+
+        let changed = (0..64).fold(0u64, |mask, square| {
+            mask | (u64::from(entry.pieces[square] != pos.piece_on[square]) << square)
+        });
+        let removed = changed & entry.occupied;
+        let added = changed & pos.occ;
+        // Refresh directly when the cached position would require at least as
+        // many piece-weight operations as starting from the network biases.
+        if entry.occupied != 0 && removed.count_ones() + added.count_ones() < pos.occ.count_ones() {
+            for (mut squares, codes, add) in [
+                (removed, &entry.pieces, false),
+                (added, &pos.piece_on, true),
+            ] {
+                while squares != 0 {
+                    let square = squares.trailing_zeros() as u8;
+                    let index = make_index(
+                        self.arch,
+                        color,
+                        square,
+                        codes[square as usize] as usize,
+                        king,
+                    );
+                    self.apply_piece_row(index, &mut entry.values, &mut entry.psqt, add);
+                    squares &= squares - 1;
+                }
+            }
+            self.apply_threat_diff(
+                color,
+                king,
+                &entry.threats,
+                pairs,
+                &mut entry.values,
+                &mut entry.psqt,
+            );
+        } else {
+            self.refresh_side_v10_uncached(pos, color, pairs, &mut entry.values, &mut entry.psqt);
+        }
+
+        entry.pieces = pos.piece_on;
+        entry.occupied = pos.occ;
+        entry.threats.clear();
+        entry.threats.extend_from_slice(pairs);
+        acc.copy_from_slice(&entry.values);
+        *psqt = entry.psqt;
+    }
+
+    fn refresh_side_v10_uncached(
         &self,
         pos: &threats::PosInfo,
         color: Color,
@@ -630,6 +740,30 @@ impl Network {
             let pbase = idx as usize * PSQT_BUCKETS;
             for b in 0..PSQT_BUCKETS {
                 psqt[b] += threat_psqt[pbase + b];
+            }
+        }
+    }
+
+    fn apply_piece_row(
+        &self,
+        feature: usize,
+        acc: &mut [i16],
+        psqt: &mut [i32; PSQT_BUCKETS],
+        add: bool,
+    ) {
+        let base = feature * self.l1;
+        let row = &self.ft_weight[base..base + self.l1];
+        let pbase = feature * PSQT_BUCKETS;
+        let ft_psqt = self.ft_psqt();
+        if add {
+            crate::simd::add_i16(acc, row);
+            for b in 0..PSQT_BUCKETS {
+                psqt[b] += ft_psqt[pbase + b];
+            }
+        } else {
+            crate::simd::sub_i16(acc, row);
+            for b in 0..PSQT_BUCKETS {
+                psqt[b] -= ft_psqt[pbase + b];
             }
         }
     }
@@ -784,8 +918,19 @@ impl Network {
         parent: &Accumulator,
         child: &mut Accumulator,
     ) {
+        self.update_delta_with_cache(child_board, delta, parent, child, None);
+    }
+
+    pub(crate) fn update_delta_with_cache(
+        &self,
+        child_board: &impl Board,
+        delta: &BoardDelta,
+        parent: &Accumulator,
+        child: &mut Accumulator,
+        cache: Option<&mut RefreshCache>,
+    ) {
         if self.arch == Arch::Sfnnv10 {
-            self.update_v10_delta(child_board, delta, parent, child);
+            self.update_v10_delta(child_board, delta, parent, child, cache);
             return;
         }
 
@@ -861,7 +1006,7 @@ impl Network {
                 parent_board.king_square(Color::Black),
             ],
         };
-        self.update_v10_delta(child_board, &delta, parent, child);
+        self.update_v10_delta(child_board, &delta, parent, child, None);
     }
 
     fn update_v10_delta(
@@ -870,6 +1015,7 @@ impl Network {
         delta: &BoardDelta,
         parent: &Accumulator,
         child: &mut Accumulator,
+        mut cache: Option<&mut RefreshCache>,
     ) {
         let pos = threats::PosInfo::from_board(child_board);
         threats::threat_pairs(&pos, &mut child.threat_pairs);
@@ -887,7 +1033,14 @@ impl Network {
 
         let wk = pos.kings[0];
         if delta.parent_kings[0] != wk {
-            self.refresh_side_v10(&pos, Color::White, threat_pairs, white, psqt_white);
+            self.refresh_side_v10(
+                &pos,
+                Color::White,
+                threat_pairs,
+                white,
+                psqt_white,
+                cache.as_deref_mut(),
+            );
         } else {
             self.apply_side(
                 &parent.white,
@@ -911,7 +1064,7 @@ impl Network {
 
         let bk = pos.kings[1];
         if delta.parent_kings[1] != bk {
-            self.refresh_side_v10(&pos, Color::Black, threat_pairs, black, psqt_black);
+            self.refresh_side_v10(&pos, Color::Black, threat_pairs, black, psqt_black, cache);
         } else {
             self.apply_side(
                 &parent.black,

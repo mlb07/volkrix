@@ -8,6 +8,7 @@ use crate::nnue_rs::{
 };
 
 use crate::core::{Color, Move, Piece, PieceType, Position, Square, UndoState};
+use crate::network::RefreshCache;
 
 use super::root::MAX_PLY;
 
@@ -41,6 +42,7 @@ impl StockfishNnueService {
 pub(crate) struct StockfishNnueState {
     service: Arc<StockfishNnueService>,
     frames: RefCell<Vec<StockfishNnueFrame>>,
+    refresh_cache: RefCell<RefreshCache>,
     active: usize,
 }
 
@@ -63,15 +65,18 @@ impl StockfishNnueState {
         Self {
             service,
             frames: RefCell::new(frames),
+            refresh_cache: RefCell::default(),
             active: 0,
         }
     }
 
     pub(crate) fn reset(&mut self, position: &Position) {
         let mut frames = self.frames.borrow_mut();
-        self.service
-            .network
-            .refresh(&PositionBoard(position), &mut frames[0].accumulator);
+        self.service.network.refresh_with_cache(
+            &PositionBoard(position),
+            &mut frames[0].accumulator,
+            Some(self.refresh_cache.get_mut()),
+        );
         frames[0].delta = None;
         frames[0].computed = true;
         self.active = 1;
@@ -112,11 +117,12 @@ impl StockfishNnueState {
         let current = self.active - 1;
         let mut frames = self.frames.borrow_mut();
         if !frames[current].computed {
+            let mut refresh_cache = self.refresh_cache.borrow_mut();
             if current > 0 && frames[current - 1].computed {
                 let (parents, children) = frames.split_at_mut(current);
                 let parent = &parents[current - 1].accumulator;
                 let child = &mut children[0];
-                self.service.network.update_delta(
+                self.service.network.update_delta_with_cache(
                     &PositionBoard(position),
                     child
                         .delta
@@ -124,6 +130,7 @@ impl StockfishNnueState {
                         .expect("lazy NNUE child frame must retain its move delta"),
                     parent,
                     &mut child.accumulator,
+                    Some(&mut refresh_cache),
                 );
                 child.computed = true;
             } else if current >= 2 && frames[current - 2].computed {
@@ -139,17 +146,20 @@ impl StockfishNnueState {
                         .as_ref()
                         .expect("lazy NNUE child frame must retain its move delta"),
                 );
-                self.service.network.update_delta(
+                self.service.network.update_delta_with_cache(
                     &PositionBoard(position),
                     &delta,
                     grandparent,
                     &mut child.accumulator,
+                    Some(&mut refresh_cache),
                 );
                 child.computed = true;
             } else {
-                self.service
-                    .network
-                    .refresh(&PositionBoard(position), &mut frames[current].accumulator);
+                self.service.network.refresh_with_cache(
+                    &PositionBoard(position),
+                    &mut frames[current].accumulator,
+                    Some(&mut refresh_cache),
+                );
                 frames[current].computed = true;
             }
         }
@@ -543,6 +553,37 @@ mod tests {
     }
 
     #[test]
+    fn king_refresh_cache_matches_fresh_accumulators_across_sibling_lines() {
+        let Some(path) = test_net_path() else {
+            return;
+        };
+        let service = open_test_service(&path);
+        let mut state = StockfishNnueState::new(Arc::clone(&service));
+        for moves in [
+            ["a1a4", "a8a5", "e1g1", "e8g8", "f1e1", "f8e8"],
+            ["a1a3", "a8a6", "e1g1", "e8g8", "f1d1", "f8d8"],
+            ["h1h3", "h8h6", "e1c1", "e8c8", "d1e1", "d8e8"],
+        ] {
+            let mut position = Position::from_fen("r3k2r/2pppp2/8/8/8/8/2PPPP2/R3K2R w KQkq - 0 1")
+                .expect("test FEN must parse");
+            state.reset(&position);
+            for (ply, text) in moves.into_iter().enumerate() {
+                let mv = legal_move(&mut position, text);
+                let undo = position.make_move(mv).expect("legal move");
+                state.push_child(&position, mv, undo);
+                if ply % 2 == 1 {
+                    state.evaluate_components(&position);
+                    let fresh = service.network.accumulator(&PositionBoard(&position));
+                    assert!(
+                        state.frames.borrow()[state.active - 1].accumulator == fresh,
+                        "accumulator mismatch after {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn unevaluated_delta_chain_refreshes_only_the_requested_leaf() {
         let Some(path) = test_net_path() else {
             return;
@@ -611,6 +652,51 @@ mod tests {
 
         println!(
             "sfnnv10_runtime: load_ms {load_ms} state_init_us {state_init_us} operations 10000 elapsed_us {elapsed_us} checksum {checksum} simd {simd}"
+        );
+    }
+
+    #[test]
+    #[ignore = "manual release profile using the external SFNNv10 network"]
+    fn stockfish_sfnnv10_refresh_profile_report() {
+        let Some(path) = test_net_path() else {
+            return;
+        };
+        let service = open_test_service(&path);
+        let positions: Vec<_> = [
+            "r3k2r/2pppp2/8/8/8/8/2PPPP2/R3K2R w KQkq - 0 1",
+            "4k2r/2pppp2/8/r7/R7/8/2PPPP2/5RK1 w k - 0 4",
+            "4k2r/2pppp2/r7/8/8/R7/2PPPP2/5RK1 b k - 0 4",
+            "2kr4/2pppp2/7r/8/8/7R/2PPPP2/2KR4 w - - 0 4",
+        ]
+        .into_iter()
+        .map(|fen| Position::from_fen(fen).expect("profile FEN must parse"))
+        .collect();
+
+        let profile = |mut cache: Option<&mut RefreshCache>| {
+            let mut accumulator = service.network.empty_accumulator();
+            let mut checksum = 0i64;
+            let started = std::time::Instant::now();
+            for _ in 0..2_500 {
+                for position in &positions {
+                    service.network.refresh_with_cache(
+                        &PositionBoard(std::hint::black_box(position)),
+                        &mut accumulator,
+                        cache.as_deref_mut(),
+                    );
+                    checksum +=
+                        i64::from(service.network.evaluate_accumulator(
+                            &accumulator,
+                            nnue_color(position.side_to_move()),
+                        ));
+                }
+            }
+            (started.elapsed().as_micros(), checksum)
+        };
+        let (fresh_us, fresh_checksum) = profile(None);
+        let (cached_us, cached_checksum) = profile(Some(&mut RefreshCache::default()));
+        assert_eq!(fresh_checksum, cached_checksum);
+        println!(
+            "sfnnv10_refresh: operations 10000 fresh_us {fresh_us} cached_us {cached_us} checksum {cached_checksum}"
         );
     }
 }
