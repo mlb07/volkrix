@@ -14,7 +14,8 @@ Volkrix-specific changes are deliberately limited to independently implemented
 integration and execution features:
 
 - compact caller-supplied board deltas;
-- lazy accumulator materialization support;
+- lazy accumulator materialization, including composition of two move deltas
+  when the search skips the parent evaluation;
 - separate PSQT and positional evaluation components;
 - AArch64 NEON and ARM dot-product kernels, including a DotProd remainder
   path for the 16--32-element later network layers, with scalar parity tests

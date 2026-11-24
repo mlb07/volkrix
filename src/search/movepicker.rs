@@ -28,6 +28,73 @@ impl MoveStage {
     }
 }
 
+pub(crate) struct SearchMoves {
+    list: Option<MoveList>,
+    noisy_only: bool,
+}
+
+impl SearchMoves {
+    pub(crate) fn new(noisy_only: bool) -> Self {
+        Self {
+            list: None,
+            noisy_only,
+        }
+    }
+
+    pub(crate) fn get(&mut self, position: &mut Position) -> &MoveList {
+        self.list.get_or_insert_with(|| {
+            let mut moves = MoveList::new();
+            if self.noisy_only {
+                position.generate_legal_noisy_moves(&mut moves);
+            } else {
+                position.generate_legal_moves(&mut moves);
+            }
+            moves
+        })
+    }
+}
+
+/// Tries a validated move hint before paying to score the full list.
+pub(crate) struct DeferredMovePicker {
+    hints: MoveOrderHints,
+    first: Option<Move>,
+    remaining: Option<MovePicker>,
+}
+
+impl DeferredMovePicker {
+    pub(crate) fn new(hints: MoveOrderHints) -> Self {
+        Self {
+            hints,
+            first: hints.pv_move.or(hints.tt_move),
+            remaining: None,
+        }
+    }
+
+    pub(crate) fn next(
+        &mut self,
+        context: &SearchContext,
+        position: &mut Position,
+        legal_moves: &mut SearchMoves,
+    ) -> Option<Move> {
+        if let Some(mv) = self.first.take() {
+            return Some(mv);
+        }
+
+        self.remaining
+            .get_or_insert_with(|| {
+                let legal_moves = legal_moves.get(position);
+                let mut picker = MovePicker::new(context, position, legal_moves, self.hints);
+                if let Some(first) = self.hints.pv_move.or(self.hints.tt_move) {
+                    // Keep the normal picker's swap, which also determines the order of ties.
+                    let picked = picker.next();
+                    debug_assert_eq!(picked, Some(first));
+                }
+                picker
+            })
+            .next()
+    }
+}
+
 pub(crate) struct MovePicker {
     moves: [Move; MAX_MOVES],
     scores: [i32; MAX_MOVES],
@@ -158,7 +225,7 @@ fn classify_move(mv: Move, score: i32, hints: MoveOrderHints) -> MoveStage {
 
 #[cfg(test)]
 mod tests {
-    use super::MovePicker;
+    use super::{DeferredMovePicker, MovePicker, SearchMoves};
     use crate::{
         core::{ParsedMove, Position},
         search::{
@@ -206,6 +273,32 @@ mod tests {
         assert_eq!(picker.next(), Some(tt));
         let remaining = picker.ordered();
         assert!(remaining.contains(&quiet));
+    }
+
+    #[test]
+    fn deferred_picker_returns_the_hint_before_generating_alternatives() {
+        let mut position = Position::startpos();
+        let context = SearchContext::new(SearchLimits::new(3));
+        let mut eager_moves = crate::core::MoveList::new();
+        position.generate_legal_moves(&mut eager_moves);
+        let hints = MoveOrderHints {
+            pv_move: Some(eager_moves.get(9)),
+            tt_move: Some(eager_moves.get(5)),
+            ..MoveOrderHints::default()
+        };
+        let expected = MovePicker::new(&context, &position, &eager_moves, hints).ordered();
+        let mut deferred = DeferredMovePicker::new(hints);
+        let mut legal = SearchMoves::new(false);
+        assert_eq!(
+            deferred.next(&context, &mut position, &mut legal),
+            hints.pv_move
+        );
+        assert!(legal.list.is_none());
+        assert!(deferred.remaining.is_none());
+        for mv in expected.into_iter().skip(1) {
+            assert_eq!(deferred.next(&context, &mut position, &mut legal), Some(mv));
+        }
+        assert_eq!(deferred.next(&context, &mut position, &mut legal), None);
     }
 
     #[test]

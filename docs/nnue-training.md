@@ -57,8 +57,9 @@ to Volkrix's pinned MIT fork of `nnue-rs` 0.4.0, which validates and parses
 SFNNv10 threat nets, HalfKAv2_hm, HalfKAv2, and HalfKP. Each search thread
 pre-creates accumulator frames for the full search horizon. A move push records
 only a compact `Move` + `UndoState` delta. The accumulator is materialized on
-first evaluation, avoiding both eager inference work and the former two-board,
-64-square diff. An unevaluated chain refreshes only the requested leaf.
+first evaluation. If the parent was skipped and the grandparent has a computed
+accumulator, Volkrix combines the two move deltas and updates directly from the
+grandparent. With a longer gap, Volkrix refreshes only the requested leaf.
 
 Inference uses AVX2 on supported x86-64 systems. AArch64 uses bit-exact NEON for
 activation and accumulator kernels and the ARM dot-product instruction when the

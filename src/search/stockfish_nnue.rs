@@ -126,6 +126,26 @@ impl StockfishNnueState {
                     &mut child.accumulator,
                 );
                 child.computed = true;
+            } else if current >= 2 && frames[current - 2].computed {
+                let (ancestors, children) = frames.split_at_mut(current);
+                let grandparent = &ancestors[current - 2].accumulator;
+                let parent_delta = ancestors[current - 1]
+                    .delta
+                    .expect("lazy NNUE parent frame must retain its move delta");
+                let child = &mut children[0];
+                let delta = parent_delta.followed_by(
+                    child
+                        .delta
+                        .as_ref()
+                        .expect("lazy NNUE child frame must retain its move delta"),
+                );
+                self.service.network.update_delta(
+                    &PositionBoard(position),
+                    &delta,
+                    grandparent,
+                    &mut child.accumulator,
+                );
+                child.computed = true;
             } else {
                 self.service
                     .network
@@ -477,6 +497,48 @@ mod tests {
                 );
                 assert_eq!(state.computed_frames(), computed_before_push + 1);
             }
+        }
+    }
+
+    #[test]
+    fn two_move_delta_matches_fresh_components_with_an_unevaluated_parent() {
+        let Some(path) = test_net_path() else {
+            return;
+        };
+        let service = open_test_service(&path);
+        let cases: [(&str, &[&str]); 7] = [
+            (crate::core::STARTPOS_FEN, &["e2e4", "d7d5"]),
+            (crate::core::STARTPOS_FEN, &["g1f3", "0000", "f3g1"]),
+            ("4k3/8/8/8/3p4/8/4P3/4K3 w - - 0 1", &["e2e4", "d4e3"]),
+            ("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", &["e1g1", "e8c8"]),
+            ("7k/P7/8/8/8/8/7p/4K3 w - - 0 1", &["a7a8n", "h2h1q"]),
+            ("4k3/8/8/8/3p4/4P3/8/4K3 w - - 0 1", &["e3d4", "e8d7"]),
+            ("4k3/8/4p3/3p4/2P5/8/8/4K3 w - - 0 1", &["c4d5", "e6d5"]),
+        ];
+        for (fen, moves) in cases {
+            let mut position = Position::from_fen(fen).expect("test position must parse");
+            let mut state = StockfishNnueState::new(Arc::clone(&service));
+            state.reset(&position);
+            for &text in moves {
+                // A null move changes the side to move without adding an NNUE frame.
+                if text == "0000" {
+                    position.make_null_move().expect("null move must apply");
+                    continue;
+                }
+                let mv = legal_move(&mut position, text);
+                let undo = position.make_move(mv).expect("test move must apply");
+                state.push_child(&position, mv, undo);
+            }
+            assert_eq!(state.computed_frames(), 1);
+            let fresh = service.network.accumulator(&PositionBoard(&position));
+            assert_eq!(
+                state.evaluate_components(&position),
+                service
+                    .network
+                    .evaluate_accumulator_components(&fresh, nnue_color(position.side_to_move()),),
+                "{fen} {moves:?}",
+            );
+            assert_eq!(state.computed_frames(), 2);
         }
     }
 

@@ -82,6 +82,29 @@ impl BoardDelta {
         self.added_len += 1;
     }
 
+    /// Combine two successive single-move deltas while keeping the first
+    /// position's king squares. Each move contributes at most two entries
+    /// per list, so the combined delta fits even with two castles.
+    pub(crate) fn followed_by(mut self, next: &Self) -> Self {
+        for &(square, piece) in next.removed() {
+            if let Some(index) = self.added().iter().position(|&entry| entry == (square, piece)) {
+                self.added_len -= 1;
+                self.added[index] = self.added[self.added_len as usize];
+            } else {
+                self.remove(square, piece);
+            }
+        }
+        for &(square, piece) in next.added() {
+            if let Some(index) = self.removed().iter().position(|&entry| entry == (square, piece)) {
+                self.removed_len -= 1;
+                self.removed[index] = self.removed[self.removed_len as usize];
+            } else {
+                self.add(square, piece);
+            }
+        }
+        self
+    }
+
     fn removed(&self) -> &[(u8, Piece)] {
         &self.removed[..self.removed_len as usize]
     }
@@ -1127,6 +1150,26 @@ impl Network {
 #[cfg(test)]
 mod loader_tests {
     use super::*;
+
+    #[test]
+    fn combined_delta_keeps_only_net_piece_changes() {
+        let white = Piece::new(Color::White, PieceKind::Pawn);
+        let black = Piece::new(Color::Black, PieceKind::Pawn);
+        let mut first = BoardDelta::new([4, 60]);
+        first.remove(26, white);
+        first.remove(35, black);
+        first.add(35, white);
+
+        let mut reply = BoardDelta::new([4, 60]);
+        reply.remove(44, black);
+        reply.remove(35, white);
+        reply.add(35, black);
+
+        let combined = first.followed_by(&reply);
+        assert_eq!(combined.removed(), &[(26, white), (44, black)]);
+        assert!(combined.added().is_empty());
+        assert_eq!(combined.parent_kings, first.parent_kings);
+    }
 
     struct HalfKaFixture {
         bytes: Vec<u8>,

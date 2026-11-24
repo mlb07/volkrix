@@ -567,6 +567,51 @@ impl Position {
         }
     }
 
+    /// Validates a remembered move, including its flags, without generating the full move list.
+    pub(crate) fn is_legal_move_hint(&mut self, mv: Move) -> bool {
+        if mv.is_none() {
+            return false;
+        }
+        let from = mv.from();
+        let Some(piece) = self.piece_at(from) else {
+            return false;
+        };
+        let color = self.side_to_move;
+        if piece.color() != color {
+            return false;
+        }
+
+        let stage = if mv.is_capture() {
+            MoveGenStage::Captures
+        } else {
+            MoveGenStage::Quiets
+        };
+        let target = mv.to().bit();
+        let mut candidates = MoveList::new();
+        let piece_type = piece.piece_type();
+        match piece_type {
+            PieceType::Pawn => {
+                self.generate_pawn_moves(from, color, stage, target, &mut candidates)
+            }
+            PieceType::King if mv.is_castle() => {
+                self.generate_castling_moves(color, &mut candidates)
+            }
+            PieceType::King | PieceType::Knight => {
+                self.generate_jump_moves(from, color, piece_type, stage, target, &mut candidates);
+            }
+            PieceType::Bishop | PieceType::Rook | PieceType::Queen => {
+                self.generate_slider_moves(from, color, piece_type, stage, target, &mut candidates);
+            }
+        }
+        if !candidates.as_slice().contains(&mv) {
+            return false;
+        }
+
+        let info = self.check_info();
+        (piece_type == PieceType::King || info.checkers.count_ones() < 2)
+            && self.is_legal_fast(mv, &info)
+    }
+
     /// Independent make/unmake legality oracle for deterministic stress tooling.
     ///
     /// This deliberately remains behind the internal-testing surface: production
@@ -2382,6 +2427,41 @@ mod tests {
                 assert_eq!(direct, post_move, "{fen}: {mv}");
                 assert_eq!(snapshot(&position), before, "{fen}: {mv}");
             }
+        }
+    }
+
+    #[test]
+    fn remembered_move_validation_matches_generated_moves() {
+        for fen in [
+            crate::core::STARTPOS_FEN,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1",
+            "k7/8/8/r4pPK/8/8/8/8 w - f6 0 1",
+            "4r1k1/8/8/8/1b6/8/4R3/4K3 w - - 0 1",
+            "4r1k1/8/8/8/1b6/8/8/4K3 w - - 0 1",
+            "1r5k/P7/8/8/8/8/8/4K3 w - - 0 1",
+        ] {
+            let mut position = Position::from_fen(fen).expect("FEN must parse");
+            let before = snapshot(&position);
+            let mut legal = MoveList::new();
+            position.generate_legal_moves(&mut legal);
+            let mut pseudo_legal = MoveList::new();
+            position.generate_pseudo_legal(super::MoveGenStage::All, &mut pseudo_legal);
+            for &mv in pseudo_legal.as_slice().iter().chain(legal.as_slice()) {
+                assert_eq!(
+                    position.is_legal_move_hint(mv),
+                    legal.as_slice().contains(&mv),
+                    "{fen}: {mv}"
+                );
+                let unflagged = super::Move::new(mv.from(), mv.to());
+                assert_eq!(
+                    position.is_legal_move_hint(unflagged),
+                    legal.as_slice().contains(&unflagged),
+                    "{fen}: {unflagged}"
+                );
+            }
+            assert!(!position.is_legal_move_hint(super::Move::NONE));
+            assert_eq!(snapshot(&position), before);
         }
     }
 

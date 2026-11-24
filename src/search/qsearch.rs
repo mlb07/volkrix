@@ -1,10 +1,10 @@
-use crate::core::{Move, MoveList, PieceType, Position, see};
+use crate::core::{Move, PieceType, Position, see};
 
-use super::movepicker::MovePicker;
 use super::{
+    movepicker::{DeferredMovePicker, SearchMoves},
     root::{
         MAX_PLY, MoveOrderHints, SearchContext, is_draw, mate_distance_bounds, terminal_score,
-        tt_cutoff_score, validated_move_hint,
+        tt_cutoff_score,
     },
     tt::Bound,
 };
@@ -103,23 +103,17 @@ fn qsearch_core<const USE_NNUE: bool>(
         }
     }
 
-    let mut legal_moves = MoveList::new();
-    if in_check {
-        position.generate_legal_moves(&mut legal_moves);
-    } else {
-        position.generate_legal_noisy_moves(&mut legal_moves);
-    }
-    if legal_moves.is_empty() {
+    let mut legal_moves = SearchMoves::new(!in_check);
+    let tt_move = tt_hit.map(|hit| hit.best_move).filter(|&mv| {
+        (in_check || mv.is_capture() || mv.is_promotion()) && position.is_legal_move_hint(mv)
+    });
+    if tt_move.is_none() && legal_moves.get(position).is_empty() {
         return if in_check {
             Some(terminal_score(position, ply))
         } else {
             Some(alpha)
         };
     }
-    let tt_move = validated_move_hint(
-        &legal_moves,
-        tt_hit.and_then(|hit| (!hit.best_move.is_none()).then_some(hit.best_move)),
-    );
     let ordering_hints = MoveOrderHints {
         ply,
         quiescence_only: !in_check,
@@ -133,8 +127,8 @@ fn qsearch_core<const USE_NNUE: bool>(
     let mut searched_captures = [Move::NONE; crate::core::movelist::MAX_MOVES];
     #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
     let mut searched_capture_count = 0usize;
-    let mut move_picker = MovePicker::new(context, position, &legal_moves, ordering_hints);
-    while let Some(mv) = move_picker.next() {
+    let mut move_picker = DeferredMovePicker::new(ordering_hints);
+    while let Some(mv) = move_picker.next(context, position, &mut legal_moves) {
         if !in_check && delta_pruning_is_eligible(position, mv, stand_pat.unwrap_or(alpha), alpha) {
             continue;
         }

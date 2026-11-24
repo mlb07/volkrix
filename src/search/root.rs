@@ -11,7 +11,7 @@ use crate::core::{Color, Move, MoveList, PieceType, Position, Score, movelist::M
 use super::{
     eval,
     limits::{SearchHeuristics, SearchLimits},
-    movepicker::MovePicker,
+    movepicker::{DeferredMovePicker, MovePicker, SearchMoves},
     nnue::{NnueSearchState, NnueService},
     qsearch,
     tablebase::{self, TablebaseService},
@@ -1450,13 +1450,14 @@ impl<'a> SearchContext<'a> {
             self.debug_counters.internal_iterative_reductions += 1;
         }
 
-        let mut legal_moves = MoveList::new();
-        position.generate_legal_moves(&mut legal_moves);
-        if legal_moves.is_empty() {
+        let mut legal_moves = SearchMoves::new(false);
+        let pv_move_hint = pv_move_hint.filter(|&mv| position.is_legal_move_hint(mv));
+        let tt_move_hint =
+            tt_move_hint.filter(|&mv| pv_move_hint == Some(mv) || position.is_legal_move_hint(mv));
+        if pv_move_hint.is_none() && tt_move_hint.is_none() && legal_moves.get(position).is_empty()
+        {
             return Some(terminal_score(position, ply));
         }
-        let pv_move_hint = validated_move_hint(&legal_moves, pv_move_hint);
-        let tt_move_hint = validated_tt_move_hint(&legal_moves, tt_move_hint);
 
         // Razoring is a deliberately isolated fail-low experiment. If the static evaluation is
         // far below alpha at a shallow non-PV node, quiescence can cheaply prove that ordinary
@@ -1652,8 +1653,9 @@ impl<'a> SearchContext<'a> {
                 self.debug_counters.multi_cut_attempts.saturating_add(1);
             let mut cutoffs = 0usize;
             let mut probed = 0usize;
+            let legal_moves = legal_moves.get(position);
             let mut candidates =
-                MovePicker::new(self, position, &legal_moves, ordering_hints).ordered();
+                MovePicker::new(self, position, legal_moves, ordering_hints).ordered();
             candidates.truncate(MULTI_CUT_MOVE_LIMIT);
             candidates
                 .retain(|mv| !mv.is_capture() || mv.is_promotion() || position.see(*mv).0 >= 0);
@@ -1727,9 +1729,10 @@ impl<'a> SearchContext<'a> {
                     search_parameter!(self, probcut_base, 180),
                     search_parameter!(self, probcut_slope, 5),
                 );
+            let legal_moves = legal_moves.get(position);
             #[cfg(any(test, debug_assertions, feature = "internal-testing"))]
             let probcut_candidates = if self.heuristics.ordered_probcut {
-                MovePicker::new(self, position, &legal_moves, ordering_hints)
+                MovePicker::new(self, position, legal_moves, ordering_hints)
                     .ordered_probcut_candidates(position, PROBCUT_CANDIDATE_LIMIT)
             } else {
                 legal_moves.iter().copied().collect()
@@ -1777,8 +1780,8 @@ impl<'a> SearchContext<'a> {
             }
         }
 
-        let mut move_picker = MovePicker::new(self, position, &legal_moves, ordering_hints);
-        while let Some(mv) = move_picker.next() {
+        let mut move_picker = DeferredMovePicker::new(ordering_hints);
+        while let Some(mv) = move_picker.next(self, position, &mut legal_moves) {
             if excluded_move == Some(mv) {
                 continue;
             }
